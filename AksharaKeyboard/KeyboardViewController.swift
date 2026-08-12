@@ -1,22 +1,58 @@
 import UIKit
 
+/// Keeps the generators alive for the lifetime of the keyboard. Apple recommends
+/// preparing a generator before its event, then preparing it again after firing
+/// when another event may follow soon. A keyboard is exactly that interaction.
+private final class KeyFeedback {
+    private let impact: UIImpactFeedbackGenerator
+    private let selection: UISelectionFeedbackGenerator
+
+    init(view: UIView) {
+        if #available(iOS 18.0, *) {
+            impact = UIImpactFeedbackGenerator(style: .medium, view: view)
+            selection = UISelectionFeedbackGenerator(view: view)
+        } else {
+            impact = UIImpactFeedbackGenerator(style: .medium)
+            selection = UISelectionFeedbackGenerator()
+        }
+    }
+
+    func prepare() {
+        guard KeyboardPreferences.hapticsEnabled() else { return }
+        impact.prepare()
+        selection.prepare()
+    }
+
+    func keyPressed() {
+        guard KeyboardPreferences.hapticsEnabled() else { return }
+        impact.impactOccurred()
+        // Keep the generator ready for rapid consecutive key presses.
+        impact.prepare()
+    }
+
+    func selectionChanged() {
+        guard KeyboardPreferences.hapticsEnabled() else { return }
+        selection.selectionChanged()
+        selection.prepare()
+    }
+}
+
 /// A small UIKit key control tuned for the system keyboard's dense, tactile feel.
 private final class NativeKeyButton: UIButton {
-    // A light impact is effectively imperceptible through many iPhone cases.
-    // Medium remains brief, but is reliably tactile on physical hardware.
-    private let impact = UIImpactFeedbackGenerator(style: .medium)
     private let isUtility: Bool
     private var longPressWasHandled = false
     private let hintLabel = UILabel()
     /// Called by the controller to mirror the system keyboard's character
     /// preview without making the key itself jump under the finger.
     var highlightChanged: ((NativeKeyButton, Bool) -> Void)?
+    /// Fired at touch-down, which is when keyboard feedback needs to occur.
+    var touchDown: (() -> Void)?
 
     init(title: String?, hint: String? = nil, symbol: String? = nil, utility: Bool = false) {
         self.isUtility = utility
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        titleLabel?.font = .systemFont(ofSize: utility ? 19 : 22, weight: .regular)
+        titleLabel?.font = .systemFont(ofSize: utility ? 18 : 22, weight: utility ? .medium : .regular)
         titleLabel?.adjustsFontSizeToFitWidth = true
         titleLabel?.minimumScaleFactor = 0.7
         setTitle(title, for: .normal)
@@ -36,15 +72,17 @@ private final class NativeKeyButton: UIButton {
         if let symbol {
             setImage(UIImage(systemName: symbol), for: .normal)
             tintColor = .label
-            imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: .regular)
+            imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: utility ? .medium : .regular)
         }
         backgroundColor = UIColor { traits in
             if traits.userInterfaceStyle == .dark {
                 return utility ? UIColor(white: 0.26, alpha: 1) : UIColor(white: 0.40, alpha: 1)
             }
-            return utility ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) : .systemBackground
+            // Current iOS keyboard controls use a cooler, more distinct
+            // system-key surface than the white character keys.
+            return utility ? UIColor(red: 0.71, green: 0.73, blue: 0.77, alpha: 1) : .systemBackground
         }
-        layer.cornerRadius = 7
+        layer.cornerRadius = utility ? 8 : 7
         layer.cornerCurve = .continuous
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOpacity = 0.23
@@ -74,9 +112,7 @@ private final class NativeKeyButton: UIButton {
     }
 
     @objc private func pressBegan() {
-        guard KeyboardPreferences.hapticsEnabled() else { return }
-        impact.prepare()
-        impact.impactOccurred()
+        touchDown?()
     }
 
     func markLongPressHandled() { longPressWasHandled = true }
@@ -92,17 +128,29 @@ private final class NativeKeyButton: UIButton {
         !isUtility && currentTitle != nil && currentTitle != " "
     }
 
-    func collapseSpaceTitle() {
+    /// In Space-trackpad mode iOS keeps the key surfaces but removes their
+    /// glyphs, making the keyboard read as a single cursor-control surface.
+    func setGlyphsHidden(_ hidden: Bool, animated: Bool) {
+        let alpha: CGFloat = hidden ? 0 : 1
+        let changes = {
+            self.titleLabel?.alpha = alpha
+            self.imageView?.alpha = alpha
+            self.hintLabel.alpha = alpha
+        }
+        guard animated else { changes(); return }
+        UIView.animate(
+            withDuration: hidden ? 0.12 : 0.16,
+            delay: 0,
+            options: [.beginFromCurrentState, .curveEaseOut],
+            animations: changes
+        )
+    }
+
+    func collapseSpaceTitle(animated: Bool = true) {
         guard currentTitle != nil else { return }
         // The input-method name arrives as a centred confirmation, then
         // settles into iOS's quiet lower-right language annotation.
-        UIView.animate(
-            withDuration: 0.58,
-            delay: 0,
-            usingSpringWithDamping: 0.92,
-            initialSpringVelocity: 0.18,
-            options: [.curveEaseInOut, .beginFromCurrentState]
-        ) {
+        let changes = {
             self.setTitleColor(.secondaryLabel, for: .normal)
             self.titleLabel?.font = .systemFont(ofSize: 11, weight: .regular)
             self.titleLabel?.alpha = 0.64
@@ -112,6 +160,14 @@ private final class NativeKeyButton: UIButton {
             self.contentEdgeInsets = UIEdgeInsets(top: 0, left: 8, bottom: 7, right: 10)
             self.layoutIfNeeded()
         }
+        guard animated else { changes(); return }
+        UIView.animate(
+            withDuration: 0.58,
+            delay: 0,
+            usingSpringWithDamping: 0.92,
+            initialSpringVelocity: 0.18,
+            options: [.curveEaseInOut, .beginFromCurrentState]
+        , animations: changes)
     }
 }
 
@@ -207,6 +263,49 @@ private enum EmojiCatalog {
     static func recent() -> [String] {
         UserDefaults.standard.stringArray(forKey: recentKey) ?? ["😀", "😂", "🥹", "❤️", "👍", "🙏", "🔥", "🎉"]
     }
+
+    /// Official Unicode CLDR annotations provide the names and keywords used
+    /// to power character pickers. The compact index is generated at build
+    /// time and bundled with the extension, so search remains private and
+    /// works without Full Access or a network connection.
+    private static let searchIndex: [String: [String]] = {
+        guard let url = Bundle.main.url(forResource: "EmojiSearchIndex", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let index = try? JSONDecoder().decode([String: [String]].self, from: data) else {
+            return [:]
+        }
+        return index
+    }()
+
+    static func search(_ query: String) -> [String] {
+        let tokens = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased(with: .current)
+            .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
+            .map(String.init)
+        guard !tokens.isEmpty else { return ["😐", "😀", "😃", "😁", "😄", "😆", "🥹", "😅"] }
+        let matches = searchIndex.compactMap { emoji, terms -> (String, Int)? in
+            let normalizedTerms = terms.flatMap { term in
+                term.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                    .lowercased(with: .current)
+                    .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                    .filter { !$0.isEmpty }
+            }
+            guard tokens.allSatisfy({ token in
+                // Prefix matching makes natural variants work: "prayer"
+                // finds CLDR's "pray", while exact terms rank above prefixes.
+                normalizedTerms.contains {
+                    $0.hasPrefix(token) || ($0.count >= 3 && token.hasPrefix($0))
+                }
+            }) else { return nil }
+            let score = tokens.reduce(0) { partial, token in
+                partial + (normalizedTerms.contains(token) ? 2 : 1)
+            }
+            return (emoji, score)
+        }
+        return matches.sorted { lhs, rhs in
+            lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1
+        }.prefix(8).map(\.0)
+    }
 }
 
 /// POC corpus seed from laknath/Sinhala-Dictionary, used with the author's
@@ -261,6 +360,11 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
 
         searchField.placeholder = "Search Emoji"
         searchField.font = .systemFont(ofSize: 18)
+        // This picker deliberately manages its own input instead of invoking
+        // iOS's keyboard. Set the color explicitly so programmatic updates
+        // remain legible in both appearances.
+        searchField.textColor = .label
+        searchField.tintColor = .systemBlue
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = self
         addSubview(searchField)
@@ -291,14 +395,23 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         categoryStrip.distribution = .fillEqually
         categoryBar.addArrangedSubview(categoryStrip)
         for item in EmojiCategory.allCases {
+            let slot = UIView()
+            categoryStrip.addArrangedSubview(slot)
             let button = UIButton(type: .system)
+            button.translatesAutoresizingMaskIntoConstraints = false
             button.setImage(UIImage(systemName: item.symbolName), for: .normal)
             button.tintColor = .secondaryLabel
             button.setPreferredSymbolConfiguration(.init(pointSize: 19, weight: .regular), forImageIn: .normal)
             button.tag = EmojiCategory.allCases.firstIndex(of: item) ?? 0
             button.addTarget(self, action: #selector(selectCategory(_:)), for: .touchUpInside)
             categoryButtons[item] = button
-            categoryStrip.addArrangedSubview(button)
+            slot.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
+                button.centerYAnchor.constraint(equalTo: slot.centerYAnchor),
+                button.widthAnchor.constraint(equalToConstant: 30),
+                button.heightAnchor.constraint(equalToConstant: 30)
+            ])
         }
         let delete = UIButton(type: .system)
         delete.setImage(UIImage(systemName: "delete.left"), for: .normal)
@@ -341,7 +454,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         searchKeyboard.translatesAutoresizingMaskIntoConstraints = false
         searchKeyboard.isHidden = true
         addSubview(searchKeyboard)
-        for (rowIndex, row) in [["q","w","e","r","t","y","u","i","o","p"], ["a","s","d","f","g","h","j","k","l"], ["⇧","z","x","c","v","b","n","m","⌫"], ["123","☺︎","space","Search"]].enumerated() {
+        for (rowIndex, row) in [["q","w","e","r","t","y","u","i","o","p"], ["a","s","d","f","g","h","j","k","l"], ["⇧","z","x","c","v","b","n","m","⌫"], ["123","emoji","space","Search"]].enumerated() {
             let stack = UIStackView()
             stack.axis = .horizontal
             stack.spacing = 6
@@ -353,10 +466,13 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             var letterButtons: [UIButton] = []
             for key in row {
                 let button = UIButton(type: .system)
-                button.setTitle(key == "space" ? nil : key, for: .normal)
+                button.setTitle(["space", "emoji", "Search"].contains(key) ? nil : key, for: .normal)
                 button.setTitleColor(key == "Search" ? .white : .label, for: .normal)
                 button.titleLabel?.font = .systemFont(ofSize: 20)
-                if key == "☺︎" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal); button.tintColor = .label }
+                // `face.smiling` is the native-style, open-mouth emoji key.
+                // Never give this button a title as well: UIKit otherwise
+                // renders the legacy text glyph beside the SF Symbol.
+                if key == "emoji" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal); button.tintColor = .label }
                 if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal); button.tintColor = .white }
                 button.backgroundColor = key == "Search" ? .systemBlue : (key == "⇧" || key == "⌫" || key == "123" ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) : .systemBackground)
                 button.layer.cornerRadius = 7
@@ -371,7 +487,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
                 if rowIndex == 2, key == "⇧" || key == "⌫" { button.widthAnchor.constraint(equalToConstant: 42).isActive = true }
                 if rowIndex == 3 {
                     switch key {
-                    case "123", "☺︎": button.widthAnchor.constraint(equalToConstant: 42).isActive = true
+                    case "123", "emoji": button.widthAnchor.constraint(equalToConstant: 42).isActive = true
                     case "Search": button.widthAnchor.constraint(equalToConstant: 92).isActive = true
                     default: break
                     }
@@ -399,8 +515,10 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             emojiSuggestionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             emojiSuggestionRow.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 4),
             emojiSuggestionRow.heightAnchor.constraint(equalToConstant: 38),
-            searchKeyboard.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            searchKeyboard.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            // Native search layouts leave a slightly wider outer gutter than
+            // the main custom keyboard, keeping letter keys compact.
+            searchKeyboard.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 15),
+            searchKeyboard.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -15),
             searchKeyboard.topAnchor.constraint(equalTo: emojiSuggestionRow.bottomAnchor, constant: 5),
             searchKeyboard.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
         ])
@@ -431,7 +549,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         case "123": searchLayer = .numbers; refreshSearchKeys(); return
         case "#+=": searchLayer = .symbols; refreshSearchKeys(); return
         case "ABC": searchLayer = .letters; refreshSearchKeys(); return
-        case "☺︎": endEmojiSearch(); return
+        case "emoji": endEmojiSearch(); return
         case "Search":
             endEmojiSearch(); return
         default:
@@ -443,17 +561,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     }
 
     private func updateEmojiSearchResults() {
-        let catalog: [(String, String)] = [
-            ("😀", "grinning happy smile"), ("😃", "smile happy"), ("😄", "smile happy"),
-            ("😂", "laugh tears"), ("🥹", "smile tears"), ("😍", "heart eyes love"),
-            ("😘", "kiss love"), ("😭", "cry sad tears"), ("❤️", "heart love"),
-            ("👍", "thumbs up like"), ("👎", "thumbs down"), ("🙏", "pray thanks"),
-            ("🎉", "party celebration"), ("🔥", "fire"), ("✅", "check done"), ("🚗", "car travel")
-        ]
-        let query = searchQuery.lowercased().trimmingCharacters(in: .whitespaces)
-        let matches = query.isEmpty
-            ? ["😐", "😀", "😃", "😁", "😄", "😆", "🥹", "😅"]
-            : catalog.filter { $0.1.contains(query) }.map { $0.0 }
+        let matches = EmojiCatalog.search(searchQuery)
         for (index, button) in emojiSuggestionButtons.enumerated() {
             button.setTitle(index < matches.count ? matches[index] : nil, for: .normal)
             button.isEnabled = index < matches.count
@@ -477,20 +585,20 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         switch searchLayer {
         case .letters:
             let letter: (String) -> String = { self.searchShift ? $0.uppercased() : $0 }
-            rows = [["q","w","e","r","t","y","u","i","o","p"].map(letter), ["a","s","d","f","g","h","j","k","l"].map(letter), ["⇧","z","x","c","v","b","n","m","⌫"].map { $0.count == 1 ? letter($0) : $0 }, ["123","☺︎","space","Search"]]
+            rows = [["q","w","e","r","t","y","u","i","o","p"].map(letter), ["a","s","d","f","g","h","j","k","l"].map(letter), ["⇧","z","x","c","v","b","n","m","⌫"].map { $0.count == 1 ? letter($0) : $0 }, ["123","emoji","space","Search"]]
         case .numbers:
-            rows = [["1","2","3","4","5","6","7","8","9","0"], ["-","/",":",";","(",")","$","&","@"], ["#+=",".",",","?","!","'","(",")","⌫"], ["ABC","☺︎","space","Search"]]
+            rows = [["1","2","3","4","5","6","7","8","9","0"], ["-","/",":",";","(",")","$","&","@"], ["#+=",".",",","?","!","'","(",")","⌫"], ["ABC","emoji","space","Search"]]
         case .symbols:
-            rows = [["[","]","{","}","#","%","^","*","+","="], ["_","\\","|","~","<",">","€","£","¥"], ["123",".",",","?","!","'","(",")","⌫"], ["ABC","☺︎","space","Search"]]
+            rows = [["[","]","{","}","#","%","^","*","+","="], ["_","\\","|","~","<",">","€","£","¥"], ["123",".",",","?","!","'","(",")","⌫"], ["ABC","emoji","space","Search"]]
         }
         let keys = rows.flatMap { $0 }
         for (button, key) in zip(searchButtons, keys) {
             button.accessibilityIdentifier = key
             button.setImage(nil, for: .normal)
-            button.setTitle(key == "space" ? nil : key, for: .normal)
+            button.setTitle(["space", "emoji", "Search"].contains(key) ? nil : key, for: .normal)
             button.setTitleColor(key == "Search" ? .white : .label, for: .normal)
             button.tintColor = key == "Search" ? .white : .label
-            if key == "☺︎" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "face.smiling"), for: .normal) }
+            if key == "emoji" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal) }
             if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal) }
             button.backgroundColor = key == "Search" ? .systemBlue : (["⇧", "⌫", "123", "ABC", "#+="].contains(key) ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) : .systemBackground)
         }
@@ -502,7 +610,8 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             let selected = item == category
             button.alpha = selected ? 1 : 0.48
             button.tintColor = selected ? .label : .secondaryLabel
-            button.layer.cornerRadius = 16
+            button.layer.cornerRadius = 15
+            button.layer.cornerCurve = .continuous
             button.backgroundColor = selected ? UIColor { traits in
                 traits.userInterfaceStyle == .dark ? UIColor(white: 0.34, alpha: 1) : UIColor(red: 0.76, green: 0.77, blue: 0.80, alpha: 1)
             } : .clear
@@ -541,6 +650,11 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
 /// The system keyboard represents a zero-width joiner with two dotted
 /// circles bridged by an arch. It is a key label, not text that gets inserted.
 private func joinerKeyImage() -> UIImage {
+    JoinerKeyImage.image
+}
+
+private enum JoinerKeyImage {
+    static let image: UIImage = {
     let size = CGSize(width: 34, height: 25)
     let renderer = UIGraphicsImageRenderer(size: size)
     return renderer.image { context in
@@ -563,6 +677,7 @@ private func joinerKeyImage() -> UIImage {
         }
         graphics.setLineDash(phase: 0, lengths: [])
     }.withRenderingMode(.alwaysTemplate)
+    }()
 }
 
 /// A compact rendition of the iOS character-preview balloon. Drawing it in a
@@ -754,10 +869,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var deleteRepeater: Timer?
     private var keyPreview: KeyPreviewView?
     private var alternatePicker: AlternateCharacterPickerView?
-    private let alternateSelectionFeedback = UISelectionFeedbackGenerator()
+    private var keyFeedback: KeyFeedback?
+    // The language-label transition is an input-session introduction, not a
+    // key-layer transition. Rebuilding for Shift or 123 must keep it quiet.
+    private var shouldAnimateSpaceLabel = true
     private var spaceTrackpadStartX: CGFloat = 0
     private var spaceTrackpadOffset = 0
-    private let cursorSelectionFeedback = UISelectionFeedbackGenerator()
 
     private var standardKeyboardHeight: CGFloat {
         KeyboardPreferences.suggestionsEnabled() ? 251 : 216
@@ -781,6 +898,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyboardChrome.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         mode = KeyboardPreferences.selectedMode()
         configureLayout()
+        keyFeedback = KeyFeedback(view: view)
+        keyFeedback?.prepare()
         rebuildKeys()
     }
 
@@ -791,6 +910,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             commitActiveComposition()
             mode = selectedMode
         }
+        shouldAnimateSpaceLabel = true
+        keyFeedback?.prepare()
         rebuildKeys()
     }
 
@@ -955,9 +1076,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 default: break
                 }
             } else if index == 2 && keyName == "shift" {
-                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 42 : 31).isActive = true
+                // The phonetic layout has seven letter keys here. Giving its
+                // system controls the remaining width makes those letters the
+                // same width as the ten keys above, just like iOS.
+                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 51 : 31).isActive = true
             } else if index == 2 && keyName == "delete" {
-                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 42 : 31).isActive = true
+                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 51 : 31).isActive = true
             } else if index == 2 {
                 letterButtons.append(button)
             }
@@ -969,11 +1093,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func makeKey(_ key: String) -> NativeKeyButton {
         let utility = ["shift", "delete", "123", "ABC", "#+=", "globe"].contains(key)
         let button = NativeKeyButton(title: title(for: key), hint: hint(for: key), symbol: symbol(for: key), utility: utility)
+        button.touchDown = { [weak self] in self?.keyFeedback?.keyPressed() }
         if key == "space" {
             button.titleLabel?.font = .systemFont(ofSize: 13, weight: .regular)
             button.titleLabel?.minimumScaleFactor = 0.8
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) { [weak button] in
-                button?.collapseSpaceTitle()
+            if shouldAnimateSpaceLabel {
+                shouldAnimateSpaceLabel = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) { [weak button] in
+                    button?.collapseSpaceTitle()
+                }
+            } else {
+                // Layer rebuilds replace the button. Apply the settled state
+                // directly so Shift/123/#+= never replay the introduction.
+                button.collapseSpaceTitle(animated: false)
             }
         }
         if key == "rakaranshaya", shift {
@@ -990,10 +1122,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self?.hideKeyPreview()
             }
         }
+        let triggerEvent: UIControl.Event = shouldCommitOnTouchDown(key) ? .touchDown : .touchUpInside
         button.addAction(UIAction { [weak self, weak button] _ in
             guard button?.consumeLongPressHandled() != true else { return }
             self?.press(key)
-        }, for: .touchUpInside)
+        }, for: triggerEvent)
         if key == "delete" {
             button.addTarget(self, action: #selector(startDeleteRepeat), for: .touchDown)
             button.addTarget(self, action: #selector(stopDeleteRepeat), for: [.touchUpInside, .touchUpOutside, .touchCancel])
@@ -1014,6 +1147,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         return button
     }
 
+    /// The system keyboard visibly commits normal taps as the finger lands.
+    /// Keep Space and alternate-character keys on touch-up: a held Space
+    /// enters cursor control, and these keys must not insert their base value
+    /// before a long-press alternate is chosen.
+    private func shouldCommitOnTouchDown(_ key: String) -> Bool {
+        guard key != "space" else { return false }
+        return !(layer == .letters && mode == .sls && sanyakaya(for: key) != nil)
+    }
+
     /// Mirrors the system keyboard's long-press Space behavior. UIKit gives a
     /// keyboard extension cursor movement through UITextDocumentProxy rather
     /// than exposing the host text view directly.
@@ -1026,7 +1168,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             setTrackpadAppearance(active: true)
             spaceTrackpadStartX = recognizer.location(in: view).x
             spaceTrackpadOffset = 0
-            cursorSelectionFeedback.prepare()
+            keyFeedback?.prepare()
         case .changed:
             let movement = recognizer.location(in: view).x - spaceTrackpadStartX
             // Ten points per character feels controlled on compact keyboards
@@ -1036,8 +1178,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             guard delta != 0 else { return }
             textDocumentProxy.adjustTextPosition(byCharacterOffset: delta)
             spaceTrackpadOffset = targetOffset
-            cursorSelectionFeedback.selectionChanged()
-            cursorSelectionFeedback.prepare()
+            keyFeedback?.selectionChanged()
         case .ended, .cancelled, .failed:
             spaceTrackpadOffset = 0
             setTrackpadAppearance(active: false)
@@ -1047,9 +1188,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func setTrackpadAppearance(active: Bool, animated: Bool = true) {
-        let changes = { self.trackpadSurface.alpha = active ? 1 : 0 }
-        guard animated else { changes(); return }
-        UIView.animate(withDuration: active ? 0.12 : 0.09, delay: 0, options: [.beginFromCurrentState, .curveEaseOut], animations: changes)
+        setKeyGlyphsHidden(active, animated: animated)
+        // Native Space-trackpad mode does not dim the entire keyboard. Keep
+        // this legacy overlay hidden; only the individual key glyphs fade.
+        trackpadSurface.alpha = 0
+    }
+
+    private func setKeyGlyphsHidden(_ hidden: Bool, animated: Bool) {
+        keyboardStack.arrangedSubviews.forEach { row in
+            row.subviews.compactMap { $0 as? NativeKeyButton }.forEach {
+                $0.setGlyphsHidden(hidden, animated: animated)
+            }
+        }
     }
 
     private func showKeyPreview(for button: NativeKeyButton) {
@@ -1316,8 +1466,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             button.markLongPressHandled()
             hideKeyPreview()
             showAlternatePicker(for: button, alternate: String(character))
-            alternateSelectionFeedback.selectionChanged()
-            alternateSelectionFeedback.prepare()
+            keyFeedback?.selectionChanged()
         case .changed:
             // Each supported sangaka key currently has one alternate. Keep it
             // selected throughout the drag, as iOS does for a single-choice

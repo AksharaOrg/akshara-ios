@@ -16,6 +16,7 @@
 		A10000000000000000000007 /* KeyboardPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* KeyboardPreferences.swift */; };
 		A10000000000000000000008 /* KeyboardPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* KeyboardPreferences.swift */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* Assets.xcassets */; };
+		A10000000000000000000010 /* EmojiSearchIndex.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* EmojiSearchIndex.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +56,7 @@
 		A20000000000000000000010 /* Akshara.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Akshara.entitlements; sourceTree = "<group>"; };
 		A20000000000000000000011 /* AksharaKeyboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AksharaKeyboard.entitlements; sourceTree = "<group>"; };
 		A20000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A20000000000000000000013 /* EmojiSearchIndex.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = EmojiSearchIndex.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -101,6 +103,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000004 /* KeyboardViewController.swift */,
+				A20000000000000000000013 /* EmojiSearchIndex.json */,
 				A20000000000000000000011 /* AksharaKeyboard.entitlements */,
 				A20000000000000000000008 /* Info.plist */,
 			);
@@ -153,6 +156,7 @@
 			buildPhases = (
 				A30000000000000000000003 /* Frameworks */,
 				A30000000000000000000005 /* Sources */,
+				A30000000000000000000007 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -206,6 +210,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000009 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A30000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000010 /* EmojiSearchIndex.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
