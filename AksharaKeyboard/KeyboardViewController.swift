@@ -7,11 +7,12 @@ private final class NativeKeyButton: UIButton {
     private let impact = UIImpactFeedbackGenerator(style: .medium)
     private let isUtility: Bool
     private var longPressWasHandled = false
+    private let hintLabel = UILabel()
     /// Called by the controller to mirror the system keyboard's character
     /// preview without making the key itself jump under the finger.
     var highlightChanged: ((NativeKeyButton, Bool) -> Void)?
 
-    init(title: String?, symbol: String? = nil, utility: Bool = false) {
+    init(title: String?, hint: String? = nil, symbol: String? = nil, utility: Bool = false) {
         self.isUtility = utility
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -20,6 +21,18 @@ private final class NativeKeyButton: UIButton {
         titleLabel?.minimumScaleFactor = 0.7
         setTitle(title, for: .normal)
         setTitleColor(.label, for: .normal)
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.font = .systemFont(ofSize: 9, weight: .regular)
+        hintLabel.textColor = .secondaryLabel
+        hintLabel.textAlignment = .right
+        hintLabel.text = hint
+        hintLabel.isHidden = hint == nil
+        hintLabel.isUserInteractionEnabled = false
+        addSubview(hintLabel)
+        NSLayoutConstraint.activate([
+            hintLabel.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            hintLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
+        ])
         if let symbol {
             setImage(UIImage(systemName: symbol), for: .normal)
             tintColor = .label
@@ -274,6 +287,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var layer: Layer = .letters
     private var shift = false
     private var rawBuffer = ""
+    private var phoneticBuffer = ""
     private var visibleEntries: [String] = []
     private var visibleSources: [String] = []
     private enum MarkedCompositionKind { case prebase, independentVowel }
@@ -311,7 +325,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         super.viewWillAppear(animated)
         let selectedMode = KeyboardPreferences.selectedMode()
         guard selectedMode != mode else { return }
-        commitMarkedComposition()
+        commitActiveComposition()
         mode = selectedMode
         rebuildKeys()
     }
@@ -333,7 +347,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             keyboardStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -7),
             keyboardStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 7),
             keyboardStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -7),
-            view.heightAnchor.constraint(greaterThanOrEqualToConstant: 204)
+            view.heightAnchor.constraint(greaterThanOrEqualToConstant: 216)
         ])
         trackpadSurface.translatesAutoresizingMaskIntoConstraints = false
         trackpadSurface.isUserInteractionEnabled = false
@@ -350,9 +364,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             trackpadSurface.topAnchor.constraint(equalTo: keyboardStack.topAnchor),
             trackpadSurface.bottomAnchor.constraint(equalTo: keyboardStack.bottomAnchor)
         ])
-        // Four 41–42 pt rows match the compact Sinhala system layout more
-        // closely than the previous 44–45 pt rows.
-        preferredContentSize = CGSize(width: 0, height: 204)
+        preferredContentSize = CGSize(width: 0, height: 216)
     }
 
     private func rebuildKeys() {
@@ -360,8 +372,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let bottom = needsInputModeSwitchKey ? ["123", "globe", "space", "return"] : ["123", "space", "return"]
         // The native Sinhala reference uses three even 11-key rows. Preserve
         // that geometry while exposing the full direct Wijesekara layer.
+        let letterRows: [[String]] = mode == .sls
+            ? [["q","w","e","r","t","y","u","i","o","p","["], ["a","s","d","f","g","h","j","k","l",";"], ["shift","rakaranshaya","x","c","v","b","n","m",",",".","delete"]]
+            : [["q","w","e","r","t","y","u","i","o","p"], ["a","s","d","f","g","h","j","k","l"], ["shift","z","x","c","v","b","n","m","delete"]]
         let rows: [[String]] = layer == .letters
-            ? [["q","w","e","r","t","y","u","i","o","p","["], ["a","s","d","f","g","h","j","k","l",";"], ["shift","rakaranshaya","x","c","v","b","n","m",",",".","delete"], bottom]
+            ? letterRows + [bottom]
             : [["1","2","3","4","5","6","7","8","9","0"], ["-","/",":",";","(",")","$","&","@","\""], ["#+=",".",",","?","!","kundaliya","delete"], bottom.map { $0 == "123" ? "ABC" : $0 }]
         for (index, row) in rows.enumerated() { keyboardStack.addArrangedSubview(makeRow(row, index: index)) }
     }
@@ -369,23 +384,30 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func makeRow(_ keys: [String], index: Int) -> UIStackView {
         let row = UIStackView(); row.axis = .horizontal; row.spacing = 6; row.alignment = .fill
         let isBottom = index == 3
+        let isEnglishAlphabet = layer == .letters && mode != .sls
         row.distribution = (isBottom || index == 2) ? .fill : .fillEqually
-        if index == 2 { row.layoutMargins = UIEdgeInsets(top: 0, left: 2, bottom: 0, right: 2); row.isLayoutMarginsRelativeArrangement = true }
+        if isEnglishAlphabet && index == 1 {
+            row.layoutMargins = UIEdgeInsets(top: 0, left: 21, bottom: 0, right: 21)
+            row.isLayoutMarginsRelativeArrangement = true
+        } else if index == 2 {
+            row.layoutMargins = UIEdgeInsets(top: 0, left: isEnglishAlphabet ? 0 : 2, bottom: 0, right: isEnglishAlphabet ? 0 : 2)
+            row.isLayoutMarginsRelativeArrangement = true
+        }
         var letterButtons: [NativeKeyButton] = []
         for keyName in keys {
             let button = makeKey(keyName)
             row.addArrangedSubview(button)
             if isBottom {
                 switch keyName {
-                case "123", "ABC": button.widthAnchor.constraint(equalToConstant: 56).isActive = true
-                case "globe": button.widthAnchor.constraint(equalToConstant: 46).isActive = true
-                case "return": button.widthAnchor.constraint(equalToConstant: 72).isActive = true
+                case "123", "ABC": button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 42 : 56).isActive = true
+                case "globe": button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 42 : 46).isActive = true
+                case "return": button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 86 : 72).isActive = true
                 default: break
                 }
             } else if index == 2 && keyName == "shift" {
-                button.widthAnchor.constraint(equalToConstant: 31).isActive = true
+                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 42 : 31).isActive = true
             } else if index == 2 && keyName == "delete" {
-                button.widthAnchor.constraint(equalToConstant: 45).isActive = true
+                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? 42 : 45).isActive = true
             } else if index == 2 {
                 letterButtons.append(button)
             }
@@ -396,7 +418,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func makeKey(_ key: String) -> NativeKeyButton {
         let utility = ["shift", "delete", "123", "ABC", "#+=", "globe", "return"].contains(key)
-        let button = NativeKeyButton(title: title(for: key), symbol: symbol(for: key), utility: utility)
+        let button = NativeKeyButton(title: title(for: key), hint: hint(for: key), symbol: symbol(for: key), utility: utility)
         if key == "space" {
             // System keyboards keep the current input method unobtrusive in
             // the generous space key rather than treating it like a letter.
@@ -449,7 +471,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         switch recognizer.state {
         case .began:
             button.markLongPressHandled()
-            commitMarkedComposition()
+            commitActiveComposition()
             setTrackpadAppearance(active: true)
             spaceTrackpadStartX = recognizer.location(in: view).x
             spaceTrackpadOffset = 0
@@ -481,13 +503,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func showKeyPreview(for button: NativeKeyButton) {
         guard let title = button.currentTitle else { return }
+        let keyFrame = button.convert(button.bounds, to: view)
+        // A custom keyboard cannot draw above its extension boundary. The
+        // top-row balloon would be cut off, so omit it instead of rendering a
+        // malformed partial preview.
+        guard keyFrame.minY >= 47 else { return }
         let preview = keyPreview ?? KeyPreviewView()
         if preview.superview == nil {
             view.addSubview(preview)
             keyPreview = preview
             preview.alpha = 0
         }
-        let keyFrame = button.convert(button.bounds, to: view)
         let previewSize = CGSize(width: min(max(keyFrame.width + 26, 54), 64), height: keyFrame.height + 47)
         let minX = view.bounds.minX + 2
         let maxX = view.bounds.maxX - previewSize.width - 2
@@ -535,16 +561,29 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             switch mode {
             case .sls: return "අක්ෂර Wijesekara"
             case .phonetic: return "අක්ෂර Phonetic"
-            case .smartPhonetic: return "අක්ෂර Smart"
+            case .smartPhonetic: return "අක්ෂර Smart Phonetic"
             }
         }
         if ["shift", "delete", "globe", "return"].contains(key) { return nil }
         if key == "rakaranshaya" { return shift ? "ZWJ" : "්‍ර" }
         if key == "kundaliya" { return "෴" }
         if key == "yansaya" { return "්‍ය" }
-        if key == "h", shift { return "්‍ය" }
+        // Shift–H is the Wijesekara yansaya only. In phonetic layouts it
+        // remains the literal capital H, which the transliterator handles.
+        if key == "h", shift, mode == .sls { return "්‍ය" }
         guard key.count == 1, layer == .letters else { return key }
         return mode == .sls ? SinhalaEngine.slsKeyLabel(key, shifted: shift) : (shift ? key.uppercased() : key)
+    }
+
+    private func hint(for key: String) -> String? {
+        guard mode != .sls, layer == .letters, key.count == 1 else { return nil }
+        let source = shift ? key.uppercased() : key
+        let rendered = SinhalaEngine.transliterate(source, mode: mode)
+        let hint = rendered.unicodeScalars.filter {
+            (0x0D80...0x0DFF).contains($0.value) && $0.value != 0x0DCA
+        }
+        guard !hint.isEmpty else { return nil }
+        return String(String.UnicodeScalarView(hint))
     }
 
     private func press(_ key: String) {
@@ -581,6 +620,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func deleteOnce() {
         lastSpaceTimestamp = nil
+        if !phoneticBuffer.isEmpty {
+            phoneticBuffer.removeLast()
+            if phoneticBuffer.isEmpty {
+                clearPhoneticComposition()
+            } else {
+                updatePhoneticComposition()
+            }
+            return
+        }
         if var source = markedSource {
             source.removeLast()
             if source.isEmpty {
@@ -600,9 +648,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     @objc private func startDeleteRepeat() {
         deleteRepeater?.invalidate()
-        deleteRepeater = Timer.scheduledTimer(withTimeInterval: 0.42, repeats: false) { [weak self] _ in
-            self?.deleteRepeater = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in self?.deleteOnce() }
+        let initialDelay = Timer(timeInterval: 0.42, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.deleteOnce()
+            let repeater = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in self?.deleteOnce() }
+            self.deleteRepeater = repeater
+            RunLoop.main.add(repeater, forMode: .common)
         }
+        deleteRepeater = initialDelay
+        RunLoop.main.add(initialDelay, forMode: .common)
     }
 
     @objc private func stopDeleteRepeat() { deleteRepeater?.invalidate(); deleteRepeater = nil }
@@ -665,6 +719,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func commit(suffix: String) {
+        if !phoneticBuffer.isEmpty {
+            commitPhoneticComposition(suffix: suffix)
+            rebuildKeys()
+            return
+        }
         if markedSource != nil {
             commitMarkedComposition(suffix: suffix)
             rawBuffer = ""
@@ -683,6 +742,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// The provisional glyph stays visible and is replaced in place until the
     /// next unrelated key commits it.
     private func insertLive(_ source: String) {
+        if mode != .sls {
+            phoneticBuffer += source
+            updatePhoneticComposition()
+            return
+        }
         if let markedSource, let markedKind {
             switch markedKind {
             case .prebase where canExtendPrebase(markedSource, with: source):
@@ -714,6 +778,33 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         textDocumentProxy.setMarkedText(rendered, selectedRange: NSRange(location: caret, length: 0))
         markedSource = source
         markedKind = kind
+    }
+
+    private func updatePhoneticComposition() {
+        let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
+        let caret = (rendered as NSString).length
+        textDocumentProxy.setMarkedText(rendered, selectedRange: NSRange(location: caret, length: 0))
+    }
+
+    private func commitPhoneticComposition(suffix: String = "") {
+        guard !phoneticBuffer.isEmpty else { return }
+        let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
+        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        textDocumentProxy.insertText(rendered + suffix)
+        phoneticBuffer = ""
+    }
+
+    private func clearPhoneticComposition() {
+        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        textDocumentProxy.unmarkText()
+        phoneticBuffer = ""
+    }
+
+    private func commitActiveComposition() {
+        if !phoneticBuffer.isEmpty {
+            commitPhoneticComposition()
+        }
+        commitMarkedComposition()
     }
 
     private func commitMarkedComposition(suffix: String = "") {

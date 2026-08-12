@@ -12,10 +12,10 @@
 		A10000000000000000000003 /* SinhalaEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SinhalaEngine.swift */; };
 		A10000000000000000000004 /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* KeyboardViewController.swift */; };
 		A10000000000000000000005 /* SinhalaEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SinhalaEngine.swift */; };
+		A10000000000000000000006 /* AksharaKeyboard.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* AksharaKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A10000000000000000000007 /* KeyboardPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* KeyboardPreferences.swift */; };
 		A10000000000000000000008 /* KeyboardPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* KeyboardPreferences.swift */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* Assets.xcassets */; };
-		A10000000000000000000006 /* AksharaKeyboard.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* AksharaKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
