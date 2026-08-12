@@ -849,6 +849,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var shift = false
     private var rawBuffer = ""
     private var phoneticBuffer = ""
+    /// The phonetic compositor needs a short look-behind window so a later
+    /// vowel can replace a consonant's provisional virama.  Keep that window
+    /// marked, but commit older, unambiguous chunks.  Some host editors are
+    /// noticeably slower when asked to redraw an ever-growing marked range.
+    private var committedPhoneticSegments: [(source: String, rendered: String)] = []
+    private let maximumMarkedPhoneticSourceLength = 8
     private var visibleEntries: [String] = []
     private var visibleSources: [String] = []
     private enum MarkedCompositionKind { case prebase, independentVowel }
@@ -1382,9 +1388,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     @objc private func selectPrediction(_ sender: UIButton) {
         guard sender.tag < candidates.count, let candidate = candidates[sender.tag] else { return }
-        if !phoneticBuffer.isEmpty {
-            textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-            phoneticBuffer = ""
+        if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
+            clearPhoneticComposition()
         } else if markedSource != nil {
             // Independent-vowel and pre-base Wijesekara input is already a
             // marked range. Clearing it replaces that range; attempting a
@@ -1411,10 +1416,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if !phoneticBuffer.isEmpty {
             phoneticBuffer.removeLast()
             if phoneticBuffer.isEmpty {
-                clearPhoneticComposition()
+                restorePreviousPhoneticSegmentAfterDelete()
             } else {
                 updatePhoneticComposition()
             }
+            return
+        }
+        if !committedPhoneticSegments.isEmpty {
+            restorePreviousPhoneticSegmentAfterDelete()
             return
         }
         if var source = markedSource {
@@ -1506,7 +1515,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func commit(suffix: String) {
-        if !phoneticBuffer.isEmpty {
+        if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
             commitPhoneticComposition(suffix: suffix)
             updatePredictions(for: "")
             rebuildKeys()
@@ -1572,18 +1581,20 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func updatePhoneticComposition() {
+        commitStablePhoneticPrefixIfNeeded()
         let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
         let caret = (rendered as NSString).length
         textDocumentProxy.setMarkedText(rendered, selectedRange: NSRange(location: caret, length: 0))
-        updatePredictions(for: rendered)
+        updatePredictions(for: committedPhoneticSegments.map(\.rendered).joined() + rendered)
     }
 
     private func commitPhoneticComposition(suffix: String = "") {
-        guard !phoneticBuffer.isEmpty else { return }
+        guard !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty else { return }
         let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
         textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
         textDocumentProxy.insertText(rendered + suffix)
         phoneticBuffer = ""
+        committedPhoneticSegments.removeAll()
         updatePredictions(for: "")
     }
 
@@ -1591,11 +1602,63 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
         textDocumentProxy.unmarkText()
         phoneticBuffer = ""
+        for segment in committedPhoneticSegments.reversed() {
+            for _ in segment.rendered { textDocumentProxy.deleteBackward() }
+        }
+        committedPhoneticSegments.removeAll()
         updatePredictions(for: "")
     }
 
+    /// Move a prefix out of the host editor's marked range only when splitting
+    /// it produces exactly the same visible text.  This preserves the
+    /// compositor's semantics while bounding the expensive host-side redraw.
+    private func commitStablePhoneticPrefixIfNeeded() {
+        let sourceLength = phoneticBuffer.count
+        guard sourceLength > maximumMarkedPhoneticSourceLength else { return }
+
+        let fullRendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
+        let latestPrefixLength = sourceLength - maximumMarkedPhoneticSourceLength
+        for prefixLength in stride(from: latestPrefixLength, through: 1, by: -1) {
+            let split = phoneticBuffer.index(phoneticBuffer.startIndex, offsetBy: prefixLength)
+            let prefix = String(phoneticBuffer[..<split])
+            let suffix = String(phoneticBuffer[split...])
+            let renderedPrefix = SinhalaEngine.transliterate(prefix, mode: mode)
+            let renderedSuffix = SinhalaEngine.transliterate(suffix, mode: mode)
+            guard renderedPrefix + renderedSuffix == fullRendered else { continue }
+
+            // Replace the current marked range with a committed prefix and a
+            // small new marked suffix. This happens once per chunk, not per
+            // keystroke, and keeps input responsive in heavy host editors.
+            textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            textDocumentProxy.insertText(renderedPrefix)
+            committedPhoneticSegments.append((source: prefix, rendered: renderedPrefix))
+            phoneticBuffer = suffix
+            return
+        }
+    }
+
+    /// A backspace can cross a committed phonetic chunk. Re-open just that
+    /// final chunk so the deletion retains the same transliteration behavior
+    /// as it had while the whole word was marked.
+    private func restorePreviousPhoneticSegmentAfterDelete() {
+        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        guard var segment = committedPhoneticSegments.popLast() else {
+            textDocumentProxy.unmarkText()
+            updatePredictions(for: "")
+            return
+        }
+        for _ in segment.rendered { textDocumentProxy.deleteBackward() }
+        segment.source.removeLast()
+        phoneticBuffer = segment.source
+        if phoneticBuffer.isEmpty {
+            updatePredictions(for: committedPhoneticSegments.map(\.rendered).joined())
+        } else {
+            updatePhoneticComposition()
+        }
+    }
+
     private func commitActiveComposition() {
-        if !phoneticBuffer.isEmpty {
+        if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
             commitPhoneticComposition()
         }
         commitMarkedComposition()
