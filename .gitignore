@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Xcode user and workspace state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Xcode build products and archives
+build/
+DerivedData/
+*.xcarchive/
+*.ipa
+*.dSYM/
