@@ -1,8 +1,9 @@
 import SwiftUI
 
 struct OnboardingView: View {
-    @State private var source = "amma"
     @State private var mode = KeyboardPreferences.selectedMode()
+    @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
+    @State private var hapticsEnabled = KeyboardPreferences.hapticsEnabled()
 
     var body: some View {
         NavigationStack {
@@ -20,16 +21,25 @@ struct OnboardingView: View {
                     Text("This choice is used by the system keyboard the next time it appears.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
-                Section("Try the selected layout") {
-                    TextField("Roman input", text: $source)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    LabeledContent("Sinhala output", value: SinhalaEngine.transliterate(source, mode: mode))
+                Section("Keyboard Features") {
+                    Toggle("Emoji", isOn: $emojiEnabled)
+                    Toggle("Haptics", isOn: $hapticsEnabled)
+                    Toggle("Suggestions", isOn: .constant(false))
+                        .disabled(true)
+                    Text("Suggestions are temporarily disabled while the full Sinhala prediction dictionary is added.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Akshara")
             .onChange(of: mode) { newMode in
                 KeyboardPreferences.setSelectedMode(newMode)
+            }
+            .onChange(of: emojiEnabled) { newValue in
+                KeyboardPreferences.setEmojiEnabled(newValue)
+            }
+            .onChange(of: hapticsEnabled) { newValue in
+                KeyboardPreferences.setHapticsEnabled(newValue)
             }
         }
     }
