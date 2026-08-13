@@ -4,7 +4,7 @@
 <dict>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.lk.org.aksharaios.keyboard</string>
+		<string>group.lk.org.akshara.keyboard</string>
 	</array>
 </dict>
 </plist>
