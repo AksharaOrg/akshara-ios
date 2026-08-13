@@ -7,6 +7,7 @@ enum KeyboardPreferences {
     static let layoutKey = "selectedKeyboardLayout"
     static let emojiKey = "emojiPickerEnabled"
     static let hapticsKey = "keyboardHapticsEnabled"
+    static let fullAccessKey = "keyboardFullAccessConfirmed"
     static let suggestionsKey = "keyboardSuggestionsEnabled"
 
     /// The dictionary is still a small proof of concept. Keep suggestions
@@ -36,11 +37,26 @@ enum KeyboardPreferences {
     }
 
     static func hapticsEnabled() -> Bool {
-        defaults.object(forKey: hapticsKey) as? Bool ?? true
+        defaults.object(forKey: hapticsKey) as? Bool ?? false
     }
 
     static func setHapticsEnabled(_ enabled: Bool) {
         defaults.set(enabled, forKey: hapticsKey)
+    }
+
+    /// The containing app cannot query a keyboard extension's `hasFullAccess`
+    /// property itself. The extension records a successful check whenever it
+    /// becomes visible, allowing the app to enable features that need it.
+    static func fullAccessConfirmed() -> Bool {
+        defaults.object(forKey: fullAccessKey) as? Bool ?? false
+    }
+
+    static func setFullAccessConfirmed(_ confirmed: Bool) {
+        defaults.set(confirmed, forKey: fullAccessKey)
+        // The keyboard and containing app run in separate processes. Flush
+        // this small status handoff so the app can reflect a just-enabled
+        // Full Access setting as soon as it returns to the foreground.
+        defaults.synchronize()
     }
 
     static func suggestionsEnabled() -> Bool {

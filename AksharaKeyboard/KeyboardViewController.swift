@@ -9,10 +9,10 @@ private final class KeyFeedback {
 
     init(view: UIView) {
         if #available(iOS 18.0, *) {
-            impact = UIImpactFeedbackGenerator(style: .medium, view: view)
+            impact = UIImpactFeedbackGenerator(style: .light, view: view)
             selection = UISelectionFeedbackGenerator(view: view)
         } else {
-            impact = UIImpactFeedbackGenerator(style: .medium)
+            impact = UIImpactFeedbackGenerator(style: .light)
             selection = UISelectionFeedbackGenerator()
         }
     }
@@ -25,9 +25,12 @@ private final class KeyFeedback {
 
     func keyPressed() {
         guard KeyboardPreferences.hapticsEnabled() else { return }
-        impact.impactOccurred()
-        // Keep the generator ready for rapid consecutive key presses.
+        // Prepare at the moment of contact. A keyboard extension can remain
+        // alive while its haptic service is suspended between appearances.
         impact.prepare()
+        // Keep the native light waveform, with just a small reduction from
+        // its default strength so it remains perceptible without feeling busy.
+        impact.impactOccurred(intensity: 0.75)
     }
 
     func selectionChanged() {
@@ -47,6 +50,11 @@ private final class NativeKeyButton: UIButton {
     var highlightChanged: ((NativeKeyButton, Bool) -> Void)?
     /// Fired at touch-down, which is when keyboard feedback needs to occur.
     var touchDown: (() -> Void)?
+
+    private var usesIOS16KeyboardAppearance: Bool {
+        if #available(iOS 17.0, *) { return false }
+        return true
+    }
 
     init(title: String?, hint: String? = nil, symbol: String? = nil, utility: Bool = false) {
         self.isUtility = utility
@@ -78,6 +86,11 @@ private final class NativeKeyButton: UIButton {
             if traits.userInterfaceStyle == .dark {
                 return utility ? UIColor(white: 0.26, alpha: 1) : UIColor(white: 0.40, alpha: 1)
             }
+            if #unavailable(iOS 17.0) {
+                return utility
+                    ? UIColor(red: 190 / 255, green: 193 / 255, blue: 202 / 255, alpha: 1)
+                    : .white
+            }
             // Current iOS keyboard controls use a cooler, more distinct
             // system-key surface than the white character keys.
             return utility ? UIColor(red: 0.71, green: 0.73, blue: 0.77, alpha: 1) : .systemBackground
@@ -85,7 +98,7 @@ private final class NativeKeyButton: UIButton {
         layer.cornerRadius = utility ? 8 : 7
         layer.cornerCurve = .continuous
         layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.23
+        layer.shadowOpacity = usesIOS16KeyboardAppearance ? 0.18 : 0.23
         layer.shadowOffset = CGSize(width: 0, height: 1)
         layer.shadowRadius = 0
         addTarget(self, action: #selector(pressBegan), for: .touchDown)
@@ -97,7 +110,14 @@ private final class NativeKeyButton: UIButton {
         didSet {
             // System keys darken on contact; keeping their geometry fixed is
             // important for fast, consecutive taps.
-            UIView.animate(withDuration: 0.055, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+            // UIKit disables interaction on an animating view unless explicitly
+            // told otherwise. That makes rapid repeated characters and Delete
+            // taps easy to drop while the pressed-state fade is still running.
+            UIView.animate(
+                withDuration: 0.055,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseOut, .allowUserInteraction]
+            ) {
                 self.transform = .identity
                 self.alpha = self.isHighlighted ? 0.62 : 1
             }
@@ -106,9 +126,10 @@ private final class NativeKeyButton: UIButton {
     }
 
     /// The visible gap is six points wide. Claiming half of it on each side
-    /// gives a forgiving target without overlapping a neighbouring key.
+    /// makes the target forgiving, while avoiding the previous vertical
+    /// overlap that could route a boundary touch to the neighbouring row.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -3, dy: -4).contains(point)
+        bounds.insetBy(dx: -3, dy: -3).contains(point)
     }
 
     @objc private func pressBegan() {
@@ -277,30 +298,38 @@ private enum EmojiCatalog {
         return index
     }()
 
-    static func search(_ query: String) -> [String] {
-        let tokens = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased(with: .current)
-            .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
-            .map(String.init)
-        guard !tokens.isEmpty else { return ["😐", "😀", "😃", "😁", "😄", "😆", "🥹", "😅"] }
-        let matches = searchIndex.compactMap { emoji, terms -> (String, Int)? in
+    /// Normalize the bundled CLDR index once. Normalizing thousands of terms
+    /// for every typed search character made the Emoji search feel sluggish.
+    private static let normalizedSearchIndex: [(emoji: String, terms: Set<String>)] = {
+        searchIndex.map { emoji, terms in
             let normalizedTerms = terms.flatMap { term in
                 term.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                     .lowercased(with: .current)
                     .components(separatedBy: CharacterSet.alphanumerics.inverted)
                     .filter { !$0.isEmpty }
             }
+            return (emoji, Set(normalizedTerms))
+        }
+    }()
+
+    static func search(_ query: String) -> [String] {
+        let tokens = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased(with: .current)
+            .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
+            .map(String.init)
+        guard !tokens.isEmpty else { return ["😐", "😀", "😃", "😁", "😄", "😆", "🥹", "😅"] }
+        let matches = normalizedSearchIndex.compactMap { entry -> (String, Int)? in
             guard tokens.allSatisfy({ token in
                 // Prefix matching makes natural variants work: "prayer"
                 // finds CLDR's "pray", while exact terms rank above prefixes.
-                normalizedTerms.contains {
+                entry.terms.contains {
                     $0.hasPrefix(token) || ($0.count >= 3 && token.hasPrefix($0))
                 }
             }) else { return nil }
             let score = tokens.reduce(0) { partial, token in
-                partial + (normalizedTerms.contains(token) ? 2 : 1)
+                partial + (entry.terms.contains(token) ? 2 : 1)
             }
-            return (emoji, score)
+            return (entry.emoji, score)
         }
         return matches.sorted { lhs, rhs in
             lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1
@@ -345,6 +374,40 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     private var searchShift = false
     private var searchButtons: [UIButton] = []
 
+    /// iOS 16's Emoji search keyboard has a cooler chrome, softer utility
+    /// keys, and a deliberately indented, equal-width A–L row. Keep this
+    /// compatibility treatment isolated so later iOS releases retain the
+    /// current keyboard appearance.
+    private var usesIOS16EmojiSearchAppearance: Bool {
+        if #available(iOS 17.0, *) { return false }
+        return true
+    }
+
+    private var emojiPickerBackgroundColor: UIColor {
+        guard usesIOS16EmojiSearchAppearance else {
+            return UIColor { $0.userInterfaceStyle == .dark
+                ? UIColor(white: 0.16, alpha: 1)
+                : UIColor(red: 226 / 255, green: 228 / 255, blue: 232 / 255, alpha: 1) }
+        }
+        return UIColor { $0.userInterfaceStyle == .dark
+            ? UIColor(white: 0.16, alpha: 1)
+            : UIColor(red: 209 / 255, green: 210 / 255, blue: 216 / 255, alpha: 1) }
+    }
+
+    private var searchKeySurfaceColor: UIColor {
+        guard usesIOS16EmojiSearchAppearance else { return .systemBackground }
+        return UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.40, alpha: 1) : .white }
+    }
+
+    private var searchUtilitySurfaceColor: UIColor {
+        guard usesIOS16EmojiSearchAppearance else {
+            return UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
+        }
+        return UIColor { $0.userInterfaceStyle == .dark
+            ? UIColor(white: 0.32, alpha: 1)
+            : UIColor(red: 190 / 255, green: 193 / 255, blue: 202 / 255, alpha: 1) }
+    }
+
     override init(frame: CGRect) {
         let layout = UICollectionViewFlowLayout()
         layout.minimumInteritemSpacing = 0
@@ -353,7 +416,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
         super.init(frame: frame)
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.16, alpha: 1) : UIColor(red: 226 / 255, green: 228 / 255, blue: 232 / 255, alpha: 1) }
+        backgroundColor = emojiPickerBackgroundColor
         layer.cornerRadius = 24
         layer.cornerCurve = .continuous
         layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
@@ -365,6 +428,11 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         // remain legible in both appearances.
         searchField.textColor = .label
         searchField.tintColor = .systemBlue
+        if usesIOS16EmojiSearchAppearance {
+            searchField.backgroundColor = UIColor { $0.userInterfaceStyle == .dark
+                ? UIColor(white: 0.25, alpha: 1)
+                : UIColor(red: 197 / 255, green: 199 / 255, blue: 206 / 255, alpha: 1) }
+        }
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.delegate = self
         addSubview(searchField)
@@ -458,7 +526,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             let stack = UIStackView()
             stack.axis = .horizontal
             stack.spacing = 6
-            stack.distribution = rowIndex == 0 ? .fillEqually : .fill
+            stack.distribution = (rowIndex == 0 || (usesIOS16EmojiSearchAppearance && rowIndex == 1)) ? .fillEqually : .fill
             if rowIndex == 1 {
                 stack.layoutMargins = UIEdgeInsets(top: 0, left: 21, bottom: 0, right: 21)
                 stack.isLayoutMarginsRelativeArrangement = true
@@ -474,7 +542,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
                 // renders the legacy text glyph beside the SF Symbol.
                 if key == "emoji" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal); button.tintColor = .label }
                 if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal); button.tintColor = .white }
-                button.backgroundColor = key == "Search" ? .systemBlue : (key == "⇧" || key == "⌫" || key == "123" ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) : .systemBackground)
+                button.backgroundColor = key == "Search" ? .systemBlue : (key == "⇧" || key == "⌫" || key == "123" ? searchUtilitySurfaceColor : searchKeySurfaceColor)
                 button.layer.cornerRadius = 7
                 button.accessibilityIdentifier = key
                 button.addAction(UIAction { [weak self, weak button] _ in
@@ -600,7 +668,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             button.tintColor = key == "Search" ? .white : .label
             if key == "emoji" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal) }
             if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal) }
-            button.backgroundColor = key == "Search" ? .systemBlue : (["⇧", "⌫", "123", "ABC", "#+="].contains(key) ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) : .systemBackground)
+            button.backgroundColor = key == "Search" ? .systemBlue : (["⇧", "⌫", "123", "ABC", "#+="].contains(key) ? searchUtilitySurfaceColor : searchKeySurfaceColor)
         }
     }
 
@@ -882,6 +950,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var spaceTrackpadStartX: CGFloat = 0
     private var spaceTrackpadOffset = 0
 
+    private var usesIOS16KeyboardAppearance: Bool {
+        if #available(iOS 17.0, *) { return false }
+        return true
+    }
+
     private var standardKeyboardHeight: CGFloat {
         KeyboardPreferences.suggestionsEnabled() ? 251 : 216
     }
@@ -896,7 +969,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyboardChrome.backgroundColor = UIColor { traits in
             traits.userInterfaceStyle == .dark
                 ? UIColor(red: 44 / 255, green: 44 / 255, blue: 46 / 255, alpha: 1)
-                : UIColor(red: 226 / 255, green: 228 / 255, blue: 232 / 255, alpha: 1)
+                : (self.usesIOS16KeyboardAppearance
+                    ? UIColor(red: 209 / 255, green: 210 / 255, blue: 216 / 255, alpha: 1)
+                    : UIColor(red: 226 / 255, green: 228 / 255, blue: 232 / 255, alpha: 1))
         }
         keyboardChrome.translatesAutoresizingMaskIntoConstraints = false
         keyboardChrome.layer.cornerRadius = 24
@@ -911,6 +986,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        // `hasFullAccess` is only available inside the keyboard extension.
+        // Persist a positive confirmation for the containing app to display.
+        if hasFullAccess {
+            KeyboardPreferences.setFullAccessConfirmed(true)
+        }
         let selectedMode = KeyboardPreferences.selectedMode()
         if selectedMode != mode {
             commitActiveComposition()
@@ -1000,10 +1080,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyboardStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(keyboardStack)
         NSLayoutConstraint.activate([
-            keyboardStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 7),
-            keyboardStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -7),
-            keyboardStack.topAnchor.constraint(equalTo: candidateBar.bottomAnchor, constant: 7),
-            keyboardStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -7),
+            keyboardStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: usesIOS16KeyboardAppearance ? 5 : 7),
+            keyboardStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: usesIOS16KeyboardAppearance ? -5 : -7),
+            keyboardStack.topAnchor.constraint(
+                equalTo: candidateBar.bottomAnchor,
+                constant: usesIOS16KeyboardAppearance ? 11 : 7
+            ),
+            // Give the iOS 16 grid a little more breathing room vertically
+            // without reintroducing the unwanted left/right inset.
+            keyboardStack.bottomAnchor.constraint(
+                equalTo: view.bottomAnchor,
+                constant: usesIOS16KeyboardAppearance ? -2 : -7
+            ),
         ])
         keyboardMinimumHeight = view.heightAnchor.constraint(greaterThanOrEqualToConstant: standardKeyboardHeight)
         keyboardMinimumHeight.isActive = true
@@ -1099,7 +1187,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func makeKey(_ key: String) -> NativeKeyButton {
         let utility = ["shift", "delete", "123", "ABC", "#+=", "globe"].contains(key)
         let button = NativeKeyButton(title: title(for: key), hint: hint(for: key), symbol: symbol(for: key), utility: utility)
-        button.touchDown = { [weak self] in self?.keyFeedback?.keyPressed() }
+        button.touchDown = { [weak self] in
+            // If iOS failed to deliver an old Delete touch-up (for example
+            // after a host-app cursor move), any new contact is authoritative.
+            self?.stopDeleteRepeat()
+            self?.keyFeedback?.keyPressed()
+        }
         if key == "space" {
             button.titleLabel?.font = .systemFont(ofSize: 13, weight: .regular)
             button.titleLabel?.minimumScaleFactor = 0.8
@@ -1134,8 +1227,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             self?.press(key)
         }, for: triggerEvent)
         if key == "delete" {
-            button.addTarget(self, action: #selector(startDeleteRepeat), for: .touchDown)
-            button.addTarget(self, action: #selector(stopDeleteRepeat), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+            // Start repeat only after UIKit has positively recognized a hold.
+            // A touch-down timer can outlive a rapid tap when the host app
+            // changes lines, causing unexpected deletion after the finger has
+            // already lifted.
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
+            longPress.minimumPressDuration = 0.42
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
         }
         if key == "space" {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleSpaceTrackpad(_:)))
@@ -1313,10 +1412,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         case "ABC": layer = .letters; rebuildKeys()
         case "rakaranshaya":
             insertLive(shift ? "\u{200D}" : "\u{E004}")
-            if shift { shift = false }
-            rebuildKeys()
+            if shift {
+                shift = false
+                rebuildKeys()
+            }
         case "kundaliya": commit(suffix: "෴")
-        case "yansaya": insertLive("\u{E005}"); rebuildKeys()
+        case "yansaya": insertLive("\u{E005}")
         default:
             let input = shift ? key.uppercased() : key
             if layer == .letters {
@@ -1439,24 +1540,36 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if let visible = visibleEntries.popLast(), let source = visibleSources.popLast() {
             for _ in source { rawBuffer.removeLast() }
             for _ in visible { textDocumentProxy.deleteBackward() }
+            // The key layout itself has not changed. Recreating every button
+            // here adds layout work right as the user is likely to press
+            // Delete again; refresh only the suggestion content instead.
+            updatePredictions(for: visibleEntries.joined())
         }
-        rebuildKeys()
     }
 
-    @objc private func startDeleteRepeat() {
-        deleteRepeater?.invalidate()
-        let initialDelay = Timer(timeInterval: 0.42, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.deleteOnce()
-            let repeater = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in self?.deleteOnce() }
-            self.deleteRepeater = repeater
+    @objc private func handleDeleteLongPress(_ recognizer: UILongPressGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            stopDeleteRepeat()
+            // The initial touch-down already deleted one character. A
+            // confirmed hold begins with the next character, then repeats.
+            deleteOnce()
+            let repeater = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+                self?.deleteOnce()
+            }
+            deleteRepeater = repeater
             RunLoop.main.add(repeater, forMode: .common)
+        case .ended, .cancelled, .failed:
+            stopDeleteRepeat()
+        default:
+            break
         }
-        deleteRepeater = initialDelay
-        RunLoop.main.add(initialDelay, forMode: .common)
     }
 
-    @objc private func stopDeleteRepeat() { deleteRepeater?.invalidate(); deleteRepeater = nil }
+    @objc private func stopDeleteRepeat() {
+        deleteRepeater?.invalidate()
+        deleteRepeater = nil
+    }
 
     /// The four prenasalized Sinhala consonants live behind their ordinary
     /// Wijesekara consonant keys, just like iOS alternate characters.
@@ -1518,7 +1631,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
             commitPhoneticComposition(suffix: suffix)
             updatePredictions(for: "")
-            rebuildKeys()
             return
         }
         if markedSource != nil {
@@ -1527,14 +1639,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             visibleEntries.removeAll()
             visibleSources.removeAll()
             updatePredictions(for: "")
-            rebuildKeys()
             return
         }
         rawBuffer = ""
         visibleEntries.removeAll()
         visibleSources.removeAll()
         updatePredictions(for: "")
-        textDocumentProxy.insertText(suffix); rebuildKeys()
+        // Text commitment does not alter the key geometry. Rebuilding this
+        // hierarchy after every Space, punctuation mark, or Return creates a
+        // brief input dead zone for the next rapid touch.
+        textDocumentProxy.insertText(suffix)
     }
 
     /// Uses the system's marked-text session for multistage Sinhala input.
@@ -1746,7 +1860,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             textDocumentProxy.deleteBackward()
             textDocumentProxy.insertText(". ")
             lastSpaceTimestamp = nil
-            rebuildKeys()
             return
         }
 
