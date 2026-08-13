@@ -9,6 +9,7 @@ xcuserdata/
 # Xcode build products and archives
 build/
 DerivedData/
+akshara-mac/
 *.xcarchive/
 *.ipa
 *.dSYM/

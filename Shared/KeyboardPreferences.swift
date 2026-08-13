@@ -3,7 +3,7 @@ import Foundation
 /// Preferences shared by the containing app and the keyboard extension.
 /// Both targets require the same App Group entitlement for this store.
 enum KeyboardPreferences {
-    static let appGroupIdentifier = "group.lk.org.akshara.keyboard"
+    static let appGroupIdentifier = "group.lk.org.aksharaios.keyboard"
     static let layoutKey = "selectedKeyboardLayout"
     static let emojiKey = "emojiPickerEnabled"
     static let hapticsKey = "keyboardHapticsEnabled"

@@ -917,6 +917,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var shift = false
     private var rawBuffer = ""
     private var phoneticBuffer = ""
+    private var lastPhoneticRendered = ""
     /// The phonetic compositor needs a short look-behind window so a later
     /// vowel can replace a consonant's provisional virama.  Keep that window
     /// marked, but commit older, unambiguous chunks.  Some host editors are
@@ -1697,27 +1698,40 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func updatePhoneticComposition() {
         commitStablePhoneticPrefixIfNeeded()
         let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
-        let caret = (rendered as NSString).length
-        textDocumentProxy.setMarkedText(rendered, selectedRange: NSRange(location: caret, length: 0))
+        
+        let oldScalars = Array(lastPhoneticRendered.unicodeScalars)
+        let newScalars = Array(rendered.unicodeScalars)
+        
+        var commonCount = 0
+        for (o, n) in zip(oldScalars, newScalars) {
+            if o == n { commonCount += 1 } else { break }
+        }
+        
+        let deletes = oldScalars.count - commonCount
+        for _ in 0..<deletes { textDocumentProxy.deleteBackward() }
+        
+        let inserts = String(String.UnicodeScalarView(newScalars[commonCount...]))
+        if !inserts.isEmpty { textDocumentProxy.insertText(inserts) }
+        
+        lastPhoneticRendered = rendered
         updatePredictions(for: committedPhoneticSegments.map(\.rendered).joined() + rendered)
     }
 
     private func commitPhoneticComposition(suffix: String = "") {
         guard !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty else { return }
-        let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
-        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-        textDocumentProxy.insertText(rendered + suffix)
+        if !suffix.isEmpty { textDocumentProxy.insertText(suffix) }
         phoneticBuffer = ""
+        lastPhoneticRendered = ""
         committedPhoneticSegments.removeAll()
         updatePredictions(for: "")
     }
 
     private func clearPhoneticComposition() {
-        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-        textDocumentProxy.unmarkText()
+        for _ in lastPhoneticRendered.unicodeScalars { textDocumentProxy.deleteBackward() }
         phoneticBuffer = ""
+        lastPhoneticRendered = ""
         for segment in committedPhoneticSegments.reversed() {
-            for _ in segment.rendered { textDocumentProxy.deleteBackward() }
+            for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
         }
         committedPhoneticSegments.removeAll()
         updatePredictions(for: "")
@@ -1740,13 +1754,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             let renderedSuffix = SinhalaEngine.transliterate(suffix, mode: mode)
             guard renderedPrefix + renderedSuffix == fullRendered else { continue }
 
-            // Replace the current marked range with a committed prefix and a
-            // small new marked suffix. This happens once per chunk, not per
+            // Replace the current active range with a committed prefix and a
+            // small new suffix. This happens once per chunk, not per
             // keystroke, and keeps input responsive in heavy host editors.
-            textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-            textDocumentProxy.insertText(renderedPrefix)
             committedPhoneticSegments.append((source: prefix, rendered: renderedPrefix))
             phoneticBuffer = suffix
+            
+            if lastPhoneticRendered.hasPrefix(renderedPrefix) {
+                lastPhoneticRendered = String(lastPhoneticRendered.dropFirst(renderedPrefix.count))
+            } else {
+                lastPhoneticRendered = ""
+            }
             return
         }
     }
@@ -1755,13 +1773,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// final chunk so the deletion retains the same transliteration behavior
     /// as it had while the whole word was marked.
     private func restorePreviousPhoneticSegmentAfterDelete() {
-        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        for _ in lastPhoneticRendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        lastPhoneticRendered = ""
+        
         guard var segment = committedPhoneticSegments.popLast() else {
-            textDocumentProxy.unmarkText()
             updatePredictions(for: "")
             return
         }
-        for _ in segment.rendered { textDocumentProxy.deleteBackward() }
+        for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
         segment.source.removeLast()
         phoneticBuffer = segment.source
         if phoneticBuffer.isEmpty {
