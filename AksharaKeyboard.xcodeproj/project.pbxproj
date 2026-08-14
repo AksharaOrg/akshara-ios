@@ -17,6 +17,9 @@
 		A10000000000000000000008 /* KeyboardPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* KeyboardPreferences.swift */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* Assets.xcassets */; };
 		A10000000000000000000010 /* EmojiSearchIndex.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* EmojiSearchIndex.json */; };
+		A10000000000000000000011 /* SinhalaPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* SinhalaPrediction.swift */; };
+		A10000000000000000000012 /* SinhalaPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* SinhalaPrediction.swift */; };
+		A10000000000000000000013 /* Resources/SinhalaFrequencyModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +60,8 @@
 		A20000000000000000000011 /* AksharaKeyboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AksharaKeyboard.entitlements; sourceTree = "<group>"; };
 		A20000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A20000000000000000000013 /* EmojiSearchIndex.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = EmojiSearchIndex.json; sourceTree = "<group>"; };
+		A20000000000000000000014 /* SinhalaPrediction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaPrediction.swift; sourceTree = "<group>"; };
+		A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaFrequencyModel.tsv; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -104,6 +109,7 @@
 			children = (
 				A20000000000000000000004 /* KeyboardViewController.swift */,
 				A20000000000000000000013 /* EmojiSearchIndex.json */,
+				A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */,
 				A20000000000000000000011 /* AksharaKeyboard.entitlements */,
 				A20000000000000000000008 /* Info.plist */,
 			);
@@ -115,6 +121,7 @@
 			children = (
 				A20000000000000000000003 /* SinhalaEngine.swift */,
 				A20000000000000000000009 /* KeyboardPreferences.swift */,
+				A20000000000000000000014 /* SinhalaPrediction.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -218,6 +225,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000010 /* EmojiSearchIndex.json in Resources */,
+				A10000000000000000000013 /* Resources/SinhalaFrequencyModel.tsv in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -232,6 +240,7 @@
 				A10000000000000000000002 /* OnboardingView.swift in Sources */,
 				A10000000000000000000003 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
+				A10000000000000000000011 /* SinhalaPrediction.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -242,6 +251,7 @@
 				A10000000000000000000004 /* KeyboardViewController.swift in Sources */,
 				A10000000000000000000005 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000008 /* KeyboardPreferences.swift in Sources */,
+				A10000000000000000000012 /* SinhalaPrediction.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

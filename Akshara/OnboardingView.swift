@@ -68,23 +68,24 @@ struct OnboardingView: View {
 
 private struct KeyboardSettingsView: View {
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
+    @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
 
     var body: some View {
         Form {
             Section("Keyboard Features") {
                 Toggle("Emoji", isOn: $emojiEnabled)
+                Toggle("Suggestions", isOn: $suggestionsEnabled)
+                Text("On-device word completion and next-word suggestions. Your text never leaves the device.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 NavigationLink("Haptics") {
                     HapticsSettingsView()
                 }
-                Toggle("Suggestions", isOn: .constant(false))
-                    .disabled(true)
-                Text("Suggestions are temporarily disabled while the full Sinhala prediction dictionary is added.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Keyboard Settings")
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
+        .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
     }
 }
 

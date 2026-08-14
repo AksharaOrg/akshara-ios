@@ -9,10 +9,9 @@ enum KeyboardPreferences {
     static let hapticsKey = "keyboardHapticsEnabled"
     static let fullAccessKey = "keyboardFullAccessConfirmed"
     static let suggestionsKey = "keyboardSuggestionsEnabled"
+    static let predictionProviderKey = "selectedPredictionProvider"
 
-    /// The dictionary is still a small proof of concept. Keep suggestions
-    /// unavailable until the full licensed corpus and ranking pass land.
-    static let supportsSuggestions = false
+    static let supportsSuggestions = true
 
     static var defaults: UserDefaults {
         UserDefaults(suiteName: appGroupIdentifier) ?? .standard
@@ -60,6 +59,18 @@ enum KeyboardPreferences {
     }
 
     static func suggestionsEnabled() -> Bool {
-        supportsSuggestions && (defaults.object(forKey: suggestionsKey) as? Bool ?? false)
+        supportsSuggestions && (defaults.object(forKey: suggestionsKey) as? Bool ?? true)
+    }
+
+    static func setSuggestionsEnabled(_ enabled: Bool) {
+        defaults.set(enabled, forKey: suggestionsKey)
+    }
+
+    static func selectedPredictionProvider() -> String {
+        defaults.string(forKey: predictionProviderKey) ?? "uom-frequency-list-v1"
+    }
+
+    static func setSelectedPredictionProvider(_ identifier: String) {
+        defaults.set(identifier, forKey: predictionProviderKey)
     }
 }
