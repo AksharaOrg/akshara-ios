@@ -1027,7 +1027,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         case .padPortrait: return 292
         case .padLandscape: return 374
         case .phoneLandscape: return 162
-        case .phonePortrait: return 216
+        // Native iPhone 17 Pro chrome starts two points lower than the
+        // previous 216 pt surface. This keeps its rounded top edge aligned
+        // with the system keyboard while preserving the 29 pt candidate rail.
+        case .phonePortrait: return 214
         }
     }
 
@@ -1054,11 +1057,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // iOS's own input-mode / dictation footer without a visible seam.
         view.backgroundColor = .clear
         if #available(iOS 26.0, *) {
-            // Avoid hard-coding an iOS 26 keyboard grey. The material follows
-            // the system's keyboard tinting in light/dark appearance and in
-            // host contexts where the background is translucent.
-            keyboardChrome.effect = UIBlurEffect(style: .systemChromeMaterial)
-            keyboardChrome.contentView.backgroundColor = .clear
+            // The material backdrop samples the white Messages canvas and
+            // produces #DDDEE1, visibly darker than the system keyboard
+            // footer (#E2E4E8). Use the measured system surface directly so
+            // the extension meets that footer without a colour seam.
+            keyboardChrome.effect = nil
+            keyboardChrome.contentView.backgroundColor = UIColor { traits in
+                traits.userInterfaceStyle == .dark
+                    ? UIColor(red: 44 / 255, green: 44 / 255, blue: 46 / 255, alpha: 1)
+                    : UIColor(red: 226 / 255, green: 228 / 255, blue: 232 / 255, alpha: 1)
+            }
         } else {
             keyboardChrome.effect = nil
             keyboardChrome.contentView.backgroundColor = UIColor { traits in

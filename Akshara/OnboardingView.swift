@@ -44,21 +44,6 @@ struct OnboardingView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                
-                Section("Keyboard Preview") {
-                    VStack(spacing: 0) {
-                        TextField("Type here...", text: .constant(""))
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(true)
-                            .opacity(0.7)
-                            .padding([.horizontal, .top])
-                        // Simulated keyboard area
-                        Color.gray.opacity(0.25)
-                            .frame(height: 260)
-                            .overlay(Label("Simulated Keyboard", systemImage: "keyboard.fill").font(.footnote).foregroundStyle(.secondary), alignment: .top)
-                    }
-                    .padding(.vertical)
-                }
             }
             .navigationTitle("Akshara")
             .onChange(of: mode) { KeyboardPreferences.setSelectedMode($0) }
