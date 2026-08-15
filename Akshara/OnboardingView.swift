@@ -54,6 +54,11 @@ struct OnboardingView: View {
 private struct KeyboardSettingsView: View {
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
+    @State private var doubleSpacePeriodEnabled = KeyboardPreferences.doubleSpacePeriodEnabled()
+    @State private var numberRowEnabled = KeyboardPreferences.numberRowEnabled()
+    @State private var longPressPunctuationEnabled = KeyboardPreferences.longPressPunctuationEnabled()
+    @State private var smartQuotesEnabled = KeyboardPreferences.smartQuotesEnabled()
+    @State private var characterPreviewEnabled = KeyboardPreferences.characterPreviewEnabled()
 
     var body: some View {
         Form {
@@ -67,10 +72,81 @@ private struct KeyboardSettingsView: View {
                     HapticsSettingsView()
                 }
             }
+
+            Section("Typing") {
+                Toggle("Character Preview", isOn: $characterPreviewEnabled)
+                Toggle("Number Row", isOn: $numberRowEnabled)
+                Toggle("Double-Space Period", isOn: $doubleSpacePeriodEnabled)
+                Toggle("Long-Press Punctuation", isOn: $longPressPunctuationEnabled)
+                Toggle("Smart Quotes", isOn: $smartQuotesEnabled)
+                Text("Character Preview enlarges a pressed character. Hold punctuation keys for related marks. Smart Quotes changes straight quotes to typographic opening and closing quotes.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Learn") {
+                NavigationLink("Layout Quick Reference") {
+                    LayoutReferenceView()
+                }
+            }
         }
         .navigationTitle("Keyboard Settings")
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
+        .onChange(of: doubleSpacePeriodEnabled) { KeyboardPreferences.setDoubleSpacePeriodEnabled($0) }
+        .onChange(of: numberRowEnabled) { KeyboardPreferences.setNumberRowEnabled($0) }
+        .onChange(of: longPressPunctuationEnabled) { KeyboardPreferences.setLongPressPunctuationEnabled($0) }
+        .onChange(of: smartQuotesEnabled) { KeyboardPreferences.setSmartQuotesEnabled($0) }
+        .onChange(of: characterPreviewEnabled) { KeyboardPreferences.setCharacterPreviewEnabled($0) }
+    }
+}
+
+private struct LayoutReferenceView: View {
+    @State private var mode = KeyboardPreferences.selectedMode()
+
+    private var entries: [(String, String)] {
+        switch mode {
+        case .sls:
+            return [("q", "ු"), ("w", "අ"), ("e", "ැ"), ("r", "ර"), ("t", "එ"),
+                    ("y", "හ"), ("u", "ම"), ("i", "ස"), ("o", "ද"), ("p", "ච"),
+                    ("a", "්"), ("s", "ි"), ("d", "ා"), ("f", "ෙ"), ("g", "ට"),
+                    ("h", "ය"), ("j", "ව"), ("k", "න"), ("l", "ක"), (";", "ත"),
+                    ("Long press . c v o", "ඟ  ඦ  ඬ  ඳ")]
+        case .phonetic:
+            return [("k / g / t / d", "ක / ග / ට / ඩ"), ("th / dh", "ත / ද"),
+                    ("sh / Sh", "ශ / ෂ"), ("aa / ii / uu", "ා / ී / ූ"),
+                    ("ee / ai / oo", "ේ / ෛ / ෝ"), ("M / H", "ං / ඃ"),
+                    ("y / r after a consonant", "්‍ය / ්‍ර")]
+        case .smartPhonetic:
+            return [("k / g / q", "ක / ග / ද"), ("t / T / th / thh", "ට / ට / ත / ථ"),
+                    ("z + g/j/d/q", "ඟ / ඦ / ඬ / ඳ"), ("aa / Aa", "ා /ෑ"),
+                    ("ru / ruu", "ෘ / ෲ"), ("M, x, or zn", "ං"),
+                    ("S / Sh", "ෂ / ෂ")]
+        }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Layout", selection: $mode) {
+                    ForEach(SinhalaEngine.Mode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            }
+            Section(mode.rawValue) {
+                ForEach(entries, id: \.0) { key, result in
+                    HStack {
+                        Text(key).font(.system(.body, design: .monospaced))
+                        Spacer()
+                        Text(result).font(.title3)
+                    }
+                }
+            }
+            Section("Tips") {
+                Text("Use Shift for the alternate layer. Hold punctuation keys for related marks, and hold Space to move the cursor.")
+            }
+        }
+        .navigationTitle("Quick Reference")
     }
 }
 

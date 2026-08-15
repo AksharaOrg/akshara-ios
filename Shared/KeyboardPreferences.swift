@@ -10,11 +10,26 @@ enum KeyboardPreferences {
     static let fullAccessKey = "keyboardFullAccessConfirmed"
     static let suggestionsKey = "keyboardSuggestionsEnabled"
     static let predictionProviderKey = "selectedPredictionProvider"
+    static let doubleSpacePeriodKey = "doubleSpacePeriodEnabled"
+    static let numberRowKey = "numberRowEnabled"
+    static let longPressPunctuationKey = "longPressPunctuationEnabled"
+    static let smartQuotesKey = "smartQuotesEnabled"
+    static let characterPreviewKey = "characterPreviewEnabled"
 
     static let supportsSuggestions = true
 
     static var defaults: UserDefaults {
         UserDefaults(suiteName: appGroupIdentifier) ?? .standard
+    }
+
+    /// The app and keyboard extension are separate processes. Flush each
+    /// small preference update through the App Group so an extension opened
+    /// immediately after a toggle observes the new value rather than a
+    /// buffered copy from the containing app.
+    private static func persist(_ value: Any, forKey key: String) {
+        let store = defaults
+        store.set(value, forKey: key)
+        store.synchronize()
     }
 
     static func selectedMode() -> SinhalaEngine.Mode {
@@ -24,7 +39,7 @@ enum KeyboardPreferences {
     }
 
     static func setSelectedMode(_ mode: SinhalaEngine.Mode) {
-        defaults.set(mode.rawValue, forKey: layoutKey)
+        persist(mode.rawValue, forKey: layoutKey)
     }
 
     static func emojiEnabled() -> Bool {
@@ -32,7 +47,7 @@ enum KeyboardPreferences {
     }
 
     static func setEmojiEnabled(_ enabled: Bool) {
-        defaults.set(enabled, forKey: emojiKey)
+        persist(enabled, forKey: emojiKey)
     }
 
     static func hapticsEnabled() -> Bool {
@@ -40,7 +55,7 @@ enum KeyboardPreferences {
     }
 
     static func setHapticsEnabled(_ enabled: Bool) {
-        defaults.set(enabled, forKey: hapticsKey)
+        persist(enabled, forKey: hapticsKey)
     }
 
     /// The containing app cannot query a keyboard extension's `hasFullAccess`
@@ -51,11 +66,7 @@ enum KeyboardPreferences {
     }
 
     static func setFullAccessConfirmed(_ confirmed: Bool) {
-        defaults.set(confirmed, forKey: fullAccessKey)
-        // The keyboard and containing app run in separate processes. Flush
-        // this small status handoff so the app can reflect a just-enabled
-        // Full Access setting as soon as it returns to the foreground.
-        defaults.synchronize()
+        persist(confirmed, forKey: fullAccessKey)
     }
 
     static func suggestionsEnabled() -> Bool {
@@ -63,7 +74,7 @@ enum KeyboardPreferences {
     }
 
     static func setSuggestionsEnabled(_ enabled: Bool) {
-        defaults.set(enabled, forKey: suggestionsKey)
+        persist(enabled, forKey: suggestionsKey)
     }
 
     static func selectedPredictionProvider() -> String {
@@ -71,6 +82,49 @@ enum KeyboardPreferences {
     }
 
     static func setSelectedPredictionProvider(_ identifier: String) {
-        defaults.set(identifier, forKey: predictionProviderKey)
+        persist(identifier, forKey: predictionProviderKey)
+    }
+
+    static func doubleSpacePeriodEnabled() -> Bool {
+        defaults.object(forKey: doubleSpacePeriodKey) as? Bool ?? true
+    }
+
+    static func setDoubleSpacePeriodEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: doubleSpacePeriodKey)
+    }
+
+    static func numberRowEnabled() -> Bool {
+        defaults.object(forKey: numberRowKey) as? Bool ?? false
+    }
+
+    static func setNumberRowEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: numberRowKey)
+    }
+
+    static func longPressPunctuationEnabled() -> Bool {
+        defaults.object(forKey: longPressPunctuationKey) as? Bool ?? true
+    }
+
+    static func setLongPressPunctuationEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: longPressPunctuationKey)
+    }
+
+    static func smartQuotesEnabled() -> Bool {
+        defaults.object(forKey: smartQuotesKey) as? Bool ?? true
+    }
+
+    static func setSmartQuotesEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: smartQuotesKey)
+    }
+
+    /// Apple calls this "Character Preview". The system preference isn't
+    /// available to third-party keyboard extensions, so keep an equivalent
+    /// app-group setting for Akshara instead.
+    static func characterPreviewEnabled() -> Bool {
+        defaults.object(forKey: characterPreviewKey) as? Bool ?? false
+    }
+
+    static func setCharacterPreviewEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: characterPreviewKey)
     }
 }
