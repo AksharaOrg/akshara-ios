@@ -162,12 +162,12 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             let upperBound = min(entries.count, firstMatch + 4_096)
             for index in firstMatch..<upperBound {
                 let entry = entries[index]
-                guard entry.word.hasPrefix(prefix) else { break }
+                guard hasUnicodeScalarPrefix(entry.word, prefix) else { break }
                 consider(word: entry.word, frequency: entry.frequency)
             }
             // Personal words need not exist in the bundled corpus to be
             // returned as a completion.
-            for (word, count) in learnedWords where word.hasPrefix(prefix) {
+            for (word, count) in learnedWords where hasUnicodeScalarPrefix(word, prefix) {
                 consider(word: word, frequency: count)
             }
             // A single edit is enough to rescue the common near-miss without
@@ -182,13 +182,13 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
         // Contextual selections can be custom words which are absent from the
         // corpus's initial frequency slice. Include them without a full sort.
-        for (word, count) in learnedNext where prefix.isEmpty || word.hasPrefix(prefix) {
+        for (word, count) in learnedNext where prefix.isEmpty || hasUnicodeScalarPrefix(word, prefix) {
             consider(word: word, frequency: learnedWords[word, default: count])
         }
         // A corpus continuation can be missing from the compact unigram
         // slice. Include it explicitly so context is useful from the first
         // word, before personal learning has accumulated.
-        for next in bundledNext where prefix.isEmpty || next.word.hasPrefix(prefix) {
+        for next in bundledNext where prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) {
             consider(word: next.word, frequency: 0)
         }
         return ranked
@@ -284,6 +284,18 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             if entries[midpoint].word < prefix { low = midpoint + 1 } else { high = midpoint }
         }
         return low
+    }
+
+    /// Sinhala vowel signs and diacritics combine with the preceding base
+    /// letter into one grapheme cluster. `String.hasPrefix` therefore fails
+    /// for a typed base letter such as ක against a word beginning කං; compare
+    /// Unicode scalars so prediction works from the first keystroke.
+    private func hasUnicodeScalarPrefix(_ text: String, _ prefix: String) -> Bool {
+        var textScalars = text.unicodeScalars.makeIterator()
+        for scalar in prefix.unicodeScalars {
+            guard textScalars.next() == scalar else { return false }
+        }
+        return true
     }
 
     private func editDistanceAtMostOne(_ lhs: String, _ rhs: String) -> Bool {

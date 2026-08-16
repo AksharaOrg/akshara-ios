@@ -254,7 +254,7 @@ private final class NativeKeyButton: UIButton {
     }
 }
 
-private enum EmojiCategory: CaseIterable {
+private enum EmojiCategory: CaseIterable, Hashable {
     case recent, smileys, animals, food, activity, travel, objects, symbols, flags
 
     var symbolName: String {
@@ -314,28 +314,59 @@ private enum EmojiCatalog {
         return String(firstFlag) + String(lastFlag)
     }.sorted()
 
+    /// Category membership and order are fixed for the installed Unicode
+    /// version. Cache every iOS-style section once instead of rebuilding it
+    /// for every collection-view cell; the Symbols page previously repeated
+    /// six full category scans for each emoji it considered.
+    private static let categorizedEmoji: [EmojiCategory: [String]] = {
+        // Apple starts Smileys & People with the familiar face sequence, not
+        // with the earlier weather symbols in the Unicode 1F300 block.
+        let faces = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return (0x1F600...0x1F64F).contains(code)
+        }
+        let smileysAndPeople = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return ((0x1F300...0x1F3FF).contains(code) || (0x1F600...0x1F64F).contains(code))
+                && !(0x1F600...0x1F64F).contains(code)
+        }
+        let smileys = faces + smileysAndPeople
+        let animals = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return (0x1F400...0x1F4AF).contains(code)
+        }
+        let food = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return (0x1F32D...0x1F37F).contains(code) || (0x1F950...0x1F96F).contains(code)
+        }
+        let activity = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return (0x1F380...0x1F3FF).contains(code) || (0x1F947...0x1F94C).contains(code)
+        }
+        let travel = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return (0x1F680...0x1F6FF).contains(code) || (0x1F900...0x1F93F).contains(code)
+        }
+        let objects = allBaseEmoji.filter { value in
+            guard let code = value.unicodeScalars.first?.value else { return false }
+            return (0x1F4B0...0x1F5FF).contains(code) || (0x1F9E0...0x1FAFF).contains(code)
+        }
+        let assigned = Set(smileys + animals + food + activity + travel + objects)
+        return [
+            .smileys: smileys,
+            .animals: animals,
+            .food: food,
+            .activity: activity,
+            .travel: travel,
+            .objects: objects,
+            .symbols: allBaseEmoji.filter { !assigned.contains($0) },
+            .flags: flags
+        ]
+    }()
+
     static func emoji(for category: EmojiCategory) -> [String] {
         if category == .recent { return recent() }
-        if category == .flags { return flags }
-        return allBaseEmoji.filter { value in
-            guard let scalar = value.unicodeScalars.first else { return false }
-            let code = scalar.value
-            switch category {
-            case .smileys: return (0x1F300...0x1F3FF).contains(code) || (0x1F600...0x1F64F).contains(code)
-            case .animals: return (0x1F400...0x1F4AF).contains(code)
-            case .food: return (0x1F32D...0x1F37F).contains(code) || (0x1F950...0x1F96F).contains(code)
-            case .activity: return (0x1F380...0x1F3FF).contains(code) || (0x1F947...0x1F94C).contains(code)
-            case .travel: return (0x1F680...0x1F6FF).contains(code) || (0x1F900...0x1F93F).contains(code)
-            case .objects: return (0x1F4B0...0x1F5FF).contains(code) || (0x1F9E0...0x1FAFF).contains(code)
-            case .symbols: return !emoji(for: .smileys).contains(value)
-                && !emoji(for: .animals).contains(value)
-                && !emoji(for: .food).contains(value)
-                && !emoji(for: .activity).contains(value)
-                && !emoji(for: .travel).contains(value)
-                && !emoji(for: .objects).contains(value)
-            case .recent, .flags: return false
-            }
-        }
+        return categorizedEmoji[category] ?? []
     }
 
     static func record(_ emoji: String) {
@@ -409,7 +440,18 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     var onSelect: ((String) -> Void)?
     var onDismiss: (() -> Void)?
     var onDelete: (() -> Void)?
-    private var category: EmojiCategory = .recent { didSet { collectionView.reloadData(); updateCategorySelection() } }
+    // The Frequently Used list changes when an emoji is selected. Keep a
+    // snapshot for the current grid so its cells continue to select exactly
+    // the emoji they display until the user switches sections or reopens it.
+    private var displayedEmoji = EmojiCatalog.emoji(for: .recent)
+    private var category: EmojiCategory = .recent {
+        didSet {
+            displayedEmoji = EmojiCatalog.emoji(for: category)
+            collectionView.reloadData()
+            collectionView.setContentOffset(.zero, animated: false)
+            updateCategorySelection()
+        }
+    }
     private var categoryButtons: [EmojiCategory: UIButton] = [:]
     private let categoryBar = UIStackView()
     private let collectionView: UICollectionView
@@ -419,6 +461,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     private let searchKeyboard = UIStackView()
     private var searchQuery = ""
     private var emojiSuggestionButtons: [UIButton] = []
+    private var emojiDeleteRepeater: Timer?
     private enum SearchLayer { case letters, numbers, symbols }
     private var searchLayer: SearchLayer = .letters
     private var searchShift = false
@@ -514,17 +557,20 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             categoryButtons[item] = button
             slot.addSubview(button)
             NSLayoutConstraint.activate([
-                button.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
-                button.centerYAnchor.constraint(equalTo: slot.centerYAnchor),
-                button.widthAnchor.constraint(equalToConstant: 30),
-                button.heightAnchor.constraint(equalToConstant: 30)
+                button.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+                button.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+                button.topAnchor.constraint(equalTo: slot.topAnchor),
+                button.bottomAnchor.constraint(equalTo: slot.bottomAnchor)
             ])
         }
         let delete = UIButton(type: .system)
         delete.setImage(UIImage(systemName: "delete.left"), for: .normal)
         delete.tintColor = .label
         delete.setPreferredSymbolConfiguration(.init(pointSize: 21, weight: .regular), forImageIn: .normal)
-        delete.addTarget(self, action: #selector(deleteEmojiInput), for: .touchUpInside)
+        delete.addTarget(self, action: #selector(deleteEmojiInput), for: .touchDown)
+        let deleteHold = UILongPressGestureRecognizer(target: self, action: #selector(handleEmojiDeleteHold(_:)))
+        deleteHold.minimumPressDuration = 0.4
+        delete.addGestureRecognizer(deleteHold)
         categoryBar.addArrangedSubview(delete)
         delete.widthAnchor.constraint(equalToConstant: 51).isActive = true
 
@@ -633,10 +679,29 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     }
 
     required init?(coder: NSCoder) { nil }
+    deinit { emojiDeleteRepeater?.invalidate() }
 
     @objc private func selectCategory(_ sender: UIButton) { category = EmojiCategory.allCases[sender.tag] }
     @objc private func dismissPicker() { onDismiss?() }
     @objc private func deleteEmojiInput() { onDelete?() }
+
+    @objc private func handleEmojiDeleteHold(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            // Touch-down has already removed one character. Begin repeating
+            // after the hold threshold, like the system keyboard.
+            onDelete?()
+            let repeater = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                self?.onDelete?()
+            }
+            emojiDeleteRepeater = repeater
+        case .ended, .cancelled, .failed:
+            emojiDeleteRepeater?.invalidate()
+            emojiDeleteRepeater = nil
+        default:
+            break
+        }
+    }
 
     func textFieldShouldBeginEditing(_ textField: UITextField) -> Bool {
         collectionView.isHidden = true
@@ -725,7 +790,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         }
     }
 
-    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { EmojiCatalog.emoji(for: category).count }
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { displayedEmoji.count }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "emoji", for: indexPath)
@@ -739,12 +804,12 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             cell.contentView.addSubview(label)
             NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor), label.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor), label.topAnchor.constraint(equalTo: cell.contentView.topAnchor), label.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor)])
         }
-        label.text = EmojiCatalog.emoji(for: category)[indexPath.item]
+        label.text = displayedEmoji[indexPath.item]
         return cell
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        let emoji = EmojiCatalog.emoji(for: category)[indexPath.item]
+        let emoji = displayedEmoji[indexPath.item]
         EmojiCatalog.record(emoji)
         onSelect?(emoji)
     }
@@ -1187,7 +1252,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// does not need transliteration candidates, but it does use this rail for
     /// word prediction once a local prediction provider is enabled.
     private var showsCandidateBar: Bool {
-        KeyboardPreferences.suggestionsEnabled()
+        KeyboardPreferences.suggestionsEnabled() && inputFieldAllowsPredictions
+    }
+
+    /// Structured fields are usually identifiers rather than Sinhala prose.
+    /// Hiding the rail here also skips dictionary work on every keypress.
+    private var inputFieldAllowsPredictions: Bool {
+        switch textDocumentProxy.keyboardType {
+        case .URL, .webSearch, .emailAddress, .twitter,
+             .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad:
+            return false
+        default:
+            return true
+        }
     }
 
     private var normalKeyboardHeight: CGFloat {
@@ -2092,6 +2169,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let ranked = SinhalaPredictionProviderRegistry.shared.activeProvider
             .candidates(for: request)
             .map(\.text)
+        let previousCandidates = candidates
         // iOS gives the centre slot the strongest visual weight. Preserve the
         // dictionary ranking while presenting its best match in that slot.
         switch ranked.count {
@@ -2101,8 +2179,23 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         default: candidates = [nil, nil, nil]
         }
         for (index, button) in candidateButtons.enumerated() {
-            button.setTitle(candidates[index], for: .normal)
-            button.isEnabled = candidates[index] != nil
+            guard previousCandidates[index] != candidates[index] else { continue }
+            let applyCandidate = {
+                button.setTitle(self.candidates[index], for: .normal)
+                button.isEnabled = self.candidates[index] != nil
+            }
+            // Match the system keyboard's quiet candidate replacement motion
+            // without animating unchanged words or delaying key input.
+            guard button.window != nil else {
+                applyCandidate()
+                continue
+            }
+            UIView.transition(
+                with: button,
+                duration: 0.16,
+                options: [.transitionCrossDissolve, .beginFromCurrentState, .allowAnimatedContent],
+                animations: applyCandidate
+            )
         }
         Self.layoutLogger.debug(
             "predictions updated count=\(ranked.count, privacy: .public) railHidden=\(self.candidateBar.isHidden, privacy: .public) railHeight=\(Int(self.candidateBar.bounds.height), privacy: .public)"
@@ -2472,7 +2565,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // The marked cluster replaces only the tail of the word. Keep the
         // already committed Wijesekara glyphs in the provider request rather
         // than treating this cluster as a new word.
-        updatePredictions(for: visibleEntries.joined() + rendered)
+        schedulePredictions(for: visibleEntries.joined() + rendered)
     }
 
     private func updatePhoneticComposition() {
@@ -2631,7 +2724,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         visibleEntries.append(rendered)
         visibleSources.append(source)
         textDocumentProxy.insertText(rendered)
-        updatePredictions(for: visibleEntries.joined())
+        schedulePredictions(for: visibleEntries.joined())
     }
 
     private func containsConsonant(_ text: String) -> Bool {
@@ -2680,8 +2773,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// the prior space into a period followed by one ready for the next word.
     private func insertSpace() {
         let now = CACurrentMediaTime()
+        // The second tap follows the first committed space. Only replace that
+        // space when it follows a word; never manufacture punctuation at the
+        // start of a field or after an existing sentence terminator.
+        let characterBeforeSpace = textDocumentProxy.documentContextBeforeInput?.dropLast().last
+        let followsWord = characterBeforeSpace.map { $0.isLetter || $0.isNumber } ?? false
         let isDoubleSpace = KeyboardPreferences.doubleSpacePeriodEnabled()
-            && rawBuffer.isEmpty && (lastSpaceTimestamp.map { now - $0 < 0.45 } ?? false)
+            && rawBuffer.isEmpty && followsWord
+            && (lastSpaceTimestamp.map { now - $0 < 0.45 } ?? false)
         if isDoubleSpace {
             textDocumentProxy.deleteBackward()
             textDocumentProxy.insertText(". ")
