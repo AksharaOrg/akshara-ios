@@ -1,6 +1,11 @@
 # Akshara for iOS
 
-Native iOS host app and system-wide Custom Keyboard Extension. The keyboard processes transliteration entirely on-device and does not request Full Access.
+Native iOS host app and system-wide Custom Keyboard Extension. The keyboard processes transliteration entirely on-device. It requests Full Access only to share local preferences with the containing app through its App Group; it does not transmit typed text or use the network.
+
+## Prediction data
+
+The bundled next-word model contains aggregate Sinhala word-pair counts derived
+from [Remeinium CleanSinhalaTextCorpus](https://huggingface.co/datasets/Remeinium/CleanSinhalaTextCorpus), by Remeinium AI and Kusal Darshana (2025), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The source corpus is not included; attribution details are in `AksharaKeyboard/Resources/SinhalaNextWordModel-ATTRIBUTION.md`.
 
 ## Open and test
 

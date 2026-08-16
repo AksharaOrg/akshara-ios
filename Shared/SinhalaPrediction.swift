@@ -59,18 +59,24 @@ final class SinhalaPredictionProviderRegistry {
         KeyboardPreferences.setSelectedPredictionProvider(identifier)
         return true
     }
+
+    func flushPendingPersistence() {
+        (activeProvider as? SinhalaFrequencyListPredictionProvider)?.flushPendingPersistence()
+    }
 }
 
 /// A replaceable, offline unigram model compiled from the University of
-/// Moratuwa Sinhala Word Frequency List. The resource is deliberately a
-/// simple UTF-8 TSV (`word<TAB>frequency`), so a larger model or a separately
-/// trained n-gram model can replace it without changing keyboard UI code.
+/// Moratuwa Sinhala Word Frequency List, plus a compact bundled bigram model.
+/// Both resources are simple UTF-8 TSV files so they can be regenerated or
+/// replaced without changing keyboard UI code.
 final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     let identifier: String
 
     private struct Entry { let word: String; let frequency: Int }
+    private struct NextWord { let word: String; let count: Int }
     private let entries: [Entry]
     private let frequentEntries: [Entry]
+    private let bundledBigrams: [String: [NextWord]]
     private let defaults = KeyboardPreferences.defaults
     private let learnedWordsKey = "prediction.learnedWords.v1"
     private let learnedBigramsKey = "prediction.learnedBigrams.v1"
@@ -84,17 +90,23 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private var learnedBigrams: [String: [String: Int]]
     private var recency: [String: Int]
     private var recencyClock: Int
+    private var persistenceWorkItem: DispatchWorkItem?
 
     init(
         identifier: String = "uom-frequency-list-v1",
-        modelURL: URL? = Bundle.main.url(forResource: "SinhalaFrequencyModel", withExtension: "tsv")
+        modelURL: URL? = Bundle.main.url(forResource: "SinhalaFrequencyModel", withExtension: "tsv"),
+        nextWordURL: URL? = Bundle.main.url(forResource: "SinhalaNextWordModel", withExtension: "tsv")
     ) {
         self.identifier = identifier
+        // The build script emits lexical order. Avoid sorting the bundled
+        // model during the first prediction request in the keyboard process.
         let loadedEntries = Self.loadEntries(from: modelURL)
-        entries = loadedEntries.sorted { $0.word < $1.word }
-        frequentEntries = loadedEntries.sorted {
-            $0.frequency == $1.frequency ? $0.word < $1.word : $0.frequency > $1.frequency
-        }
+        entries = Self.isLexicallySorted(loadedEntries) ? loadedEntries : loadedEntries.sorted { $0.word < $1.word }
+        // The empty-prefix rail needs only a small set of common words. Keep
+        // that table bounded instead of allocating and sorting a second copy
+        // of the full frequency model at keyboard startup.
+        frequentEntries = Self.mostFrequentEntries(from: loadedEntries, maximum: 96)
+        bundledBigrams = Self.loadBigrams(from: nextWordURL)
         learnedWords = Self.intDictionary(from: KeyboardPreferences.defaults, forKey: learnedWordsKey)
         learnedBigrams = Self.nestedIntDictionary(from: KeyboardPreferences.defaults, forKey: learnedBigramsKey)
         recency = Self.intDictionary(from: KeyboardPreferences.defaults, forKey: recencyKey)
@@ -107,6 +119,11 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         guard maximumResults > 0 else { return [] }
         let previous = request.precedingWords.last
         let learnedNext = previous.flatMap { learnedBigrams[$0] } ?? [:]
+        let bundledNext = previous.flatMap { bundledBigrams[$0] } ?? []
+        var bundledCounts: [String: Int] = [:]
+        for next in bundledNext {
+            bundledCounts[next.word] = max(bundledCounts[next.word, default: 0], next.count)
+        }
 
         // Keep only the requested winners while scanning. The old path built
         // and sorted up to 4,096 temporary candidates on every keypress.
@@ -120,6 +137,9 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             let score = log(Double(max(frequency, 1)) + 1)
                 + Double(learnedWords[word, default: 0]) * 0.60
                 + Double(learnedNext[word, default: 0]) * 1.20
+                // Corpus context is a stronger next-word signal than global
+                // word frequency, while local choices still adapt the result.
+                + log(Double(bundledCounts[word, default: 0]) + 1) * 1.70
                 + recencyScore(for: word)
             let candidate = SinhalaPredictionCandidate(text: word, score: score)
             let insertionIndex = ranked.firstIndex {
@@ -165,38 +185,59 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         for (word, count) in learnedNext where prefix.isEmpty || word.hasPrefix(prefix) {
             consider(word: word, frequency: learnedWords[word, default: count])
         }
+        // A corpus continuation can be missing from the compact unigram
+        // slice. Include it explicitly so context is useful from the first
+        // word, before personal learning has accumulated.
+        for next in bundledNext where prefix.isEmpty || next.word.hasPrefix(prefix) {
+            consider(word: next.word, frequency: 0)
+        }
         return ranked
     }
 
     func recordSelection(_ word: String, after precedingWord: String?) {
-        record(word, after: precedingWord, selectionBoost: 2)
+        record(word, after: precedingWord, selectionBoost: 2, persistImmediately: true)
     }
 
     func recordCommittedWord(_ word: String, after precedingWord: String?) {
-        record(word, after: precedingWord, selectionBoost: 1)
+        record(word, after: precedingWord, selectionBoost: 1, persistImmediately: false)
     }
 
-    private func record(_ word: String, after precedingWord: String?, selectionBoost: Int) {
+    private func record(_ word: String, after precedingWord: String?, selectionBoost: Int, persistImmediately: Bool) {
         guard isSinhalaWord(word) else { return }
         learnedWords[word, default: 0] += selectionBoost
         recencyClock += 1
         recency[word] = recencyClock
         trimPersonalModel()
+        if let precedingWord, isSinhalaWord(precedingWord) {
+            var followers = learnedBigrams[precedingWord, default: [:]]
+            followers[word, default: 0] += selectionBoost
+            if followers.count > maximumFollowersPerWord {
+                let weakest = followers.sorted {
+                    $0.value == $1.value
+                        ? (recency[$0.key, default: 0] < recency[$1.key, default: 0])
+                        : $0.value < $1.value
+                }.prefix(followers.count - maximumFollowersPerWord)
+                weakest.forEach { followers.removeValue(forKey: $0.key) }
+            }
+            learnedBigrams[precedingWord] = followers
+        }
+        if persistImmediately { flushPendingPersistence() }
+        else { schedulePersistence() }
+    }
+
+    func flushPendingPersistence() {
+        persistenceWorkItem?.cancel()
+        persistenceWorkItem = nil
         defaults.set(learnedWords, forKey: learnedWordsKey)
         defaults.set(recency, forKey: recencyKey)
-        guard let precedingWord, isSinhalaWord(precedingWord) else { return }
-        var followers = learnedBigrams[precedingWord, default: [:]]
-        followers[word, default: 0] += selectionBoost
-        if followers.count > maximumFollowersPerWord {
-            let weakest = followers.sorted {
-                $0.value == $1.value
-                    ? (recency[$0.key, default: 0] < recency[$1.key, default: 0])
-                    : $0.value < $1.value
-            }.prefix(followers.count - maximumFollowersPerWord)
-            weakest.forEach { followers.removeValue(forKey: $0.key) }
-        }
-        learnedBigrams[precedingWord] = followers
         defaults.set(learnedBigrams, forKey: learnedBigramsKey)
+    }
+
+    private func schedulePersistence() {
+        persistenceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flushPendingPersistence() }
+        persistenceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
     }
 
     private func recencyScore(for word: String) -> Double {
@@ -271,5 +312,40 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
                   !fields[0].isEmpty else { return nil }
             return Entry(word: String(fields[0]), frequency: frequency)
         }
+    }
+
+    private static func loadBigrams(from modelURL: URL?) -> [String: [NextWord]] {
+        guard let modelURL,
+              let contents = try? String(contentsOf: modelURL, encoding: .utf8) else { return [:] }
+        var grouped: [String: [NextWord]] = [:]
+        for line in contents.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count == 3, let count = Int(fields[2]), !fields[0].isEmpty, !fields[1].isEmpty else { continue }
+            grouped[String(fields[0]), default: []].append(NextWord(word: String(fields[1]), count: count))
+        }
+        // Keep deterministic ordering even if a hand-edited replacement model
+        // isn't already grouped by descending count.
+        return grouped.mapValues { values in
+            values.sorted { lhs, rhs in lhs.count == rhs.count ? lhs.word < rhs.word : lhs.count > rhs.count }
+        }
+    }
+
+    private static func isLexicallySorted(_ values: [Entry]) -> Bool {
+        zip(values, values.dropFirst()).allSatisfy { $0.word <= $1.word }
+    }
+
+    private static func mostFrequentEntries(from values: [Entry], maximum: Int) -> [Entry] {
+        var result: [Entry] = []
+        result.reserveCapacity(maximum)
+        for entry in values {
+            let index = result.firstIndex {
+                entry.frequency > $0.frequency
+                    || (entry.frequency == $0.frequency && entry.word < $0.word)
+            } ?? result.endIndex
+            guard index < maximum || result.count < maximum else { continue }
+            result.insert(entry, at: index)
+            if result.count > maximum { result.removeLast() }
+        }
+        return result
     }
 }

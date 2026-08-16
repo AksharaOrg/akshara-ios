@@ -13,36 +13,46 @@ struct OnboardingView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Installed Keyboard Layout") {
-                    Picker("Layout", selection: $mode) {
+                Section("Keyboard") {
+                    Picker(selection: $mode) {
                         ForEach(SinhalaEngine.Mode.allCases) { Text($0.rawValue).tag($0) }
+                    } label: {
+                        DashboardLabel(title: "Layout", icon: "keyboard", color: .blue)
                     }
                     .pickerStyle(.navigationLink)
-                    Text("This choice is used by the system keyboard the next time it appears.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Akshara Keyboard") {
-                    Text("A private, on-device Sinhala keyboard.")
-                    Text("To enable: Settings → General → Keyboard → Keyboards → Add New Keyboard → Akshara.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Link("Apple: Add a third-party keyboard", destination: AksharaLinks.appleKeyboardGuide)
-                }
-
-                Section {
-                    NavigationLink("Keyboard Settings") {
+                    NavigationLink {
                         KeyboardSettingsView()
+                    } label: {
+                        DashboardLabel(title: "Keyboard Settings", icon: "slider.horizontal.3", color: .gray)
                     }
                 }
 
-                Section {
-                    Link("Visit Website", destination: AksharaLinks.website)
-                    Link("View on GitHub", destination: AksharaLinks.github)
-                    Text("© 2026 Lahiru Himesh Madusanka · MIT License")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                Section("Reference") {
+                    NavigationLink {
+                        LayoutReferenceView()
+                    } label: {
+                        DashboardLabel(title: "Layout Quick Reference", icon: "keyboard.badge.ellipsis", color: .purple)
+                    }
+                }
+
+                Section("Set Up") {
+                    Link(destination: AksharaLinks.appleKeyboardGuide) {
+                        DashboardLabel(title: "Add Akshara Keyboard", icon: "keyboard", color: .green)
+                    }
+                }
+
+                Section("Links") {
+                    Link(destination: AksharaLinks.website) {
+                        DashboardLabel(title: "Website", icon: "globe", color: .blue)
+                    }
+                    Link(destination: AksharaLinks.github) {
+                        DashboardLabel(title: "GitHub", icon: "chevron.left.forwardslash.chevron.right", color: .indigo)
+                    }
+                }
+
+                Section("About") {
+                    LabeledContent("Copyright", value: "© 2026 Lahiru Himesh Madusanka")
+                    LabeledContent("License", value: "MIT License")
                 }
             }
             .navigationTitle("Akshara")
@@ -51,53 +61,142 @@ struct OnboardingView: View {
     }
 }
 
+private struct DashboardLabel: View {
+    let title: String
+    let icon: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(color, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Text(title)
+        }
+    }
+}
+
 private struct KeyboardSettingsView: View {
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
     @State private var doubleSpacePeriodEnabled = KeyboardPreferences.doubleSpacePeriodEnabled()
-    @State private var numberRowEnabled = KeyboardPreferences.numberRowEnabled()
+    @State private var topRow = KeyboardPreferences.topRow()
     @State private var longPressPunctuationEnabled = KeyboardPreferences.longPressPunctuationEnabled()
     @State private var smartQuotesEnabled = KeyboardPreferences.smartQuotesEnabled()
     @State private var characterPreviewEnabled = KeyboardPreferences.characterPreviewEnabled()
+    @State private var keySpacing = KeyboardPreferences.keySpacing()
+    @State private var oneHandedPosition = KeyboardPreferences.oneHandedPosition()
+    @State private var appearance = KeyboardPreferences.appearance()
+    @State private var highContrastEnabled = KeyboardPreferences.highContrastEnabled()
+    @State private var deleteRepeatSpeed = KeyboardPreferences.deleteRepeatSpeed()
 
     var body: some View {
         Form {
             Section("Keyboard Features") {
-                Toggle("Emoji", isOn: $emojiEnabled)
-                Toggle("Suggestions", isOn: $suggestionsEnabled)
-                Text("On-device word completion and next-word suggestions. Your text never leaves the device.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                NavigationLink("Haptics") {
+                Toggle(isOn: $emojiEnabled) {
+                    SettingLabel(title: "Emoji key", detail: "Shows the emoji picker", icon: "face.smiling", color: .orange)
+                }
+                Toggle(isOn: $suggestionsEnabled) {
+                    SettingLabel(title: "Suggestions", detail: "Shows word completions", icon: "text.badge.plus", color: .indigo)
+                }
+                NavigationLink {
                     HapticsSettingsView()
+                } label: {
+                    SettingLabel(title: "Haptics", detail: "Sound and haptic feedback", icon: "waveform", color: .red)
                 }
             }
 
             Section("Typing") {
-                Toggle("Character Preview", isOn: $characterPreviewEnabled)
-                Toggle("Number Row", isOn: $numberRowEnabled)
-                Toggle("Double-Space Period", isOn: $doubleSpacePeriodEnabled)
-                Toggle("Long-Press Punctuation", isOn: $longPressPunctuationEnabled)
-                Toggle("Smart Quotes", isOn: $smartQuotesEnabled)
-                Text("Character Preview enlarges a pressed character. Hold punctuation keys for related marks. Smart Quotes changes straight quotes to typographic opening and closing quotes.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Learn") {
-                NavigationLink("Layout Quick Reference") {
-                    LayoutReferenceView()
+                Toggle(isOn: $characterPreviewEnabled) {
+                    SettingLabel(title: "Character Preview", detail: "Enlarges the pressed key", icon: "textformat.size", color: .blue)
+                }
+                Picker(selection: $topRow) {
+                    ForEach(KeyboardPreferences.TopRow.allCases) { row in
+                        Text(row.title).tag(row)
+                    }
+                } label: {
+                    SettingLabel(title: "Keyboard top row", detail: "Above the letter keys", icon: "rectangle.topthird.inset.filled", color: .green)
+                }
+                .accessibilityHint("Choose whether the row above the letters shows emoji, numbers, or nothing.")
+                Toggle("Double-space period", isOn: $doubleSpacePeriodEnabled)
+                Toggle("Long-press punctuation", isOn: $longPressPunctuationEnabled)
+                Toggle("Smart quotes", isOn: $smartQuotesEnabled)
+                Picker(selection: $deleteRepeatSpeed) {
+                    ForEach(KeyboardPreferences.DeleteRepeatSpeed.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                } label: {
+                    SettingLabel(title: "Delete repeat", detail: "Speed while holding Delete", icon: "delete.left", color: .red)
                 }
             }
+
+            Section("Layout") {
+                Picker(selection: $keySpacing) {
+                    ForEach(KeyboardPreferences.KeySpacing.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                } label: {
+                    SettingLabel(title: "Key spacing", detail: "Horizontal and vertical gaps", icon: "arrow.left.and.right", color: .teal)
+                }
+                Picker(selection: $oneHandedPosition) {
+                    ForEach(KeyboardPreferences.OneHandedPosition.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                } label: {
+                    SettingLabel(title: "One-handed", detail: "Aligns a narrower key grid", icon: "hand.tap", color: .purple)
+                }
+            }
+
+            Section("Appearance") {
+                Picker(selection: $appearance) {
+                    ForEach(KeyboardPreferences.Appearance.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                } label: {
+                    SettingLabel(title: "Theme", detail: "System, light, or dark", icon: "circle.lefthalf.filled", color: .gray)
+                }
+                Toggle("Higher key contrast", isOn: $highContrastEnabled)
+            }
+
         }
         .navigationTitle("Keyboard Settings")
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
         .onChange(of: doubleSpacePeriodEnabled) { KeyboardPreferences.setDoubleSpacePeriodEnabled($0) }
-        .onChange(of: numberRowEnabled) { KeyboardPreferences.setNumberRowEnabled($0) }
+        .onChange(of: topRow) { KeyboardPreferences.setTopRow($0) }
         .onChange(of: longPressPunctuationEnabled) { KeyboardPreferences.setLongPressPunctuationEnabled($0) }
         .onChange(of: smartQuotesEnabled) { KeyboardPreferences.setSmartQuotesEnabled($0) }
         .onChange(of: characterPreviewEnabled) { KeyboardPreferences.setCharacterPreviewEnabled($0) }
+        .onChange(of: keySpacing) { KeyboardPreferences.setKeySpacing($0) }
+        .onChange(of: oneHandedPosition) { KeyboardPreferences.setOneHandedPosition($0) }
+        .onChange(of: appearance) { KeyboardPreferences.setAppearance($0) }
+        .onChange(of: highContrastEnabled) { KeyboardPreferences.setHighContrastEnabled($0) }
+        .onChange(of: deleteRepeatSpeed) { KeyboardPreferences.setDeleteRepeatSpeed($0) }
+    }
+}
+
+private struct SettingLabel: View {
+    let title: String
+    let detail: String
+    let icon: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(color, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
@@ -152,13 +251,30 @@ private struct LayoutReferenceView: View {
 
 private struct HapticsSettingsView: View {
     @State private var hapticsEnabled = KeyboardPreferences.hapticsEnabled()
+    @State private var hapticStrength = KeyboardPreferences.hapticStrength()
+    @State private var keyClicksEnabled = KeyboardPreferences.keyClicksEnabled()
     @State private var fullAccessConfirmed = KeyboardPreferences.fullAccessConfirmed()
+    @State private var testFeedback = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
         Form {
-            Section("Haptics") {
+            Section("Feedback") {
                 Toggle("Key Haptics", isOn: $hapticsEnabled)
                     .disabled(!fullAccessConfirmed)
+                Picker("Strength", selection: $hapticStrength) {
+                    ForEach(KeyboardPreferences.HapticStrength.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                }
+                .disabled(!hapticsEnabled || !fullAccessConfirmed)
+                Button {
+                    testFeedback.impactOccurred(intensity: CGFloat(hapticStrength.intensity))
+                    testFeedback.prepare()
+                } label: {
+                    Label("Test haptic", systemImage: "hand.tap.fill")
+                }
+                .disabled(!hapticsEnabled || !fullAccessConfirmed)
+                Toggle("Key Clicks", isOn: $keyClicksEnabled)
                 Text(fullAccessConfirmed
                     ? "Light haptic feedback plays when you touch a key."
                     : "Full Access must be enabled before key haptics can be used.")
@@ -182,7 +298,10 @@ private struct HapticsSettingsView: View {
             }
         }
         .navigationTitle("Haptics")
+        .onAppear { testFeedback.prepare() }
         .onChange(of: hapticsEnabled) { KeyboardPreferences.setHapticsEnabled($0) }
+        .onChange(of: hapticStrength) { KeyboardPreferences.setHapticStrength($0) }
+        .onChange(of: keyClicksEnabled) { KeyboardPreferences.setKeyClicksEnabled($0) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             fullAccessConfirmed = KeyboardPreferences.fullAccessConfirmed()
         }

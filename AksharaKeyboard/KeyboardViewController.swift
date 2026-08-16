@@ -25,12 +25,14 @@ private final class KeyFeedback {
 
     func keyPressed() {
         guard KeyboardPreferences.hapticsEnabled() else { return }
-        // Prepare at the moment of contact. A keyboard extension can remain
-        // alive while its haptic service is suspended between appearances.
-        impact.prepare()
         // Keep the native light waveform, with just a small reduction from
         // its default strength so it remains perceptible without feeling busy.
-        impact.impactOccurred(intensity: 0.75)
+        impact.impactOccurred(intensity: CGFloat(KeyboardPreferences.hapticStrength().intensity))
+        // `prepare()` only lowers latency when it happens before the next
+        // event. Calling it immediately before `impactOccurred()` made every
+        // pulse wait for the Taptic Engine to wake. Re-arm after this key so
+        // the following keypress is already prepared.
+        impact.prepare()
     }
 
     func selectionChanged() {
@@ -92,8 +94,11 @@ private final class NativeKeyButton: UIButton {
             imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: utility ? .medium : .regular)
         }
         backgroundColor = UIColor { traits in
+            let highContrast = KeyboardPreferences.highContrastEnabled()
             if traits.userInterfaceStyle == .dark {
-                return utility ? UIColor(white: 0.26, alpha: 1) : UIColor(white: 0.40, alpha: 1)
+                return utility
+                    ? UIColor(white: highContrast ? 0.20 : 0.26, alpha: 1)
+                    : UIColor(white: highContrast ? 0.50 : 0.40, alpha: 1)
             }
             if #unavailable(iOS 17.0) {
                 return utility
@@ -105,14 +110,16 @@ private final class NativeKeyButton: UIButton {
                 // character keys are white while modifier keys are cooler and
                 // darker.  The all-white treatment is specific to iOS 26.
                 return utility
-                    ? UIColor(red: 0.71, green: 0.73, blue: 0.77, alpha: 1)
+                    ? UIColor(red: highContrast ? 0.60 : 0.71, green: highContrast ? 0.62 : 0.73, blue: highContrast ? 0.67 : 0.77, alpha: 1)
                     : .systemBackground
             }
             // On current iOS, alphabetic utility controls (Shift, Delete,
             // 123, Emoji, and Globe) share the white character-key surface.
             // Treating them as the older grey system-key material made the
             // extension visibly diverge from the UK keyboard in iOS 26.
-            return .systemBackground
+            return utility && highContrast
+                ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
+                : .systemBackground
         }
         layer.cornerRadius = utility ? 8 : 7
         layer.cornerCurve = .continuous
@@ -274,6 +281,7 @@ private enum EmojiCategory: CaseIterable {
 /// update, rendered by Apple's own color emoji font.
 private enum EmojiCatalog {
     private static let recentKey = "AksharaRecentEmoji"
+    private static let topRowFallback = ["😀", "😂", "🥹", "❤️", "👍", "🙏", "🔥", "🎉", "😍", "👏"]
     private static let excludedScalars: Set<UInt32> = [0x23, 0x2A, 0xA9, 0xAE, 0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D, 0x3297, 0x3299]
 
     static let allBaseEmoji: [String] = {
@@ -327,7 +335,12 @@ private enum EmojiCatalog {
     }
 
     static func recent() -> [String] {
-        UserDefaults.standard.stringArray(forKey: recentKey) ?? ["😀", "😂", "🥹", "❤️", "👍", "🙏", "🔥", "🎉"]
+        UserDefaults.standard.stringArray(forKey: recentKey) ?? Array(topRowFallback.prefix(8))
+    }
+
+    static func topRow() -> [String] {
+        let recentEmoji = recent()
+        return Array((recentEmoji + topRowFallback.filter { !recentEmoji.contains($0) }).prefix(10))
     }
 
     /// Official Unicode CLDR annotations provide the names and keywords used
@@ -410,14 +423,6 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         return true
     }
 
-    private var emojiPickerBackgroundColor: UIColor {
-        return UIColor { $0.userInterfaceStyle == .dark
-            ? UIColor(white: 0.16, alpha: 1)
-            // Match the current system emoji keyboard and our iOS 26 chrome.
-            // The old #D1D2D8 search surface was visibly too dark.
-            : UIColor(red: 226 / 255, green: 228 / 255, blue: 232 / 255, alpha: 1) }
-    }
-
     private var searchKeySurfaceColor: UIColor {
         guard usesIOS16EmojiSearchAppearance else { return .systemBackground }
         return UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.40, alpha: 1) : .white }
@@ -440,10 +445,10 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
         super.init(frame: frame)
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = emojiPickerBackgroundColor
-        layer.cornerRadius = 24
-        layer.cornerCurve = .continuous
-        layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        // UIInputView owns the keyboard material and outer shape. Painting a
+        // second opaque surface here makes Emoji visibly differ from the
+        // primary keyboard, particularly in Dark Mode.
+        backgroundColor = .clear
 
         searchField.placeholder = "Search Emoji"
         searchField.font = .systemFont(ofSize: 18)
@@ -940,13 +945,14 @@ private final class AlternateCharacterPickerView: UIView {
 }
 
 final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedback {
+    private static let topEmojiKeyPrefix = "topEmoji:"
     private enum Layer { case letters, numbers, symbols }
     /// KeyboardKit's device configurations are a useful model here: a full
     /// iPad keyboard is not a stretched iPhone keyboard.  It has taller keys,
     /// a different action placement, and needs to respond when an iPad enters
     /// Split View or uses the floating keyboard.
     private enum LayoutProfile: Equatable {
-        case phonePortrait, phoneLandscape, padPortrait, padLandscape
+        case phonePortrait, phoneLandscape, compactPad, padPortrait, padLandscape
     }
 
     /// Horizontal proportions are derived from the available keyboard width.
@@ -961,7 +967,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             usesIOS16Appearance ? 5 : (width < 380 ? 5 : 7)
         }
 
-        let horizontalGap: CGFloat = 6
+        var horizontalGap: CGFloat { CGFloat(KeyboardPreferences.keySpacing().horizontalGap) }
 
         private var usableWidth: CGFloat {
             max(0, width - horizontalInset * 2)
@@ -981,6 +987,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
         var englishBottomSmallKeyWidth: CGFloat { tenKeyWidth * 1.30 }
         var englishReturnKeyWidth: CGFloat { tenKeyWidth * 2.80 }
+        /// Keep iPad controls proportional to the actual input-view width,
+        /// including Split View, instead of pinning them to 58 points.
+        var padBottomControlWidth: CGFloat { min(72, max(48, usableWidth * 0.075)) }
 
         /// Non-English rows have intentionally different key counts. Scale
         /// their existing proportions rather than forcing ten-key metrics
@@ -1010,12 +1019,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private let keyboardStack = UIStackView()
     private let candidateBar = UIView()
     private var candidateBarHeight: NSLayoutConstraint!
-    private var keyboardMinimumHeight: NSLayoutConstraint!
     private var keyboardLeadingInset: NSLayoutConstraint!
     private var keyboardTrailingInset: NSLayoutConstraint!
+    private var metricConstraints: [(NSLayoutConstraint, () -> CGFloat)] = []
+    private var metricMargins: [(UIStackView, () -> UIEdgeInsets)] = []
     private var candidateButtons: [UIButton] = []
     private var candidates: [String?] = [nil, nil, nil]
     private var predictionPrefix = ""
+    // Transliteration must render in the same touch turn. Candidate ranking is
+    // secondary UI, so coalesce it while the user is actively spelling a word
+    // instead of scanning the dictionary and redrawing three buttons per key.
+    private var pendingPredictionUpdate: DispatchWorkItem?
     private var emojiPicker: EmojiPickerView?
     private let trackpadSurface = UIView()
     private var deleteRepeater: Timer?
@@ -1031,6 +1045,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var spaceTrackpadLastTimestamp: TimeInterval = 0
     private var appliedLayoutProfile: LayoutProfile?
     private var appliedLayoutWidth: CGFloat = 0
+    private var appliedReturnKeyTitle: String?
+    private var appliedKeyboardType: UIKeyboardType?
+    // Querying `needsInputModeSwitchKey` before the extension is connected to
+    // a host produces a false answer (and a UIKit warning). Build a safe
+    // initial layout, then resolve the system-owned value in `viewDidAppear`.
+    private var showsInputModeSwitchKey = false
 
     private var usesIOS16KeyboardAppearance: Bool {
         if #available(iOS 17.0, *) { return false }
@@ -1039,9 +1059,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private var keyboardMetrics: KeyboardMetrics {
         KeyboardMetrics(
-            width: view.bounds.width,
+            width: max(0, view.bounds.width - oneHandedContentInset),
             usesIOS16Appearance: usesIOS16KeyboardAppearance
         )
+    }
+
+    private var oneHandedContentInset: CGFloat {
+        switch KeyboardPreferences.oneHandedPosition() {
+        case .centered: return 0
+        case .left, .right: return 64
+        }
     }
 
     private var layoutProfile: LayoutProfile {
@@ -1050,10 +1077,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // device as landscape. Use the enclosing window scene instead.
         let isLandscape = view.window?.windowScene?.interfaceOrientation.isLandscape
             ?? (view.bounds.width > view.bounds.height)
-        // A floating / narrow Split View iPad keyboard needs the compact
-        // layout.  Checking the input view width rather than only idiom keeps
-        // it usable in every iPad multitasking size.
-        let isFullWidthPad = UIDevice.current.userInterfaceIdiom == .pad && view.bounds.width >= 600
+        // Floating and narrow Split View iPad keyboards are compact even when
+        // the enclosing scene is landscape. Their own width is authoritative.
+        if UIDevice.current.userInterfaceIdiom == .pad, view.bounds.width < 600 {
+            return .compactPad
+        }
+        let isFullWidthPad = UIDevice.current.userInterfaceIdiom == .pad
         switch (isFullWidthPad, isLandscape) {
         case (true, true): return .padLandscape
         case (true, false): return .padPortrait
@@ -1065,7 +1094,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var usesPadLayout: Bool {
         switch layoutProfile {
         case .padPortrait, .padLandscape: return true
-        case .phonePortrait, .phoneLandscape: return false
+        case .phonePortrait, .phoneLandscape, .compactPad: return false
         }
     }
 
@@ -1073,22 +1102,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         switch layoutProfile {
         case .padPortrait, .padLandscape: return 44
         case .phoneLandscape: return 28
-        case .phonePortrait: return 29
-        }
-    }
-
-    /// A custom keyboard extension can receive a provisional height before
-    /// UIKit attaches it to the host field. Supplying the calibrated height
-    /// up front prevents the visible grow/shrink pass at presentation.
-    private var normalKeyboardBaseHeight: CGFloat {
-        let numberRowHeight: CGFloat = KeyboardPreferences.numberRowEnabled()
-            ? (usesPadLayout ? 58 : (layoutProfile == .phoneLandscape ? 39 : 52))
-            : 0
-        switch layoutProfile {
-        case .padPortrait: return 292 + numberRowHeight
-        case .padLandscape: return 374 + numberRowHeight
-        case .phoneLandscape: return 162 + numberRowHeight
-        case .phonePortrait: return 214 + numberRowHeight
+        case .phonePortrait, .compactPad: return 29
         }
     }
 
@@ -1099,22 +1113,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         KeyboardPreferences.suggestionsEnabled()
     }
 
-    private var normalKeyboardHeight: CGFloat {
-        normalKeyboardBaseHeight + (showsCandidateBar ? candidateHeight : 0)
-    }
 
-    private var emojiPickerHeight: CGFloat {
-        // Emoji is a distinct, extension-owned presentation. These values
-        // are intentionally isolated from the standard keyboard, whose
-        // footprint now comes from UIKit's `.keyboard` input view.
-        switch layoutProfile {
-        case .padLandscape: return 374
-        case .padPortrait: return 292
-        case .phonePortrait, .phoneLandscape: return 251
-        }
-    }
-
-    var enableInputClicksWhenVisible: Bool { true }
+    var enableInputClicksWhenVisible: Bool { KeyboardPreferences.keyClicksEnabled() }
 
     override func loadView() {
         let keyboardView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
@@ -1153,6 +1153,21 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         shouldAnimateSpaceLabel = true
         updateKeyboardAppearance()
         keyFeedback?.prepare()
+        appliedReturnKeyTitle = returnKeyTitle
+        appliedKeyboardType = textDocumentProxy.keyboardType
+        rebuildKeys()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // At this point UIKit has attached the input view to the host text
+        // input, so it can accurately tell us whether another input mode is
+        // available. Do not move this query into `viewDidLoad` or
+        // `viewWillAppear`: keyboard extensions can reach those callbacks
+        // before the host connection exists.
+        let needsSwitchKey = needsInputModeSwitchKey
+        guard needsSwitchKey != showsInputModeSwitchKey else { return }
+        showsInputModeSwitchKey = needsSwitchKey
         rebuildKeys()
     }
 
@@ -1162,23 +1177,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // Rebuild only when the profile changes, never per keystroke.
         let profile = layoutProfile
         let widthChanged = abs(view.bounds.width - appliedLayoutWidth) > 0.5
-        guard profile != appliedLayoutProfile || widthChanged else { return }
+        let profileChanged = profile != appliedLayoutProfile
+        guard profileChanged || widthChanged else { return }
         appliedLayoutProfile = profile
         appliedLayoutWidth = view.bounds.width
-        candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
-        let contentHeight = emojiPicker == nil ? normalKeyboardHeight : emojiPickerHeight
-        keyboardMinimumHeight?.constant = contentHeight
-        preferredContentSize = CGSize(width: 0, height: contentHeight)
-        keyboardLeadingInset?.constant = keyboardMetrics.horizontalInset
-        keyboardTrailingInset?.constant = -keyboardMetrics.horizontalInset
-        keyboardStack.spacing = usesPadLayout ? 10 : (profile == .phoneLandscape ? 5 : 8)
-        candidateButtons.enumerated().forEach { index, button in
-            button.titleLabel?.font = .systemFont(
-                ofSize: usesPadLayout ? 20 : 18,
-                weight: index == 1 ? .medium : .regular
-            )
-        }
-        rebuildKeys()
+        applyKeyboardMetrics()
+        // A width change is geometric, not structural. Recreating every key
+        // here breaks active touches while an iPad is interactively resized.
+        if profileChanged { rebuildKeys() }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -1190,13 +1196,36 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // mode change and cover the next (native) keyboard.
         hideEmojiPicker()
         setTrackpadAppearance(active: false, animated: false)
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionUpdate = nil
+        SinhalaPredictionProviderRegistry.shared.flushPendingPersistence()
+    }
+
+    override func textWillChange(_ textInput: UITextInput?) {
+        super.textWillChange(textInput)
+        updateInputTraitsIfNeeded()
+    }
+
+    override func textDidChange(_ textInput: UITextInput?) {
+        super.textDidChange(textInput)
+        updateInputTraitsIfNeeded()
+    }
+
+    private func updateInputTraitsIfNeeded() {
+        updateKeyboardAppearance()
+        let title = returnKeyTitle
+        let keyboardType = textDocumentProxy.keyboardType
+        guard title != appliedReturnKeyTitle || keyboardType != appliedKeyboardType else { return }
+        appliedReturnKeyTitle = title
+        appliedKeyboardType = keyboardType
+        rebuildKeys()
     }
 
     /// A host text field may request a keyboard appearance that differs from
     /// the containing app's trait collection. Respect that request so the
     /// extension follows the system keyboard shown for the same field.
     private func updateKeyboardAppearance() {
-        let style: UIUserInterfaceStyle
+        var style: UIUserInterfaceStyle
         switch textDocumentProxy.keyboardAppearance {
         case .dark:
             style = .dark
@@ -1204,6 +1233,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             style = .light
         default:
             style = .unspecified
+        }
+        switch KeyboardPreferences.appearance() {
+        case .system: break
+        case .light: style = .light
+        case .dark: style = .dark
         }
         inputView?.overrideUserInterfaceStyle = style
         view.overrideUserInterfaceStyle = style
@@ -1285,8 +1319,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 constant: usesIOS16KeyboardAppearance ? -2 : -7
             ),
         ])
-        keyboardMinimumHeight = view.heightAnchor.constraint(greaterThanOrEqualToConstant: normalKeyboardHeight)
-        keyboardMinimumHeight.isActive = true
         trackpadSurface.translatesAutoresizingMaskIntoConstraints = false
         trackpadSurface.isUserInteractionEnabled = false
         trackpadSurface.layer.cornerRadius = 7
@@ -1302,25 +1334,23 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             trackpadSurface.topAnchor.constraint(equalTo: keyboardStack.topAnchor),
             trackpadSurface.bottomAnchor.constraint(equalTo: keyboardStack.bottomAnchor)
         ])
-        preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
     }
 
     private func rebuildKeys() {
         candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
         candidateBar.isHidden = !showsCandidateBar
-        if emojiPicker == nil {
-            keyboardMinimumHeight?.constant = normalKeyboardHeight
-            preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
-        }
+        metricConstraints.removeAll()
+        metricMargins.removeAll()
         keyboardStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         // Match the native English fourth row: the emoji affordance sits
         // between the number key and Space. A keyboard extension can ask iOS
         // to advance input modes, but cannot select Emoji directly.
         let emojiKey = KeyboardPreferences.emojiEnabled() ? ["emoji"] : []
-        let globeKey = needsInputModeSwitchKey ? ["globe"] : []
+        let globeKey = showsInputModeSwitchKey ? ["globe"] : []
+        let contextualPunctuation = contextualPunctuationKeys
         let bottom = usesPadLayout
             ? ["123"] + emojiKey + globeKey + ["space", "123", "dismiss"]
-            : ["123"] + emojiKey + globeKey + ["space", "return"]
+            : ["123"] + emojiKey + globeKey + contextualPunctuation + ["space", "return"]
         // The native Sinhala reference uses three even 11-key rows. Preserve
         // that geometry while exposing the full direct Wijesekara layer.
         let letterRows: [[String]]
@@ -1340,10 +1370,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let rows: [[String]]
         switch layer {
         case .letters:
-            let numberRow = KeyboardPreferences.numberRowEnabled()
-                ? [["1","2","3","4","5","6","7","8","9","0"]]
-                : []
-            rows = numberRow + letterRows + [bottom]
+            let topRow: [[String]]
+            switch KeyboardPreferences.topRow() {
+            case .disabled:
+                topRow = []
+            case .numbers:
+                topRow = [["1","2","3","4","5","6","7","8","9","0"]]
+            case .emoji:
+                topRow = [EmojiCatalog.topRow().map { Self.topEmojiKeyPrefix + $0 }]
+            }
+            rows = topRow + letterRows + [bottom]
         case .numbers:
             rows = usesPadLayout
                 ? [["1","2","3","4","5","6","7","8","9","0","delete"], ["-","/",":",";","(",")","$","&","@","\"","return"], ["#+=",".",",","?","!","kundaliya","#+="], bottom.map { $0 == "123" ? "ABC" : $0 }]
@@ -1354,10 +1390,40 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 : [["[","]","{","}","#","%","^","*","+","="], ["_","\\","|","~","<",">","€","£","¥","•"], ["123",".",",","?","!","kundaliya","delete"], bottom.map { $0 == "123" ? "ABC" : $0 }]
         }
         for (index, row) in rows.enumerated() { keyboardStack.addArrangedSubview(makeRow(row, index: index)) }
+        applyKeyboardMetrics()
+    }
+
+    private func applyKeyboardMetrics() {
+        candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
+        let baseInset = keyboardMetrics.horizontalInset
+        switch KeyboardPreferences.oneHandedPosition() {
+        case .centered:
+            keyboardLeadingInset?.constant = baseInset
+            keyboardTrailingInset?.constant = -baseInset
+        case .left:
+            keyboardLeadingInset?.constant = baseInset
+            keyboardTrailingInset?.constant = -(baseInset + oneHandedContentInset)
+        case .right:
+            keyboardLeadingInset?.constant = baseInset + oneHandedContentInset
+            keyboardTrailingInset?.constant = -baseInset
+        }
+        let baseVerticalGap: CGFloat = usesPadLayout ? 10 : (layoutProfile == .phoneLandscape ? 5 : 8)
+        keyboardStack.spacing = max(3, baseVerticalGap + CGFloat(KeyboardPreferences.keySpacing().verticalAdjustment))
+        metricConstraints.forEach { constraint, value in constraint.constant = value() }
+        metricMargins.forEach { row, value in row.layoutMargins = value() }
+        candidateButtons.enumerated().forEach { index, button in
+            button.titleLabel?.font = .systemFont(ofSize: usesPadLayout ? 20 : 18, weight: index == 1 ? .medium : .regular)
+        }
+    }
+
+    private func addMetricWidth(to button: UIView, value: @escaping () -> CGFloat) {
+        let constraint = button.widthAnchor.constraint(equalToConstant: value())
+        constraint.isActive = true
+        metricConstraints.append((constraint, value))
     }
 
     private func makeRow(_ keys: [String], index: Int) -> UIStackView {
-        let row = UIStackView(); row.axis = .horizontal; row.spacing = 6; row.alignment = .fill
+        let row = UIStackView(); row.axis = .horizontal; row.spacing = keyboardMetrics.horizontalGap; row.alignment = .fill
         let isBottom = keys.contains("space")
         let isThirdLetterRow = layer == .letters && keys.contains("shift")
         let isControlRow = isThirdLetterRow || (layer != .letters && index == 2)
@@ -1366,17 +1432,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // This is the A–L row, not simply “row 1”: a number row shifts all
         // letter indices down by one.
         if isEnglishAlphabet && keys.contains("a") {
-            let inset = keyboardMetrics.englishSecondRowInset
-            row.layoutMargins = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+            let margins = { UIEdgeInsets(top: 0, left: self.keyboardMetrics.englishSecondRowInset, bottom: 0, right: self.keyboardMetrics.englishSecondRowInset) }
+            row.layoutMargins = margins()
             row.isLayoutMarginsRelativeArrangement = true
+            metricMargins.append((row, margins))
         } else if usesPadLayout && isControlRow && keys.count < 10 {
             // Sparse phonetic and numeric rows are centred on iPad instead of
             // becoming much wider than the upper rows. Seven-key symbol rows
             // need a larger inset than the nine-key phonetic row.
             let fraction: CGFloat = keys.count <= 7 ? 0.24 : 0.14
-            let inset = max(42, view.bounds.width * fraction)
-            row.layoutMargins = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+            let margins = { UIEdgeInsets(top: 0, left: max(42, self.view.bounds.width * fraction), bottom: 0, right: max(42, self.view.bounds.width * fraction)) }
+            row.layoutMargins = margins()
             row.isLayoutMarginsRelativeArrangement = true
+            metricMargins.append((row, margins))
         } else if isControlRow {
             row.layoutMargins = UIEdgeInsets(top: 0, left: isEnglishAlphabet ? 0 : 2, bottom: 0, right: isEnglishAlphabet ? 0 : 2)
             row.isLayoutMarginsRelativeArrangement = true
@@ -1387,18 +1455,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             row.addArrangedSubview(button)
             if isBottom {
                 switch keyName {
-                case "123", "ABC": button.widthAnchor.constraint(equalToConstant: usesPadLayout ? 58 : (isEnglishAlphabet ? keyboardMetrics.englishBottomSmallKeyWidth : keyboardMetrics.scaledPhoneWidth(56))).isActive = true
-                case "emoji", "globe", "dismiss": button.widthAnchor.constraint(equalToConstant: usesPadLayout ? 58 : (isEnglishAlphabet ? keyboardMetrics.englishBottomSmallKeyWidth : keyboardMetrics.scaledPhoneWidth(46))).isActive = true
-                case "return": button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? keyboardMetrics.englishReturnKeyWidth : keyboardMetrics.scaledPhoneWidth(72)).isActive = true
+                case "123", "ABC": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? self.keyboardMetrics.englishBottomSmallKeyWidth : self.keyboardMetrics.scaledPhoneWidth(56)) }
+                case "emoji", "globe", "dismiss": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? self.keyboardMetrics.englishBottomSmallKeyWidth : self.keyboardMetrics.scaledPhoneWidth(46)) }
+                case "return": addMetricWidth(to: button) { isEnglishAlphabet ? self.keyboardMetrics.englishReturnKeyWidth : self.keyboardMetrics.scaledPhoneWidth(72) }
                 default: break
                 }
             } else if !usesPadLayout && isControlRow && keyName == "shift" {
                 // The phonetic layout has seven letter keys here. Giving its
                 // system controls the remaining width makes those letters the
                 // same width as the ten keys above, just like iOS.
-                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? keyboardMetrics.englishThirdRowUtilityWidth : keyboardMetrics.scaledPhoneWidth(31)).isActive = true
+                addMetricWidth(to: button) { isEnglishAlphabet ? self.keyboardMetrics.englishThirdRowUtilityWidth : self.keyboardMetrics.scaledPhoneWidth(31) }
             } else if !usesPadLayout && isControlRow && keyName == "delete" {
-                button.widthAnchor.constraint(equalToConstant: isEnglishAlphabet ? keyboardMetrics.englishThirdRowUtilityWidth : keyboardMetrics.scaledPhoneWidth(31)).isActive = true
+                addMetricWidth(to: button) { isEnglishAlphabet ? self.keyboardMetrics.englishThirdRowUtilityWidth : self.keyboardMetrics.scaledPhoneWidth(31) }
             } else if isControlRow {
                 letterButtons.append(button)
             }
@@ -1458,11 +1526,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self?.hideKeyPreview()
             }
         }
-        let triggerEvent: UIControl.Event = shouldCommitOnTouchDown(key) ? .touchDown : .touchUpInside
-        button.addAction(UIAction { [weak self, weak button] _ in
-            guard button?.consumeLongPressHandled() != true else { return }
-            self?.press(key)
-        }, for: triggerEvent)
+        if key == "globe" {
+            // This gives the system every touch phase it needs to show the
+            // native long-press input-mode list as well as ordinary switching.
+            button.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
+        } else {
+            let triggerEvent: UIControl.Event = shouldCommitOnTouchDown(key) ? .touchDown : .touchUpInside
+            button.addAction(UIAction { [weak self, weak button] _ in
+                guard button?.consumeLongPressHandled() != true else { return }
+                self?.press(key)
+            }, for: triggerEvent)
+        }
         if key == "delete" {
             // Start repeat only after UIKit has positively recognized a hold.
             // A touch-down timer can outlive a rapid tap when the host app
@@ -1627,18 +1701,22 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func symbol(for key: String) -> String? {
+        if key.hasPrefix(Self.topEmojiKeyPrefix) { return nil }
         switch key {
         case "shift": return "shift"
         case "delete": return "delete.left"
         case "emoji": return "face.smiling"
         case "globe": return "globe"
-        case "return": return "return"
+        case "return": return returnKeyTitle == nil ? "return" : nil
         case "dismiss": return "keyboard.chevron.compact.down"
         default: return nil
         }
     }
 
     private func title(for key: String) -> String? {
+        if key.hasPrefix(Self.topEmojiKeyPrefix) {
+            return String(key.dropFirst(Self.topEmojiKeyPrefix.count))
+        }
         if key == "space" {
             switch mode {
             case .sls: return "අක්ෂර Wijesekara"
@@ -1646,7 +1724,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             case .smartPhonetic: return "අක්ෂර Smart Phonetic"
             }
         }
-        if ["shift", "delete", "emoji", "globe", "return", "dismiss"].contains(key) { return nil }
+        if key == "return" { return returnKeyTitle }
+        if ["shift", "delete", "emoji", "globe", "dismiss"].contains(key) { return nil }
         if key == "rakaranshaya" { return shift ? "ZWJ" : "්‍ර" }
         if key == "kundaliya" { return "෴" }
         if key == "yansaya" { return "්‍ය" }
@@ -1674,18 +1753,20 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func press(_ key: String) {
-        UIDevice.current.playInputClick()
+        if KeyboardPreferences.keyClicksEnabled() { UIDevice.current.playInputClick() }
         if key != "space" { lastSpaceTimestamp = nil }
+        if key.hasPrefix(Self.topEmojiKeyPrefix) {
+            let emoji = String(key.dropFirst(Self.topEmojiKeyPrefix.count))
+            EmojiCatalog.record(emoji)
+            commit(suffix: emoji)
+            return
+        }
         switch key {
         case "delete": deleteOnce()
         case "space": insertSpace()
         case "return": commit(suffix: "\n")
         case "emoji": showEmojiPicker()
-        case "globe":
-            // Dismiss our overlay before asking iOS to select the next input
-            // mode. UIKit does not necessarily send viewWillDisappear first.
-            hideEmojiPicker()
-            advanceToNextInputMode()
+        case "globe": break // Routed through handleInputModeList(_:with:).
         case "dismiss":
             commitActiveComposition()
             dismissKeyboard()
@@ -1727,9 +1808,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         emojiPicker = picker
         candidateBar.isHidden = true
         keyboardStack.isHidden = true
-        keyboardMinimumHeight.constant = emojiPickerHeight
-        keyboardMinimumHeight.isActive = true
-        preferredContentSize = CGSize(width: 0, height: emojiPickerHeight)
         view.addSubview(picker)
         NSLayoutConstraint.activate([
             picker.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -1744,12 +1822,55 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         emojiPicker = nil
         candidateBar.isHidden = !showsCandidateBar
         keyboardStack.isHidden = false
-        keyboardMinimumHeight.constant = normalKeyboardHeight
-        keyboardMinimumHeight.isActive = true
-        preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
+    }
+
+    /// `UITextDocumentProxy` changes as focus moves between host controls.
+    /// Use its return trait so the key matches the action users expect.
+    private var returnKeyTitle: String? {
+        switch textDocumentProxy.returnKeyType {
+        case .default: return nil
+        case .go: return "Go"
+        case .google: return "Google"
+        case .join: return "Join"
+        case .next: return "Next"
+        case .route: return "Route"
+        case .search: return "Search"
+        case .send: return "Send"
+        case .yahoo: return "Yahoo"
+        case .done: return "Done"
+        case .emergencyCall: return "Emergency"
+        case .continue: return "Continue"
+        default: return nil
+        }
+    }
+
+    /// Surface the punctuation that hosts conventionally expect for URL and
+    /// email fields without changing the Sinhala letter rows themselves.
+    private var contextualPunctuationKeys: [String] {
+        switch textDocumentProxy.keyboardType {
+        case .URL, .webSearch: return [".", "/"]
+        case .emailAddress: return ["@", "."]
+        case .twitter: return ["@", "#"]
+        default: return []
+        }
+    }
+
+    private func schedulePredictions(for prefix: String) {
+        pendingPredictionUpdate?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingPredictionUpdate = nil
+            self.updatePredictions(for: prefix)
+        }
+        pendingPredictionUpdate = work
+        // This is short enough for the candidate rail to feel live, while a
+        // rapid syllable never pays for several obsolete dictionary queries.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.075, execute: work)
     }
 
     private func updatePredictions(for prefix: String) {
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionUpdate = nil
         guard showsCandidateBar else {
             predictionPrefix = ""
             candidates = [nil, nil, nil]
@@ -1877,7 +1998,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             // The initial touch-down already deleted one character. A
             // confirmed hold begins with the next character, then repeats.
             deleteOnce()
-            let repeater = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            let repeater = Timer(timeInterval: KeyboardPreferences.deleteRepeatSpeed().interval, repeats: true) { [weak self] _ in
                 self?.deleteOnce()
             }
             deleteRepeater = repeater
@@ -2163,7 +2284,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if !inserts.isEmpty { textDocumentProxy.insertText(inserts) }
         
         lastPhoneticRendered = rendered
-        updatePredictions(for: committedPhoneticSegments.map(\.rendered).joined() + rendered)
+        schedulePredictions(for: committedPhoneticSegments.map(\.rendered).joined() + rendered)
     }
 
     private func commitPhoneticComposition(suffix: String = "") {

@@ -3,6 +3,68 @@ import Foundation
 /// Preferences shared by the containing app and the keyboard extension.
 /// Both targets require the same App Group entitlement for this store.
 enum KeyboardPreferences {
+    enum TopRow: String, CaseIterable, Identifiable {
+        case disabled, numbers, emoji
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .disabled: return "Off"
+            case .numbers: return "123"
+            case .emoji: return "Emoji"
+            }
+        }
+    }
+
+    enum KeySpacing: String, CaseIterable, Identifiable {
+        case compact, standard, spacious
+        var id: String { rawValue }
+        var title: String { rawValue.capitalized }
+        var detail: String {
+            switch self {
+            case .compact: "Tighter gaps fit more around each key."
+            case .standard: "Balanced spacing for everyday typing."
+            case .spacious: "Wider gaps give each key more separation."
+            }
+        }
+        var horizontalGap: Double { self == .compact ? 4 : (self == .spacious ? 8 : 6) }
+        var verticalAdjustment: Double { self == .compact ? -1 : (self == .spacious ? 1 : 0) }
+    }
+
+    enum OneHandedPosition: String, CaseIterable, Identifiable {
+        case centered, left, right
+        var id: String { rawValue }
+        var title: String { self == .centered ? "Center" : rawValue.capitalized }
+        var detail: String {
+            switch self {
+            case .centered: "Uses the full available keyboard width."
+            case .left: "Narrows the key grid and aligns it to the left."
+            case .right: "Narrows the key grid and aligns it to the right."
+            }
+        }
+    }
+
+    enum HapticStrength: String, CaseIterable, Identifiable {
+        case light, standard, strong
+        var id: String { rawValue }
+        var title: String { self == .standard ? "Standard" : rawValue.capitalized }
+        var intensity: Double { self == .light ? 0.45 : (self == .strong ? 1 : 0.75) }
+    }
+
+    enum DeleteRepeatSpeed: String, CaseIterable, Identifiable {
+        case slow, standard, fast
+        var id: String { rawValue }
+        var title: String { self == .standard ? "Standard" : rawValue.capitalized }
+        var interval: Double { self == .slow ? 0.12 : (self == .fast ? 0.05 : 0.08) }
+    }
+
+    enum Appearance: String, CaseIterable, Identifiable {
+        case system, light, dark
+        var id: String { rawValue }
+        var title: String { rawValue.capitalized }
+    }
+
     static let appGroupIdentifier = "group.lk.org.akshara.keyboard"
     static let layoutKey = "selectedKeyboardLayout"
     static let emojiKey = "emojiPickerEnabled"
@@ -12,9 +74,17 @@ enum KeyboardPreferences {
     static let predictionProviderKey = "selectedPredictionProvider"
     static let doubleSpacePeriodKey = "doubleSpacePeriodEnabled"
     static let numberRowKey = "numberRowEnabled"
+    static let topRowKey = "keyboardTopRow"
     static let longPressPunctuationKey = "longPressPunctuationEnabled"
     static let smartQuotesKey = "smartQuotesEnabled"
     static let characterPreviewKey = "characterPreviewEnabled"
+    static let keySpacingKey = "keyboardKeySpacing"
+    static let oneHandedPositionKey = "keyboardOneHandedPosition"
+    static let hapticStrengthKey = "keyboardHapticStrength"
+    static let keyClicksKey = "keyboardKeyClicksEnabled"
+    static let deleteRepeatSpeedKey = "keyboardDeleteRepeatSpeed"
+    static let appearanceKey = "keyboardAppearance"
+    static let highContrastKey = "keyboardHighContrastEnabled"
 
     static let supportsSuggestions = true
 
@@ -101,6 +171,19 @@ enum KeyboardPreferences {
         persist(enabled, forKey: numberRowKey)
     }
 
+    /// Migrates the former number-row toggle without making an existing user
+    /// choose a setting again. New writes use the mutually exclusive value.
+    static func topRow() -> TopRow {
+        if let value = defaults.string(forKey: topRowKey), let row = TopRow(rawValue: value) {
+            return row
+        }
+        return numberRowEnabled() ? .numbers : .disabled
+    }
+
+    static func setTopRow(_ row: TopRow) {
+        persist(row.rawValue, forKey: topRowKey)
+    }
+
     static func longPressPunctuationEnabled() -> Bool {
         defaults.object(forKey: longPressPunctuationKey) as? Bool ?? true
     }
@@ -126,5 +209,30 @@ enum KeyboardPreferences {
 
     static func setCharacterPreviewEnabled(_ enabled: Bool) {
         persist(enabled, forKey: characterPreviewKey)
+    }
+
+    static func keySpacing() -> KeySpacing { enumValue(forKey: keySpacingKey, default: .standard) }
+    static func setKeySpacing(_ value: KeySpacing) { persist(value.rawValue, forKey: keySpacingKey) }
+
+    static func oneHandedPosition() -> OneHandedPosition { enumValue(forKey: oneHandedPositionKey, default: .centered) }
+    static func setOneHandedPosition(_ value: OneHandedPosition) { persist(value.rawValue, forKey: oneHandedPositionKey) }
+
+    static func hapticStrength() -> HapticStrength { enumValue(forKey: hapticStrengthKey, default: .standard) }
+    static func setHapticStrength(_ value: HapticStrength) { persist(value.rawValue, forKey: hapticStrengthKey) }
+
+    static func keyClicksEnabled() -> Bool { defaults.object(forKey: keyClicksKey) as? Bool ?? true }
+    static func setKeyClicksEnabled(_ enabled: Bool) { persist(enabled, forKey: keyClicksKey) }
+
+    static func deleteRepeatSpeed() -> DeleteRepeatSpeed { enumValue(forKey: deleteRepeatSpeedKey, default: .standard) }
+    static func setDeleteRepeatSpeed(_ value: DeleteRepeatSpeed) { persist(value.rawValue, forKey: deleteRepeatSpeedKey) }
+
+    static func appearance() -> Appearance { enumValue(forKey: appearanceKey, default: .system) }
+    static func setAppearance(_ value: Appearance) { persist(value.rawValue, forKey: appearanceKey) }
+
+    static func highContrastEnabled() -> Bool { defaults.object(forKey: highContrastKey) as? Bool ?? false }
+    static func setHighContrastEnabled(_ enabled: Bool) { persist(enabled, forKey: highContrastKey) }
+
+    private static func enumValue<Value: RawRepresentable>(forKey key: String, default defaultValue: Value) -> Value where Value.RawValue == String {
+        defaults.string(forKey: key).flatMap(Value.init(rawValue:)) ?? defaultValue
     }
 }
