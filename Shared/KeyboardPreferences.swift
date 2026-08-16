@@ -92,6 +92,13 @@ enum KeyboardPreferences {
         UserDefaults(suiteName: appGroupIdentifier) ?? .standard
     }
 
+    /// The keyboard extension runs in a separate process from the settings
+    /// app. Refresh its App Group cache as it becomes visible so changes made
+    /// in the app are reflected before the extension rebuilds its layout.
+    static func reload() {
+        defaults.synchronize()
+    }
+
     /// The app and keyboard extension are separate processes. Flush each
     /// small preference update through the App Group so an extension opened
     /// immediately after a toggle observes the new value rather than a

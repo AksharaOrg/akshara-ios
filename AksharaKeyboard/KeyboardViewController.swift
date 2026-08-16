@@ -1,4 +1,5 @@
 import UIKit
+import OSLog
 
 /// Keeps the generators alive for the lifetime of the keyboard. Apple recommends
 /// preparing a generator before its event, then preparing it again after firing
@@ -96,9 +97,18 @@ private final class NativeKeyButton: UIButton {
         backgroundColor = UIColor { traits in
             let highContrast = KeyboardPreferences.highContrastEnabled()
             if traits.userInterfaceStyle == .dark {
-                return utility
-                    ? UIColor(white: highContrast ? 0.20 : 0.26, alpha: 1)
-                    : UIColor(white: highContrast ? 0.50 : 0.40, alpha: 1)
+                // iOS 26's dark keyboard keycaps are cool translucent
+                // surfaces, not opaque grey. Keeping alpha below one lets the
+                // keyboard's dark blue/teal material show through just like
+                // the system UK layout. Higher contrast strengthens the
+                // surface without losing that material relationship.
+                let opacity: CGFloat
+                if utility {
+                    opacity = highContrast ? 0.24 : 0.16
+                } else {
+                    opacity = highContrast ? 0.30 : 0.18
+                }
+                return UIColor(red: 0.90, green: 0.96, blue: 0.96, alpha: opacity)
             }
             if #unavailable(iOS 17.0) {
                 return utility
@@ -946,6 +956,10 @@ private final class AlternateCharacterPickerView: UIView {
 
 final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedback {
     private static let topEmojiKeyPrefix = "topEmoji:"
+    private static let layoutLogger = Logger(
+        subsystem: "lk.org.akshara.keyboard",
+        category: "KeyboardLayout"
+    )
     private enum Layer { case letters, numbers, symbols }
     /// KeyboardKit's device configurations are a useful model here: a full
     /// iPad keyboard is not a stretched iPhone keyboard.  It has taller keys,
@@ -964,7 +978,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let usesIOS16Appearance: Bool
 
         var horizontalInset: CGFloat {
-            usesIOS16Appearance ? 5 : (width < 380 ? 5 : 7)
+            if usesIOS16Appearance || width < 380 { return 5 }
+            // The current UK layout's leading edge lands at 20 px on a 3x
+            // phone display (6⅔ pt), rather than a rounded 7 pt.
+            return KeyboardPreferences.keySpacing() == .standard ? 20 / 3 : 7
         }
 
         var horizontalGap: CGFloat { CGFloat(KeyboardPreferences.keySpacing().horizontalGap) }
@@ -988,8 +1005,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             max(0, (usableWidth - (tenKeyWidth * 7 + horizontalGap * 8)) / 2)
         }
 
+        var standardEnglishThirdRowUtilityWidth: CGFloat { tenKeyWidth * 1.36 }
+
+        var standardEnglishThirdRowInnerGap: CGFloat {
+            max(
+                horizontalGap,
+                (usableWidth - (standardEnglishThirdRowUtilityWidth * 2 + tenKeyWidth * 7 + horizontalGap * 6)) / 2
+            )
+        }
+
         var englishBottomSmallKeyWidth: CGFloat { tenKeyWidth * 1.30 }
         var englishReturnKeyWidth: CGFloat { tenKeyWidth * 2.80 }
+        var standardEnglishBottomSmallKeyWidth: CGFloat { tenKeyWidth * 1.295 }
+        var standardEnglishReturnKeyWidth: CGFloat { tenKeyWidth * 2.78 }
         /// Keep iPad controls proportional to the actual input-view width,
         /// including Split View, instead of pinning them to 58 points.
         var padBottomControlWidth: CGFloat { min(72, max(48, usableWidth * 0.075)) }
@@ -1019,9 +1047,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var markedKind: MarkedCompositionKind?
     private var mode: SinhalaEngine.Mode = .sls
     private var lastSpaceTimestamp: TimeInterval?
+    /// UIKit can temporarily give a keyboard extension a full-screen root
+    /// frame while it attaches to a host. Keep the actual keyboard in this
+    /// bottom-anchored, fixed-height container so it is usable immediately
+    /// without allowing equal-height rows to stretch into that transient frame.
+    private let keyboardContentContainer = UIView()
     private let keyboardStack = UIStackView()
     private let candidateBar = UIView()
     private var candidateBarHeight: NSLayoutConstraint!
+    private var keyboardContentHeight: NSLayoutConstraint!
+    private var keyboardHostMinimumHeight: NSLayoutConstraint!
     private var keyboardLeadingInset: NSLayoutConstraint!
     private var keyboardTrailingInset: NSLayoutConstraint!
     private var metricConstraints: [(NSLayoutConstraint, () -> CGFloat)] = []
@@ -1043,17 +1078,22 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     // The language-label transition is an input-session introduction, not a
     // key-layer transition. Rebuilding for Shift or 123 must keep it quiet.
     private var shouldAnimateSpaceLabel = true
+    private var isSpaceTrackpadActive = false
     private var spaceTrackpadLastX: CGFloat = 0
     private var spaceTrackpadRemainder: CGFloat = 0
     private var spaceTrackpadLastTimestamp: TimeInterval = 0
     private var appliedLayoutProfile: LayoutProfile?
     private var appliedLayoutWidth: CGFloat = 0
+    private var lastLoggedLayoutBounds: CGSize = .zero
+    private var needsKeyRebuildWhenGeometryIsStable = true
     private var appliedReturnKeyTitle: String?
     private var appliedKeyboardType: UIKeyboardType?
     // Querying `needsInputModeSwitchKey` before the extension is connected to
-    // a host produces a false answer (and a UIKit warning). Build a safe
-    // initial layout, then resolve the system-owned value in `viewDidAppear`.
+    // a host produces a false answer (and a UIKit warning). Wait for both a
+    // usable input-view width and the host's `textDidChange` callback.
     private var showsInputModeSwitchKey = false
+    private var hasHostTextInputConnection = false
+    private var inputModeSwitchKeyRefreshScheduled = false
 
     private var usesIOS16KeyboardAppearance: Bool {
         if #available(iOS 17.0, *) { return false }
@@ -1105,8 +1145,42 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         switch layoutProfile {
         case .padPortrait, .padLandscape: return 44
         case .phoneLandscape: return 28
-        case .phonePortrait, .compactPad: return 29
+        // Keep the compact iPhone rail three points shorter, matching the
+        // desired overall keyboard height without changing key geometry.
+        case .phonePortrait: return 26
+        case .compactPad: return 25.5
         }
+    }
+
+    /// Preserve the calibrated standard-keyboard geometry from the release
+    /// before layout customisation. The system still owns presentation, while
+    /// this provides the content height needed for the established keycaps.
+    private var normalKeyboardBaseHeight: CGFloat {
+        let topRowHeight: CGFloat = KeyboardPreferences.topRow() == .disabled
+            ? 0
+            : (usesPadLayout
+                ? 58
+                : (layoutProfile == .phoneLandscape
+                    ? 39
+                    : (usesStandardPhoneGeometry ? 54 : 52)))
+        switch layoutProfile {
+        case .padPortrait: return 292 + topRowHeight
+        case .padLandscape: return 374 + topRowHeight
+        case .phoneLandscape: return 162 + topRowHeight
+        // UK on the iPhone 17 Pro uses four 43 pt key rows with three 11 pt
+        // gaps. With the candidate rail and the existing top/bottom insets,
+        // 219 pt preserves that geometry exactly for Standard spacing.
+        case .phonePortrait: return (usesStandardPhoneGeometry ? 219 : 214) + topRowHeight
+        case .compactPad: return 214 + topRowHeight
+        }
+    }
+
+    private var usesStandardPhoneGeometry: Bool {
+        layoutProfile == .phonePortrait && KeyboardPreferences.keySpacing() == .standard
+    }
+
+    private var standardPhoneRowHeight: CGFloat? {
+        usesStandardPhoneGeometry ? 43 : nil
     }
 
     /// All Sinhala layouts share the candidate rail. Direct Wijesekara input
@@ -1114,6 +1188,25 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// word prediction once a local prediction provider is enabled.
     private var showsCandidateBar: Bool {
         KeyboardPreferences.suggestionsEnabled()
+    }
+
+    private var normalKeyboardHeight: CGFloat {
+        self.normalKeyboardBaseHeight + (showsCandidateBar ? candidateHeight : 0)
+    }
+
+    /// The container fixes the content height, so width is the only geometry
+    /// required before it is safe to build keys. This lets us render during
+    /// UIKit's temporary full-height attachment frame without stretching keys.
+    private var hasUsableKeyboardWidth: Bool {
+        view.bounds.width > 0
+    }
+
+    private func logKeyboardLayout(_ event: String) {
+        let bounds = view.bounds.size
+        let profile = String(describing: layoutProfile)
+        Self.layoutLogger.debug(
+            "\(event, privacy: .public) bounds=\(Int(bounds.width), privacy: .public)x\(Int(bounds.height), privacy: .public) preferredHeight=\(Int(self.normalKeyboardHeight), privacy: .public) ready=\(self.hasUsableKeyboardWidth, privacy: .public) profile=\(profile, privacy: .public) pending=\(self.needsKeyRebuildWhenGeometryIsStable, privacy: .public)"
+        )
     }
 
 
@@ -1130,6 +1223,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        logKeyboardLayout("viewDidLoad")
         updateKeyboardAppearance()
         mode = KeyboardPreferences.selectedMode()
         configureLayout()
@@ -1143,6 +1237,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        logKeyboardLayout("viewWillAppear")
+        KeyboardPreferences.reload()
         // `hasFullAccess` is only available inside the keyboard extension.
         // Persist a positive confirmation for the containing app to display.
         if hasFullAccess {
@@ -1163,31 +1259,37 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // At this point UIKit has attached the input view to the host text
-        // input, so it can accurately tell us whether another input mode is
-        // available. Do not move this query into `viewDidLoad` or
-        // `viewWillAppear`: keyboard extensions can reach those callbacks
-        // before the host connection exists.
-        let needsSwitchKey = needsInputModeSwitchKey
-        guard needsSwitchKey != showsInputModeSwitchKey else { return }
-        showsInputModeSwitchKey = needsSwitchKey
-        rebuildKeys()
+        logKeyboardLayout("viewDidAppear")
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        let bounds = view.bounds.size
+        if abs(bounds.width - lastLoggedLayoutBounds.width) > 0.5
+            || abs(bounds.height - lastLoggedLayoutBounds.height) > 0.5 {
+            lastLoggedLayoutBounds = bounds
+            logKeyboardLayout("viewDidLayoutSubviews")
+        }
+        guard hasUsableKeyboardWidth else {
+            needsKeyRebuildWhenGeometryIsStable = true
+            keyboardStack.isHidden = true
+            candidateBar.isHidden = true
+            logKeyboardLayout("deferred zero-width geometry")
+            return
+        }
         // The first layout is where an extension receives its true width.
         // Rebuild only when the profile changes, never per keystroke.
         let profile = layoutProfile
         let widthChanged = abs(view.bounds.width - appliedLayoutWidth) > 0.5
         let profileChanged = profile != appliedLayoutProfile
-        guard profileChanged || widthChanged else { return }
+        guard needsKeyRebuildWhenGeometryIsStable || profileChanged || widthChanged else { return }
         appliedLayoutProfile = profile
         appliedLayoutWidth = view.bounds.width
         applyKeyboardMetrics()
+        refreshInputModeSwitchKeyWhenConnected()
         // A width change is geometric, not structural. Recreating every key
         // here breaks active touches while an iPad is interactively resized.
-        if profileChanged { rebuildKeys() }
+        if needsKeyRebuildWhenGeometryIsStable || profileChanged { rebuildKeys() }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -1211,7 +1313,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        hasHostTextInputConnection = true
         updateInputTraitsIfNeeded()
+        refreshInputModeSwitchKeyWhenConnected()
+    }
+
+    private func refreshInputModeSwitchKeyWhenConnected() {
+        guard hasHostTextInputConnection,
+              hasUsableKeyboardWidth,
+              !inputModeSwitchKeyRefreshScheduled else { return }
+        inputModeSwitchKeyRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.inputModeSwitchKeyRefreshScheduled = false
+            guard self.hasHostTextInputConnection, self.hasUsableKeyboardWidth else { return }
+            let needsSwitchKey = self.needsInputModeSwitchKey
+            guard needsSwitchKey != self.showsInputModeSwitchKey else { return }
+            self.showsInputModeSwitchKey = needsSwitchKey
+            self.logKeyboardLayout("input mode switch key refreshed")
+            self.rebuildKeys()
+        }
     }
 
     private func updateInputTraitsIfNeeded() {
@@ -1247,10 +1368,27 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func configureLayout() {
+        keyboardContentContainer.translatesAutoresizingMaskIntoConstraints = false
+        keyboardContentContainer.clipsToBounds = false
+        view.addSubview(keyboardContentContainer)
+        keyboardContentHeight = keyboardContentContainer.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
+        // `preferredContentSize` is only advisory for a keyboard extension.
+        // Without a matching root constraint UIKit can settle the host at
+        // 216 pt while this container remains 248 pt, placing the prediction
+        // rail above the host's visible bounds.
+        keyboardHostMinimumHeight = view.heightAnchor.constraint(greaterThanOrEqualToConstant: normalKeyboardHeight)
+        NSLayoutConstraint.activate([
+            keyboardContentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            keyboardContentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            keyboardContentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            keyboardContentHeight,
+            keyboardHostMinimumHeight
+        ])
+
         candidateBar.translatesAutoresizingMaskIntoConstraints = false
         candidateBar.isUserInteractionEnabled = true
         candidateBar.backgroundColor = .clear
-        view.addSubview(candidateBar)
+        keyboardContentContainer.addSubview(candidateBar)
         let segments = UIStackView()
         segments.axis = .horizontal
         segments.distribution = .fillEqually
@@ -1298,16 +1436,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         candidateBarHeight = candidateBar.heightAnchor.constraint(equalToConstant: showsCandidateBar ? candidateHeight : 0)
         NSLayoutConstraint.activate([
-            candidateBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            candidateBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            candidateBar.topAnchor.constraint(equalTo: view.topAnchor),
+            candidateBar.leadingAnchor.constraint(equalTo: keyboardContentContainer.leadingAnchor),
+            candidateBar.trailingAnchor.constraint(equalTo: keyboardContentContainer.trailingAnchor),
+            candidateBar.topAnchor.constraint(equalTo: keyboardContentContainer.topAnchor),
             candidateBarHeight
         ])
         keyboardStack.axis = .vertical; keyboardStack.spacing = 8; keyboardStack.distribution = .fillEqually
         keyboardStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(keyboardStack)
-        keyboardLeadingInset = keyboardStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: keyboardMetrics.horizontalInset)
-        keyboardTrailingInset = keyboardStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -keyboardMetrics.horizontalInset)
+        keyboardContentContainer.addSubview(keyboardStack)
+        keyboardLeadingInset = keyboardStack.leadingAnchor.constraint(equalTo: keyboardContentContainer.leadingAnchor, constant: keyboardMetrics.horizontalInset)
+        keyboardTrailingInset = keyboardStack.trailingAnchor.constraint(equalTo: keyboardContentContainer.trailingAnchor, constant: -keyboardMetrics.horizontalInset)
         NSLayoutConstraint.activate([
             keyboardLeadingInset,
             keyboardTrailingInset,
@@ -1318,10 +1456,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             // Give the iOS 16 grid a little more breathing room vertically
             // without reintroducing the unwanted left/right inset.
             keyboardStack.bottomAnchor.constraint(
-                equalTo: view.bottomAnchor,
+                equalTo: keyboardContentContainer.bottomAnchor,
                 constant: usesIOS16KeyboardAppearance ? -2 : -7
             ),
         ])
+        preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
         trackpadSurface.translatesAutoresizingMaskIntoConstraints = false
         trackpadSurface.isUserInteractionEnabled = false
         trackpadSurface.layer.cornerRadius = 7
@@ -1330,7 +1469,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             traits.userInterfaceStyle == .dark ? UIColor(white: 0.58, alpha: 1) : UIColor(white: 0.72, alpha: 1)
         }
         trackpadSurface.alpha = 0
-        view.addSubview(trackpadSurface)
+        keyboardContentContainer.addSubview(trackpadSurface)
         NSLayoutConstraint.activate([
             trackpadSurface.leadingAnchor.constraint(equalTo: keyboardStack.leadingAnchor),
             trackpadSurface.trailingAnchor.constraint(equalTo: keyboardStack.trailingAnchor),
@@ -1340,8 +1479,23 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func rebuildKeys() {
+        if emojiPicker == nil {
+            keyboardContentHeight?.constant = normalKeyboardHeight
+            keyboardHostMinimumHeight?.constant = normalKeyboardHeight
+            preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
+        }
+        guard hasUsableKeyboardWidth else {
+            needsKeyRebuildWhenGeometryIsStable = true
+            keyboardStack.isHidden = true
+            candidateBar.isHidden = true
+            logKeyboardLayout("rebuild deferred")
+            return
+        }
+        needsKeyRebuildWhenGeometryIsStable = false
         candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
         candidateBar.isHidden = !showsCandidateBar
+        keyboardStack.isHidden = false
+        logKeyboardLayout("rebuild keys")
         metricConstraints.removeAll()
         metricMargins.removeAll()
         keyboardStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -1398,6 +1552,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func applyKeyboardMetrics() {
         candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
+        if emojiPicker == nil {
+            keyboardContentHeight?.constant = normalKeyboardHeight
+            keyboardHostMinimumHeight?.constant = normalKeyboardHeight
+            preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
+        }
         let baseInset = keyboardMetrics.horizontalInset
         switch KeyboardPreferences.oneHandedPosition() {
         case .centered:
@@ -1411,7 +1570,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             keyboardTrailingInset?.constant = -baseInset
         }
         let baseVerticalGap: CGFloat = usesPadLayout ? 10 : (layoutProfile == .phoneLandscape ? 5 : 8)
-        keyboardStack.spacing = max(3, baseVerticalGap + CGFloat(KeyboardPreferences.keySpacing().verticalAdjustment))
+        if usesStandardPhoneGeometry {
+            keyboardStack.spacing = 11
+        } else {
+            keyboardStack.spacing = max(3, baseVerticalGap + CGFloat(KeyboardPreferences.keySpacing().verticalAdjustment))
+        }
+        // The matched UK grid sits four points lower inside the keyboard
+        // chrome on a portrait phone. This is a visual placement adjustment;
+        // row dimensions remain constrained to the measured 43 pt height.
+        keyboardStack.transform = usesStandardPhoneGeometry
+            ? CGAffineTransform(translationX: 0, y: 4)
+            : .identity
         metricConstraints.forEach { constraint, value in constraint.constant = value() }
         metricMargins.forEach { row, value in row.layoutMargins = value() }
         candidateButtons.enumerated().forEach { index, button in
@@ -1427,6 +1596,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func makeRow(_ keys: [String], index: Int) -> UIStackView {
         let row = UIStackView(); row.axis = .horizontal; row.spacing = keyboardMetrics.horizontalGap; row.alignment = .fill
+        if let standardPhoneRowHeight {
+            row.heightAnchor.constraint(equalToConstant: standardPhoneRowHeight).isActive = true
+        }
         let isBottom = keys.contains("space")
         let isThirdLetterRow = layer == .letters && keys.contains("shift")
         let isControlRow = isThirdLetterRow || (layer != .letters && index == 2)
@@ -1458,20 +1630,24 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             row.addArrangedSubview(button)
             if isBottom {
                 switch keyName {
-                case "123", "ABC": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? self.keyboardMetrics.englishBottomSmallKeyWidth : self.keyboardMetrics.scaledPhoneWidth(56)) }
-                case "emoji", "globe", "dismiss": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? self.keyboardMetrics.englishBottomSmallKeyWidth : self.keyboardMetrics.scaledPhoneWidth(46)) }
-                case "return": addMetricWidth(to: button) { isEnglishAlphabet ? self.keyboardMetrics.englishReturnKeyWidth : self.keyboardMetrics.scaledPhoneWidth(72) }
+                case "123", "ABC": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(56)) }
+                case "emoji", "globe", "dismiss": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(46)) }
+                case "return": addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishReturnKeyWidth : self.keyboardMetrics.englishReturnKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(72) }
                 default: break
                 }
             } else if !usesPadLayout && isControlRow && keyName == "shift" {
                 // The phonetic layout has seven letter keys here. Giving its
                 // system controls the remaining width makes those letters the
                 // same width as the ten keys above, just like iOS.
-                addMetricWidth(to: button) { isEnglishAlphabet ? self.keyboardMetrics.englishThirdRowUtilityWidth : self.keyboardMetrics.scaledPhoneWidth(31) }
+                addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishThirdRowUtilityWidth : self.keyboardMetrics.englishThirdRowUtilityWidth) : self.keyboardMetrics.scaledPhoneWidth(31) }
             } else if !usesPadLayout && isControlRow && keyName == "delete" {
-                addMetricWidth(to: button) { isEnglishAlphabet ? self.keyboardMetrics.englishThirdRowUtilityWidth : self.keyboardMetrics.scaledPhoneWidth(31) }
+                addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishThirdRowUtilityWidth : self.keyboardMetrics.englishThirdRowUtilityWidth) : self.keyboardMetrics.scaledPhoneWidth(31) }
             } else if isControlRow {
                 letterButtons.append(button)
+            }
+            if usesStandardPhoneGeometry, isEnglishAlphabet, isControlRow,
+               keyName == "shift" || keyName == "m" {
+                row.setCustomSpacing(keyboardMetrics.standardEnglishThirdRowInnerGap, after: button)
             }
         }
         for button in letterButtons.dropFirst() { button.widthAnchor.constraint(equalTo: letterButtons[0].widthAnchor).isActive = true }
@@ -1487,6 +1663,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             utility: utility
         )
         button.applyLayoutMetrics(isPad: usesPadLayout)
+        if key == "return", let actionTitle = returnKeyTitle {
+            // Return actions are labels, not characters. They must not inherit
+            // the 22 pt alphabetic-key font: labels such as "Search" otherwise
+            // look oversized next to the system keyboard.
+            let fontSize: CGFloat
+            switch actionTitle.count {
+            case ...4: fontSize = usesPadLayout ? 18 : 16
+            case 5...7: fontSize = usesPadLayout ? 17 : 15
+            default: fontSize = usesPadLayout ? 15 : 13
+            }
+            button.titleLabel?.font = .systemFont(ofSize: fontSize, weight: .medium)
+            button.titleLabel?.minimumScaleFactor = 0.75
+        }
         button.touchDown = { [weak self] in
             // If iOS failed to deliver an old Delete touch-up (for example
             // after a host-app cursor move), any new contact is authoritative.
@@ -1634,10 +1823,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func setTrackpadAppearance(active: Bool, animated: Bool = true) {
+        isSpaceTrackpadActive = active
         setKeyGlyphsHidden(active, animated: animated)
-        // Native Space-trackpad mode does not dim the entire keyboard. Keep
-        // this legacy overlay hidden; only the individual key glyphs fade.
-        trackpadSurface.alpha = 0
+        // The space touch is already owned by its long-press recognizer. A
+        // nearly invisible overlay blocks any *new* touches from reaching
+        // other keys until that touch ends. UIKit does not hit-test views
+        // whose alpha is below 0.01, hence the deliberately tiny value.
+        trackpadSurface.isUserInteractionEnabled = active
+        trackpadSurface.alpha = active ? 0.011 : 0
+        candidateBar.isUserInteractionEnabled = !active
     }
 
     private func setKeyGlyphsHidden(_ hidden: Bool, animated: Bool) {
@@ -1756,6 +1950,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func press(_ key: String) {
+        guard !isSpaceTrackpadActive else { return }
         if KeyboardPreferences.keyClicksEnabled() { UIDevice.current.playInputClick() }
         if key != "space" { lastSpaceTimestamp = nil }
         if key.hasPrefix(Self.topEmojiKeyPrefix) {
@@ -1880,6 +2075,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             candidateButtons.forEach { $0.setTitle(nil, for: .normal); $0.isEnabled = false }
             return
         }
+        // The attachment path temporarily hides the rail while the input view
+        // has no width. A queued prediction refresh can outlive that phase, so
+        // restore the visible state here rather than relying only on a key
+        // rebuild to do it.
+        if emojiPicker == nil {
+            candidateBarHeight?.constant = candidateHeight
+            candidateBar.isHidden = false
+        }
         predictionPrefix = prefix
         let request = SinhalaPredictionRequest(
             composingText: prefix,
@@ -1901,9 +2104,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             button.setTitle(candidates[index], for: .normal)
             button.isEnabled = candidates[index] != nil
         }
+        Self.layoutLogger.debug(
+            "predictions updated count=\(ranked.count, privacy: .public) railHidden=\(self.candidateBar.isHidden, privacy: .public) railHeight=\(Int(self.candidateBar.bounds.height), privacy: .public)"
+        )
     }
 
     @objc private func selectPrediction(_ sender: UIButton) {
+        guard !isSpaceTrackpadActive else { return }
         guard sender.tag < candidates.count, let candidate = candidates[sender.tag] else { return }
         let precedingWord = predictionContext(for: predictionPrefix).last
         if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
