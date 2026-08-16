@@ -974,15 +974,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
 
         var tenKeyWidth: CGFloat {
-            (usableWidth - horizontalGap * 9) / 10
+            // The extension can construct its first view hierarchy while its
+            // host input view is still zero-width. Never turn that temporary
+            // state into a negative explicit key-width constraint.
+            max(0, (usableWidth - horizontalGap * 9) / 10)
         }
 
         var englishSecondRowInset: CGFloat {
-            (usableWidth - (tenKeyWidth * 9 + horizontalGap * 8)) / 2
+            max(0, (usableWidth - (tenKeyWidth * 9 + horizontalGap * 8)) / 2)
         }
 
         var englishThirdRowUtilityWidth: CGFloat {
-            (usableWidth - (tenKeyWidth * 7 + horizontalGap * 8)) / 2
+            max(0, (usableWidth - (tenKeyWidth * 7 + horizontalGap * 8)) / 2)
         }
 
         var englishBottomSmallKeyWidth: CGFloat { tenKeyWidth * 1.30 }
@@ -995,7 +998,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         /// their existing proportions rather than forcing ten-key metrics
         /// onto a Sinhala-specific arrangement.
         func scaledPhoneWidth(_ reference: CGFloat) -> CGFloat {
-            reference * usableWidth / 379
+            max(0, reference * usableWidth / 379)
         }
     }
     private var layer: Layer = .letters
