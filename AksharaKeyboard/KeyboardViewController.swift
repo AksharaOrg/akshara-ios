@@ -291,10 +291,21 @@ private enum EmojiCategory: CaseIterable, Hashable {
 /// update, rendered by Apple's own color emoji font.
 private enum EmojiCatalog {
     private static let recentKey = "AksharaRecentEmoji"
+    private static let catalogCachePrefix = "AksharaEmojiCatalog.v4"
+    private static let groupPrefix = "akshara-emoji-group:"
+    private static let orderPrefix = "akshara-emoji-order:"
     private static let topRowFallback = ["😀", "😂", "🥹", "❤️", "👍", "🙏", "🔥", "🎉", "😍", "👏"]
     private static let excludedScalars: Set<UInt32> = [0x23, 0x2A, 0xA9, 0xAE, 0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D, 0x3297, 0x3299]
 
-    static let allBaseEmoji: [String] = {
+    private static var catalogCacheKey: String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(catalogCachePrefix).\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+    }
+
+    /// Build the base list from the Unicode version installed on the device.
+    /// This automatically includes single-code-point emoji added by an iOS
+    /// release without requiring an app update.
+    private static func currentBaseEmoji() -> [String] {
         var result: [String] = []
         for value in UInt32(0x20)...UInt32(0x1FAFF) {
             guard let scalar = Unicode.Scalar(value), scalar.properties.isEmoji else { continue }
@@ -303,70 +314,139 @@ private enum EmojiCatalog {
             result.append(String(scalar))
         }
         return result
-    }()
-
-    static let flags: [String] = Locale.Region.isoRegions.compactMap { region in
-        let code = region.identifier.uppercased()
-        guard code.count == 2,
-              let first = code.unicodeScalars.first, let last = code.unicodeScalars.last,
-              let firstFlag = Unicode.Scalar(0x1F1E6 + first.value - 65),
-              let lastFlag = Unicode.Scalar(0x1F1E6 + last.value - 65) else { return nil }
-        return String(firstFlag) + String(lastFlag)
-    }.sorted()
+    }
 
     /// Category membership and order are fixed for the installed Unicode
     /// version. Cache every iOS-style section once instead of rebuilding it
     /// for every collection-view cell; the Symbols page previously repeated
     /// six full category scans for each emoji it considered.
     private static let categorizedEmoji: [EmojiCategory: [String]] = {
-        // Apple starts Smileys & People with the familiar face sequence, not
-        // with the earlier weather symbols in the Unicode 1F300 block.
-        let faces = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return (0x1F600...0x1F64F).contains(code)
+        let defaults = KeyboardPreferences.defaults
+        if let cached = defaults.dictionary(forKey: catalogCacheKey) as? [String: [String]],
+           let cachedCatalog = catalog(from: cached) {
+            return cachedCatalog
         }
-        let smileysAndPeople = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return ((0x1F300...0x1F3FF).contains(code) || (0x1F600...0x1F64F).contains(code))
-                && !(0x1F600...0x1F64F).contains(code)
-        }
-        let smileys = faces + smileysAndPeople
-        let animals = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return (0x1F400...0x1F4AF).contains(code)
-        }
-        let food = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return (0x1F32D...0x1F37F).contains(code) || (0x1F950...0x1F96F).contains(code)
-        }
-        let activity = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return (0x1F380...0x1F3FF).contains(code) || (0x1F947...0x1F94C).contains(code)
-        }
-        let travel = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return (0x1F680...0x1F6FF).contains(code) || (0x1F900...0x1F93F).contains(code)
-        }
-        let objects = allBaseEmoji.filter { value in
-            guard let code = value.unicodeScalars.first?.value else { return false }
-            return (0x1F4B0...0x1F5FF).contains(code) || (0x1F9E0...0x1FAFF).contains(code)
-        }
-        let assigned = Set(smileys + animals + food + activity + travel + objects)
-        return [
-            .smileys: smileys,
-            .animals: animals,
-            .food: food,
-            .activity: activity,
-            .travel: travel,
-            .objects: objects,
-            .symbols: allBaseEmoji.filter { !assigned.contains($0) },
-            .flags: flags
-        ]
+
+        let generatedCatalog = buildCatalog()
+        defaults.set(serialized(generatedCatalog), forKey: catalogCacheKey)
+        defaults.synchronize()
+        return generatedCatalog
     }()
+
+    private static func buildCatalog() -> [EmojiCategory: [String]] {
+        let baseEmoji = currentBaseEmoji()
+        let baseSet = Set(baseEmoji)
+        // The bundled CLDR index carries the official multi-scalar emoji
+        // sequences. Keep only sequences whose emoji scalars are recognized
+        // by this iOS runtime, so an older system never receives a newer
+        // system's unsupported joined emoji.
+        let sequences = searchIndex.keys.filter { emoji in
+            guard !baseSet.contains(emoji), emoji.unicodeScalars.contains(where: { $0.properties.isEmoji }) else {
+                return false
+            }
+            return emoji.unicodeScalars.allSatisfy { scalar in
+                scalar.properties.isEmoji
+                    || scalar.value == 0x200D // zero-width joiner
+                    || (0xFE00...0xFE0F).contains(scalar.value) // variation selectors
+                    || scalar.value == 0x20E3 // keycap combiner
+                    || (0xE0020...0xE007F).contains(scalar.value) // emoji tag sequence
+            }
+        }.sorted(by: emojiCatalogOrder)
+        let allEmoji = Array(Set(baseEmoji + sequences)).sorted(by: emojiCatalogOrder)
+        var result = Dictionary(uniqueKeysWithValues: EmojiCategory.allCases.map { ($0, [String]()) })
+        for emoji in allEmoji {
+            let category = emojiCategory(for: emoji) ?? .symbols
+            result[category, default: []].append(emoji)
+        }
+        return result
+    }
+
+    private static func emojiCatalogOrder(_ lhs: String, _ rhs: String) -> Bool {
+        let left = emojiOrder(for: lhs) ?? Int.max
+        let right = emojiOrder(for: rhs) ?? Int.max
+        if left != right { return left < right }
+        return lhs.unicodeScalars.lexicographicallyPrecedes(rhs.unicodeScalars, by: <)
+    }
+
+    private static func emojiCategory(for emoji: String) -> EmojiCategory? {
+        guard let group = metadata(for: emoji)?.first(where: { $0.hasPrefix(groupPrefix) }) else { return nil }
+        switch String(group.dropFirst(groupPrefix.count)) {
+        case "smileys": return .smileys
+        case "animals": return .animals
+        case "food": return .food
+        case "activity": return .activity
+        case "travel": return .travel
+        case "objects": return .objects
+        case "symbols": return .symbols
+        case "flags": return .flags
+        default: return nil
+        }
+    }
+
+    private static func emojiOrder(for emoji: String) -> Int? {
+        guard let value = metadata(for: emoji)?.first(where: { $0.hasPrefix(orderPrefix) }) else { return nil }
+        return Int(value.dropFirst(orderPrefix.count))
+    }
+
+    private static func metadata(for emoji: String) -> [String]? {
+        if let exact = searchIndex[emoji] { return exact }
+        let withEmojiPresentation = emoji + "\u{FE0F}"
+        return searchIndex[withEmojiPresentation]
+    }
+
+    private static func catalog(from cached: [String: [String]]) -> [EmojiCategory: [String]]? {
+        var result: [EmojiCategory: [String]] = [:]
+        for category in EmojiCategory.allCases {
+            guard let values = cached[category.title] else { return nil }
+            result[category] = values
+        }
+        return result
+    }
+
+    private static func serialized(_ catalog: [EmojiCategory: [String]]) -> [String: [String]] {
+        Dictionary(uniqueKeysWithValues: EmojiCategory.allCases.map { category in
+            (category.title, catalog[category] ?? [])
+        })
+    }
 
     static func emoji(for category: EmojiCategory) -> [String] {
         if category == .recent { return recent() }
-        return categorizedEmoji[category] ?? []
+        return applyingPreferredSkinTone(to: categorizedEmoji[category] ?? [])
+    }
+
+    /// The native keyboard shows one default tone per emoji and exposes the
+    /// alternatives through a long press. Akshara mirrors that first choice
+    /// with its own shared setting while keeping actual selections intact in
+    /// Recents.
+    private static func applyingPreferredSkinTone(to emoji: [String]) -> [String] {
+        let tone = KeyboardPreferences.emojiSkinTone()
+        var variants: [String: [String]] = [:]
+        for value in emoji {
+            variants[skinToneFreeKey(for: value), default: []].append(value)
+        }
+
+        var seen = Set<String>()
+        return emoji.compactMap { value in
+            let key = skinToneFreeKey(for: value)
+            guard seen.insert(key).inserted, let choices = variants[key] else { return nil }
+            if let modifier = tone.modifierScalar,
+               let preferred = choices.first(where: { $0.unicodeScalars.contains(modifier) }) {
+                return preferred
+            }
+            return choices.first(where: { !containsSkinTone($0) }) ?? choices[0]
+        }
+    }
+
+    private static func skinToneFreeKey(for emoji: String) -> String {
+        String(String.UnicodeScalarView(emoji.unicodeScalars.filter { !isSkinTone($0) }))
+    }
+
+    private static func containsSkinTone(_ emoji: String) -> Bool {
+        emoji.unicodeScalars.contains(where: isSkinTone)
+    }
+
+    private static func isSkinTone(_ scalar: UnicodeScalar) -> Bool {
+        (0x1F3FB...0x1F3FF).contains(scalar.value)
     }
 
     static func record(_ emoji: String) {
@@ -440,19 +520,17 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     var onSelect: ((String) -> Void)?
     var onDismiss: (() -> Void)?
     var onDelete: (() -> Void)?
-    // The Frequently Used list changes when an emoji is selected. Keep a
-    // snapshot for the current grid so its cells continue to select exactly
-    // the emoji they display until the user switches sections or reopens it.
-    private var displayedEmoji = EmojiCatalog.emoji(for: .recent)
+    // One long, horizontally scrolling panel contains every category. UIKit
+    // only keeps visible cells alive, while this snapshot keeps a selection
+    // stable if Frequently Used changes after an emoji is inserted.
+    private var emojiSections = EmojiCategory.allCases.map { EmojiCatalog.emoji(for: $0) }
     private var category: EmojiCategory = .recent {
         didSet {
-            displayedEmoji = EmojiCatalog.emoji(for: category)
-            collectionView.reloadData()
-            collectionView.setContentOffset(.zero, animated: false)
             updateCategorySelection()
         }
     }
     private var categoryButtons: [EmojiCategory: UIButton] = [:]
+    private var categorySelectionIndicators: [EmojiCategory: UIView] = [:]
     private let categoryBar = UIStackView()
     private let collectionView: UICollectionView
     private let titleLabel = UILabel()
@@ -494,7 +572,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         let layout = UICollectionViewFlowLayout()
         layout.minimumInteritemSpacing = 0
         layout.minimumLineSpacing = 3
-        layout.scrollDirection = .vertical
+        layout.scrollDirection = .horizontal
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
         super.init(frame: frame)
         translatesAutoresizingMaskIntoConstraints = false
@@ -547,6 +625,18 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         for item in EmojiCategory.allCases {
             let slot = UIView()
             categoryStrip.addArrangedSubview(slot)
+            let indicator = UIView()
+            indicator.translatesAutoresizingMaskIntoConstraints = false
+            indicator.isUserInteractionEnabled = false
+            indicator.layer.cornerRadius = 16
+            indicator.layer.cornerCurve = .continuous
+            indicator.backgroundColor = UIColor { traits in
+                traits.userInterfaceStyle == .dark
+                    ? UIColor(white: 0.34, alpha: 1)
+                    : UIColor(red: 0.76, green: 0.77, blue: 0.80, alpha: 1)
+            }
+            slot.addSubview(indicator)
+            categorySelectionIndicators[item] = indicator
             let button = UIButton(type: .system)
             button.translatesAutoresizingMaskIntoConstraints = false
             button.setImage(UIImage(systemName: item.symbolName), for: .normal)
@@ -557,6 +647,10 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             categoryButtons[item] = button
             slot.addSubview(button)
             NSLayoutConstraint.activate([
+                indicator.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
+                indicator.centerYAnchor.constraint(equalTo: slot.centerYAnchor),
+                indicator.widthAnchor.constraint(equalToConstant: 32),
+                indicator.heightAnchor.constraint(equalTo: indicator.widthAnchor),
                 button.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
                 button.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
                 button.topAnchor.constraint(equalTo: slot.topAnchor),
@@ -575,7 +669,9 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         delete.widthAnchor.constraint(equalToConstant: 51).isActive = true
 
         collectionView.backgroundColor = .clear
-        collectionView.alwaysBounceVertical = true
+        collectionView.alwaysBounceHorizontal = true
+        collectionView.alwaysBounceVertical = false
+        collectionView.showsHorizontalScrollIndicator = false
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "emoji")
@@ -652,18 +748,18 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         NSLayoutConstraint.activate([
             searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            searchField.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             searchField.heightAnchor.constraint(equalToConstant: 38),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
-            titleLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            titleLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 5),
             categoryBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             categoryBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             categoryBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
             categoryBar.heightAnchor.constraint(equalToConstant: 36),
             collectionView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             collectionView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            collectionView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            collectionView.bottomAnchor.constraint(equalTo: categoryBar.topAnchor, constant: -3),
+            collectionView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            collectionView.bottomAnchor.constraint(equalTo: categoryBar.topAnchor, constant: -1),
             emojiSuggestionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             emojiSuggestionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             emojiSuggestionRow.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 4),
@@ -681,7 +777,13 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     required init?(coder: NSCoder) { nil }
     deinit { emojiDeleteRepeater?.invalidate() }
 
-    @objc private func selectCategory(_ sender: UIButton) { category = EmojiCategory.allCases[sender.tag] }
+    @objc private func selectCategory(_ sender: UIButton) {
+        let selectedCategory = EmojiCategory.allCases[sender.tag]
+        let section = sender.tag
+        guard !emojiSections[section].isEmpty else { return }
+        category = selectedCategory
+        collectionView.scrollToItem(at: IndexPath(item: 0, section: section), at: .left, animated: true)
+    }
     @objc private func dismissPicker() { onDismiss?() }
     @objc private func deleteEmojiInput() { onDelete?() }
 
@@ -782,15 +884,16 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             let selected = item == category
             button.alpha = selected ? 1 : 0.48
             button.tintColor = selected ? .label : .secondaryLabel
-            button.layer.cornerRadius = 15
-            button.layer.cornerCurve = .continuous
-            button.backgroundColor = selected ? UIColor { traits in
-                traits.userInterfaceStyle == .dark ? UIColor(white: 0.34, alpha: 1) : UIColor(red: 0.76, green: 0.77, blue: 0.80, alpha: 1)
-            } : .clear
+            button.backgroundColor = .clear
+            categorySelectionIndicators[item]?.isHidden = !selected
         }
     }
 
-    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { displayedEmoji.count }
+    func numberOfSections(in collectionView: UICollectionView) -> Int { EmojiCategory.allCases.count }
+
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        emojiSections[section].count
+    }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "emoji", for: indexPath)
@@ -804,18 +907,35 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             cell.contentView.addSubview(label)
             NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor), label.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor), label.topAnchor.constraint(equalTo: cell.contentView.topAnchor), label.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor)])
         }
-        label.text = displayedEmoji[indexPath.item]
+        label.text = emojiSections[indexPath.section][indexPath.item]
         return cell
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        let emoji = displayedEmoji[indexPath.item]
+        let emoji = emojiSections[indexPath.section][indexPath.item]
         EmojiCatalog.record(emoji)
         onSelect?(emoji)
     }
 
     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
-        CGSize(width: floor(collectionView.bounds.width / 9), height: 38)
+        let rows: CGFloat = 4
+        let verticalSpacing = (collectionViewLayout as? UICollectionViewFlowLayout)?.minimumInteritemSpacing ?? 0
+        let height = floor((collectionView.bounds.height - verticalSpacing * (rows - 1)) / rows)
+        return CGSize(width: floor(collectionView.bounds.width / 9), height: height)
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === collectionView,
+              let layout = collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return }
+        let visibleRect = CGRect(origin: collectionView.contentOffset, size: collectionView.bounds.size)
+        let visibleCenterX = visibleRect.midX
+        let closest = layout.layoutAttributesForElements(in: visibleRect)?.min {
+            abs($0.center.x - visibleCenterX) < abs($1.center.x - visibleCenterX)
+        }
+        guard let section = closest?.indexPath.section,
+              EmojiCategory.allCases.indices.contains(section) else { return }
+        let visibleCategory = EmojiCategory.allCases[section]
+        if category != visibleCategory { category = visibleCategory }
     }
 }
 
@@ -1099,6 +1219,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var rawBuffer = ""
     private var phoneticBuffer = ""
     private var lastPhoneticRendered = ""
+    /// The host context immediately before the unmarked phonetic preview.
+    /// It lets us stop deleting exactly at the composition boundary even when
+    /// host apps disagree on whether a Sinhala cluster is one or many units.
+    private var phoneticCompositionAnchor: String?
     /// The phonetic compositor needs a short look-behind window so a later
     /// vowel can replace a consonant's provisional virama.  Keep that window
     /// marked, but commit older, unambiguous chunks.  Some host editors are
@@ -2569,22 +2693,22 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func updatePhoneticComposition() {
-        commitStablePhoneticPrefixIfNeeded()
         let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
 
-        // The extension's document proxy removes Sinhala scalars one at a
-        // time, rather than one extended grapheme cluster. Replacing only a
-        // Character-based suffix therefore leaves viramas and consonants
-        // behind (for example, `thimira` became `ටතතිමමිරර`). Replace the
-        // small active buffer in full; it also handles Smart Phonetic's
-        // `හ්‍ර්` → `හෘ` rewrite without retaining or losing a base letter.
-        for _ in lastPhoneticRendered.unicodeScalars {
-            textDocumentProxy.deleteBackward()
+        // `deleteBackward()` is inconsistent across host editors for Sinhala
+        // clusters: some delete a scalar, while others delete a whole cluster.
+        // Keep the preview unmarked (and therefore without an underline), but
+        // delete only until the original host context is restored. This avoids
+        // both leftover viramas and deletion of the preceding space.
+        if lastPhoneticRendered.isEmpty {
+            phoneticCompositionAnchor = textDocumentProxy.documentContextBeforeInput
+        } else {
+            removeActivePhoneticRendering()
         }
         if !rendered.isEmpty { textDocumentProxy.insertText(rendered) }
-        
+
         lastPhoneticRendered = rendered
-        schedulePredictions(for: committedPhoneticSegments.map(\.rendered).joined() + rendered)
+        schedulePredictions(for: rendered)
     }
 
     private func commitPhoneticComposition(suffix: String = "") {
@@ -2592,14 +2716,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if !suffix.isEmpty { textDocumentProxy.insertText(suffix) }
         phoneticBuffer = ""
         lastPhoneticRendered = ""
+        phoneticCompositionAnchor = nil
         committedPhoneticSegments.removeAll()
         updatePredictions(for: "")
     }
 
     private func clearPhoneticComposition() {
-        for _ in lastPhoneticRendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        removeActivePhoneticRendering()
         phoneticBuffer = ""
         lastPhoneticRendered = ""
+        phoneticCompositionAnchor = nil
         for segment in committedPhoneticSegments.reversed() {
             for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
         }
@@ -2644,8 +2770,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// final chunk so the deletion retains the same transliteration behavior
     /// as it had while the whole word was marked.
     private func restorePreviousPhoneticSegmentAfterDelete() {
-        for _ in lastPhoneticRendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        removeActivePhoneticRendering()
         lastPhoneticRendered = ""
+        phoneticCompositionAnchor = nil
         
         guard var segment = committedPhoneticSegments.popLast() else {
             updatePredictions(for: "")
@@ -2658,6 +2785,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             updatePredictions(for: committedPhoneticSegments.map(\.rendered).joined())
         } else {
             updatePhoneticComposition()
+        }
+    }
+
+    private func removeActivePhoneticRendering() {
+        guard !lastPhoneticRendered.isEmpty else { return }
+
+        let maximumDeletes = lastPhoneticRendered.unicodeScalars.count
+        for _ in 0..<maximumDeletes {
+            textDocumentProxy.deleteBackward()
+            guard let anchor = phoneticCompositionAnchor else { continue }
+            if textDocumentProxy.documentContextBeforeInput == anchor { return }
         }
     }
 

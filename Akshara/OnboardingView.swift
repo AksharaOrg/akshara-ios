@@ -89,6 +89,7 @@ private struct DashboardLabel: View {
 
 private struct KeyboardSettingsView: View {
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
+    @State private var emojiSkinTone = KeyboardPreferences.emojiSkinTone()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
     @State private var doubleSpacePeriodEnabled = KeyboardPreferences.doubleSpacePeriodEnabled()
     @State private var topRow = KeyboardPreferences.topRow()
@@ -107,6 +108,14 @@ private struct KeyboardSettingsView: View {
                 Toggle(isOn: $emojiEnabled) {
                     SettingLabel(title: "Emoji key", detail: "Shows the emoji picker", icon: "face.smiling", color: .orange)
                 }
+                Picker(selection: $emojiSkinTone) {
+                    ForEach(KeyboardPreferences.EmojiSkinTone.allCases) { tone in
+                        Text("\(tone.preview)  \(tone.title)").tag(tone)
+                    }
+                } label: {
+                    SettingLabel(title: "Emoji skin tone", detail: "Default tone for compatible emoji", icon: "hand.thumbsup", color: .brown)
+                }
+                .pickerStyle(.navigationLink)
                 Toggle(isOn: $suggestionsEnabled) {
                     SettingLabel(title: "Suggestions", detail: "Shows word completions", icon: "text.badge.plus", color: .indigo)
                 }
@@ -172,6 +181,7 @@ private struct KeyboardSettingsView: View {
         }
         .navigationTitle("Keyboard Settings")
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
+        .onChange(of: emojiSkinTone) { KeyboardPreferences.setEmojiSkinTone($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
         .onChange(of: doubleSpacePeriodEnabled) { KeyboardPreferences.setDoubleSpacePeriodEnabled($0) }
         .onChange(of: topRow) { KeyboardPreferences.setTopRow($0) }

@@ -65,6 +65,45 @@ enum KeyboardPreferences {
         var title: String { rawValue.capitalized }
     }
 
+    enum EmojiSkinTone: String, CaseIterable, Identifiable {
+        case standard, light, mediumLight, medium, mediumDark, dark
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .standard: return "Default"
+            case .light: return "Light"
+            case .mediumLight: return "Medium-Light"
+            case .medium: return "Medium"
+            case .mediumDark: return "Medium-Dark"
+            case .dark: return "Dark"
+            }
+        }
+
+        var preview: String {
+            switch self {
+            case .standard: return "👍"
+            case .light: return "👍🏻"
+            case .mediumLight: return "👍🏼"
+            case .medium: return "👍🏽"
+            case .mediumDark: return "👍🏾"
+            case .dark: return "👍🏿"
+            }
+        }
+
+        var modifierScalar: UnicodeScalar? {
+            switch self {
+            case .standard: return nil
+            case .light: return UnicodeScalar(0x1F3FB)
+            case .mediumLight: return UnicodeScalar(0x1F3FC)
+            case .medium: return UnicodeScalar(0x1F3FD)
+            case .mediumDark: return UnicodeScalar(0x1F3FE)
+            case .dark: return UnicodeScalar(0x1F3FF)
+            }
+        }
+    }
+
     static let appGroupIdentifier = "group.lk.org.akshara.keyboard"
     static let layoutKey = "selectedKeyboardLayout"
     static let emojiKey = "emojiPickerEnabled"
@@ -85,6 +124,7 @@ enum KeyboardPreferences {
     static let deleteRepeatSpeedKey = "keyboardDeleteRepeatSpeed"
     static let appearanceKey = "keyboardAppearance"
     static let highContrastKey = "keyboardHighContrastEnabled"
+    static let emojiSkinToneKey = "keyboardEmojiSkinTone"
 
     static let supportsSuggestions = true
 
@@ -125,6 +165,16 @@ enum KeyboardPreferences {
 
     static func setEmojiEnabled(_ enabled: Bool) {
         persist(enabled, forKey: emojiKey)
+    }
+
+    static func emojiSkinTone() -> EmojiSkinTone {
+        guard let value = defaults.string(forKey: emojiSkinToneKey),
+              let tone = EmojiSkinTone(rawValue: value) else { return .standard }
+        return tone
+    }
+
+    static func setEmojiSkinTone(_ tone: EmojiSkinTone) {
+        persist(tone.rawValue, forKey: emojiSkinToneKey)
     }
 
     static func hapticsEnabled() -> Bool {
