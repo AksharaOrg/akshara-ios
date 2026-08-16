@@ -2572,18 +2572,22 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         commitStablePhoneticPrefixIfNeeded()
         let rendered = SinhalaEngine.transliterate(phoneticBuffer, mode: mode)
         
-        let oldScalars = Array(lastPhoneticRendered.unicodeScalars)
-        let newScalars = Array(rendered.unicodeScalars)
+        // UITextDocumentProxy deletes extended grapheme clusters, not Unicode
+        // scalars. Compare at that same boundary: Smart Phonetic can rewrite
+        // හ්‍ර as හෘ when `u` arrives, and scalar-based deletion would remove
+        // the shared හ cluster before inserting only the vowel sign.
+        let oldCharacters = Array(lastPhoneticRendered)
+        let newCharacters = Array(rendered)
         
         var commonCount = 0
-        for (o, n) in zip(oldScalars, newScalars) {
+        for (o, n) in zip(oldCharacters, newCharacters) {
             if o == n { commonCount += 1 } else { break }
         }
         
-        let deletes = oldScalars.count - commonCount
+        let deletes = oldCharacters.count - commonCount
         for _ in 0..<deletes { textDocumentProxy.deleteBackward() }
         
-        let inserts = String(String.UnicodeScalarView(newScalars[commonCount...]))
+        let inserts = String(newCharacters[commonCount...])
         if !inserts.isEmpty { textDocumentProxy.insertText(inserts) }
         
         lastPhoneticRendered = rendered
@@ -2600,11 +2604,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func clearPhoneticComposition() {
-        for _ in lastPhoneticRendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        for _ in lastPhoneticRendered { textDocumentProxy.deleteBackward() }
         phoneticBuffer = ""
         lastPhoneticRendered = ""
         for segment in committedPhoneticSegments.reversed() {
-            for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+            for _ in segment.rendered { textDocumentProxy.deleteBackward() }
         }
         committedPhoneticSegments.removeAll()
         updatePredictions(for: "")
@@ -2633,8 +2637,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             committedPhoneticSegments.append((source: prefix, rendered: renderedPrefix))
             phoneticBuffer = suffix
             
-            if lastPhoneticRendered.hasPrefix(renderedPrefix) {
-                lastPhoneticRendered = String(lastPhoneticRendered.dropFirst(renderedPrefix.count))
+            if lastPhoneticRendered.unicodeScalars.starts(with: renderedPrefix.unicodeScalars) {
+                let remainingScalars = lastPhoneticRendered.unicodeScalars.dropFirst(renderedPrefix.unicodeScalars.count)
+                lastPhoneticRendered = String(String.UnicodeScalarView(remainingScalars))
             } else {
                 lastPhoneticRendered = ""
             }
@@ -2646,14 +2651,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// final chunk so the deletion retains the same transliteration behavior
     /// as it had while the whole word was marked.
     private func restorePreviousPhoneticSegmentAfterDelete() {
-        for _ in lastPhoneticRendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        for _ in lastPhoneticRendered { textDocumentProxy.deleteBackward() }
         lastPhoneticRendered = ""
         
         guard var segment = committedPhoneticSegments.popLast() else {
             updatePredictions(for: "")
             return
         }
-        for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        for _ in segment.rendered { textDocumentProxy.deleteBackward() }
         segment.source.removeLast()
         phoneticBuffer = segment.source
         if phoneticBuffer.isEmpty {

@@ -17,6 +17,12 @@ source_archive="$1"
 output_file="AksharaKeyboard/Resources/SinhalaFrequencyModel.tsv"
 temporary_file="${output_file}.tmp"
 
-unzip -p "$source_archive" | awk 'NF >= 3 { print $1 "\t" $3 }' | \
+# Exclude malformed/merged corpus tokens before taking the compact top slice.
+unzip -p "$source_archive" | perl -CSDA -ne '
+  if (/^([\x{0D80}-\x{0DFF}]+)\s+\S+\s+(\d+)/) {
+    next if length($1) > 24;
+    print "$1\t$2\n";
+  }
+' | \
   head -n 40000 | LC_ALL=C sort -u > "$temporary_file"
 mv "$temporary_file" "$output_file"

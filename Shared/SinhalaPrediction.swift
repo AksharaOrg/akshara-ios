@@ -77,7 +77,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private let entries: [Entry]
     private let frequentEntries: [Entry]
     private let bundledBigrams: [String: [NextWord]]
-    private let defaults = KeyboardPreferences.defaults
+    private let defaults: UserDefaults
     private let learnedWordsKey = "prediction.learnedWords.v1"
     private let learnedBigramsKey = "prediction.learnedBigrams.v1"
     private let recencyKey = "prediction.recency.v1"
@@ -95,7 +95,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     init(
         identifier: String = "uom-frequency-list-v1",
         modelURL: URL? = Bundle.main.url(forResource: "SinhalaFrequencyModel", withExtension: "tsv"),
-        nextWordURL: URL? = Bundle.main.url(forResource: "SinhalaNextWordModel", withExtension: "tsv")
+        nextWordURL: URL? = Bundle.main.url(forResource: "SinhalaNextWordModel", withExtension: "tsv"),
+        defaults: UserDefaults = KeyboardPreferences.defaults
     ) {
         self.identifier = identifier
         // The build script emits lexical order. Avoid sorting the bundled
@@ -107,9 +108,10 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         // of the full frequency model at keyboard startup.
         frequentEntries = Self.mostFrequentEntries(from: loadedEntries, maximum: 96)
         bundledBigrams = Self.loadBigrams(from: nextWordURL)
-        learnedWords = Self.intDictionary(from: KeyboardPreferences.defaults, forKey: learnedWordsKey)
-        learnedBigrams = Self.nestedIntDictionary(from: KeyboardPreferences.defaults, forKey: learnedBigramsKey)
-        recency = Self.intDictionary(from: KeyboardPreferences.defaults, forKey: recencyKey)
+        self.defaults = defaults
+        learnedWords = Self.intDictionary(from: defaults, forKey: learnedWordsKey)
+        learnedBigrams = Self.nestedIntDictionary(from: defaults, forKey: learnedBigramsKey)
+        recency = Self.intDictionary(from: defaults, forKey: recencyKey)
         recencyClock = recency.values.max() ?? 0
     }
 
@@ -135,8 +137,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         func consider(word: String, frequency: Int) {
             guard word != prefix, considered.insert(word).inserted else { return }
             let score = log(Double(max(frequency, 1)) + 1)
-                + Double(learnedWords[word, default: 0]) * 0.60
-                + Double(learnedNext[word, default: 0]) * 1.20
+                + Double(learnedWords[word, default: 0]) * 1.00
+                + Double(learnedNext[word, default: 0]) * 1.80
                 // Corpus context is a stronger next-word signal than global
                 // word frequency, while local choices still adapt the result.
                 + log(Double(bundledCounts[word, default: 0]) + 1) * 1.70
@@ -195,7 +197,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     }
 
     func recordSelection(_ word: String, after precedingWord: String?) {
-        record(word, after: precedingWord, selectionBoost: 2, persistImmediately: true)
+        record(word, after: precedingWord, selectionBoost: 4, persistImmediately: true)
     }
 
     func recordCommittedWord(_ word: String, after precedingWord: String?) {
@@ -321,7 +323,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             let fields = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
             guard fields.count == 2,
                   let frequency = Int(fields[1]),
-                  !fields[0].isEmpty else { return nil }
+                  Self.isValidModelWord(fields[0]) else { return nil }
             return Entry(word: String(fields[0]), frequency: frequency)
         }
     }
@@ -332,7 +334,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         var grouped: [String: [NextWord]] = [:]
         for line in contents.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
             let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-            guard fields.count == 3, let count = Int(fields[2]), !fields[0].isEmpty, !fields[1].isEmpty else { continue }
+            guard fields.count == 3, let count = Int(fields[2]),
+                  Self.isValidModelWord(fields[0]), Self.isValidModelWord(fields[1]) else { continue }
             grouped[String(fields[0]), default: []].append(NextWord(word: String(fields[1]), count: count))
         }
         // Keep deterministic ordering even if a hand-edited replacement model
@@ -344,6 +347,12 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     private static func isLexicallySorted(_ values: [Entry]) -> Bool {
         zip(values, values.dropFirst()).allSatisfy { $0.word <= $1.word }
+    }
+
+    private static func isValidModelWord(_ value: Substring) -> Bool {
+        let scalars = value.unicodeScalars
+        return !scalars.isEmpty && scalars.count <= 24
+            && scalars.allSatisfy { (0x0D80...0x0DFF).contains($0.value) }
     }
 
     private static func mostFrequentEntries(from values: [Entry], maximum: Int) -> [Entry] {

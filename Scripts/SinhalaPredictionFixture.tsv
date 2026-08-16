@@ -1,0 +1,5 @@
+# prefix<TAB>preceding word (optional)<TAB>expected top three, comma-separated
+ක		කර,කරන,කළ
+අ		අතර,අපි,අද
+	අතර	එය,ඔහු,එහි
+ක	අඩු	කිරීමට,කිරීම,කර
