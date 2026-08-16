@@ -5,6 +5,10 @@ private enum AksharaLinks {
     static let github = URL(string: "https://github.com/AksharaOrg/akshara-ios")!
     static let website = URL(string: "https://akshara.org.lk")!
     static let appleKeyboardGuide = URL(string: "https://support.apple.com/guide/iphone/add-or-change-keyboards-iph73b71eb/ios")!
+    static let sinhalaFrequencyList = URL(string: "https://github.com/nlpcuom/Word-Frequency-List-for-Sinhala")!
+    static let cleanSinhalaTextCorpus = URL(string: "https://huggingface.co/datasets/Remeinium/CleanSinhalaTextCorpus")!
+    static let cleanSinhalaTextCorpusDOI = URL(string: "https://doi.org/10.57967/hf/6460")!
+    static let creativeCommonsAttribution = URL(string: "https://creativecommons.org/licenses/by/4.0/")!
 }
 
 struct OnboardingView: View {
@@ -51,6 +55,11 @@ struct OnboardingView: View {
                 }
 
                 Section("About") {
+                    NavigationLink {
+                        OpenSourceNoticesView()
+                    } label: {
+                        DashboardLabel(title: "Open Source Notices", icon: "doc.text", color: .orange)
+                    }
                     LabeledContent("Copyright", value: "© 2026 Lahiru Himesh Madusanka")
                     LabeledContent("License", value: "MIT License")
                 }
@@ -246,6 +255,67 @@ private struct LayoutReferenceView: View {
             }
         }
         .navigationTitle("Quick Reference")
+    }
+}
+
+private struct OpenSourceNoticesView: View {
+    var body: some View {
+        List {
+            Section("Akshara") {
+                NoticeView(
+                    title: "Akshara",
+                    detail: "Copyright © 2026 Lahiru Himesh Madusanka. Licensed under the MIT License.",
+                    links: [("Source code", AksharaLinks.github)]
+                )
+            }
+
+            Section("Language resources") {
+                NoticeView(
+                    title: "A Word Frequency List for Sinhala",
+                    detail: "SinhalaFrequencyModel.tsv is a compact derivative of the University of Moratuwa National Languages Processing Centre word-frequency list. It retains the first 40,000 high-frequency entries, filters malformed or overlong tokens, and is sorted for on-device prefix lookup.\n\nCitation: Aloka Fernando and Gihan Dias (2021), “Building a Linguistic Resource: A Word Frequency List for Sinhala,” ICON 2021, pages 606–610.",
+                    links: [("Source", AksharaLinks.sinhalaFrequencyList)]
+                )
+
+                NoticeView(
+                    title: "CleanSinhalaTextCorpus",
+                    detail: "SinhalaNextWordModel.tsv is a compact, count-only bigram model derived from the first 256 MiB (decompressed) of corpus_part_0.gz in CleanSinhalaTextCorpus by Remeinium AI and Kusal Darshana (2025). The model keeps up to six continuations for 1,024 common preceding-word contexts. Source text is not distributed with Akshara.",
+                    links: [
+                        ("Dataset", AksharaLinks.cleanSinhalaTextCorpus),
+                        ("Dataset DOI", AksharaLinks.cleanSinhalaTextCorpusDOI),
+                        ("CC BY 4.0", AksharaLinks.creativeCommonsAttribution)
+                    ]
+                )
+            }
+
+            Section("Privacy") {
+                Text("The source corpus is not included in the app. Predictions use the compact on-device models bundled with Akshara.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Open Source Notices")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct NoticeView: View {
+    let title: String
+    let detail: String
+    let links: [(String, URL)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            ForEach(links, id: \.1) { label, destination in
+                Link(label, destination: destination)
+                    .font(.footnote)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 
