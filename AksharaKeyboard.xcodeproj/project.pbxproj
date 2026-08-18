@@ -21,6 +21,8 @@
 		A10000000000000000000012 /* SinhalaPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* SinhalaPrediction.swift */; };
 		A10000000000000000000013 /* Resources/SinhalaFrequencyModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */; };
 		A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */; };
+		A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */; };
+		A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +66,8 @@
 		A20000000000000000000014 /* SinhalaPrediction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaPrediction.swift; sourceTree = "<group>"; };
 		A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaFrequencyModel.tsv; sourceTree = "<group>"; };
 		A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaNextWordModel.tsv; sourceTree = "<group>"; };
+		A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaTrigramModel.tsv; sourceTree = "<group>"; };
+		A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaSentenceStartModel.tsv; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -113,6 +117,8 @@
 				A20000000000000000000013 /* EmojiSearchIndex.json */,
 				A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */,
 				A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */,
+				A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */,
+				A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */,
 				A20000000000000000000011 /* AksharaKeyboard.entitlements */,
 				A20000000000000000000008 /* Info.plist */,
 			);
@@ -230,6 +236,8 @@
 				A10000000000000000000010 /* EmojiSearchIndex.json in Resources */,
 				A10000000000000000000013 /* Resources/SinhalaFrequencyModel.tsv in Resources */,
 				A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */,
+				A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */,
+				A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -63,26 +63,47 @@ final class SinhalaPredictionProviderRegistry {
     func flushPendingPersistence() {
         (activeProvider as? SinhalaFrequencyListPredictionProvider)?.flushPendingPersistence()
     }
+
+    /// Prefetch the bundled dictionary off the main thread so the first
+    /// keystroke does not pay the TSV parse cost.
+    func prepareBundledModelsInBackground() {
+        let provider = activeProvider as? SinhalaFrequencyListPredictionProvider
+        DispatchQueue.global(qos: .utility).async {
+            provider?.prepareBundledModelsIfNeeded()
+        }
+    }
 }
 
 /// A replaceable, offline unigram model compiled from the University of
-/// Moratuwa Sinhala Word Frequency List, plus a compact bundled bigram model.
-/// Both resources are simple UTF-8 TSV files so they can be regenerated or
-/// replaced without changing keyboard UI code.
+/// Moratuwa Sinhala Word Frequency List, plus compact bundled bigram and
+/// trigram tables. All three resources are simple UTF-8 TSV files so they can
+/// be regenerated or replaced without changing keyboard UI code.
 final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     let identifier: String
 
     private struct Entry { let word: String; let frequency: Int }
     private struct NextWord { let word: String; let count: Int }
-    private let entries: [Entry]
-    private let frequentEntries: [Entry]
-    private let bundledBigrams: [String: [NextWord]]
+    private var entries: [Entry] = []
+    private var frequentEntries: [Entry] = []
+    private var sentenceStartEntries: [Entry] = []
+    private var unigramFrequency: [String: Int] = [:]
+    private var bundledBigrams: [String: [NextWord]] = [:]
+    private var bundledTrigrams: [String: [NextWord]] = [:]
+    private var didLoadBundledModels = false
+    private let modelURL: URL?
+    private let nextWordURL: URL?
+    private let trigramURL: URL?
+    private let sentenceStartURL: URL?
     private let defaults: UserDefaults
     private let learnedWordsKey = "prediction.learnedWords.v1"
     private let learnedBigramsKey = "prediction.learnedBigrams.v1"
     private let recencyKey = "prediction.recency.v1"
     private let maximumLearnedWords = 512
     private let maximumFollowersPerWord = 48
+    /// Candidate ranking runs away from the keyboard's main UI thread. The
+    /// learned model is small but mutable, so guard it when a selection and a
+    /// background lookup happen at the same time.
+    private let modelLock = NSLock()
     // UserDefaults is relatively expensive in an input extension. Keep the
     // small personal model in memory and write it only after an intentional
     // candidate selection.
@@ -96,9 +117,36 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         identifier: String = "uom-frequency-list-v1",
         modelURL: URL? = Bundle.main.url(forResource: "SinhalaFrequencyModel", withExtension: "tsv"),
         nextWordURL: URL? = Bundle.main.url(forResource: "SinhalaNextWordModel", withExtension: "tsv"),
+        trigramURL: URL? = Bundle.main.url(forResource: "SinhalaTrigramModel", withExtension: "tsv"),
+        sentenceStartURL: URL? = Bundle.main.url(forResource: "SinhalaSentenceStartModel", withExtension: "tsv"),
         defaults: UserDefaults = KeyboardPreferences.defaults
     ) {
         self.identifier = identifier
+        self.modelURL = modelURL
+        self.nextWordURL = nextWordURL
+        self.trigramURL = trigramURL
+        self.sentenceStartURL = sentenceStartURL
+        self.defaults = defaults
+        // Keep construction cheap for keyboard cold start. Bundled TSV models
+        // are loaded on the first prediction request (off the main thread).
+        // Only the compact personal model is read up front.
+        learnedWords = Self.intDictionary(from: defaults, forKey: learnedWordsKey)
+        learnedBigrams = Self.nestedIntDictionary(from: defaults, forKey: learnedBigramsKey)
+        recency = Self.intDictionary(from: defaults, forKey: recencyKey)
+        recencyClock = recency.values.max() ?? 0
+    }
+
+    /// Loads the bundled frequency and bigram tables once. Safe to call from
+    /// the prediction queue; no-ops after the first successful load.
+    func prepareBundledModelsIfNeeded() {
+        modelLock.lock()
+        defer { modelLock.unlock() }
+        loadBundledModelsLocked()
+    }
+
+    private func loadBundledModelsLocked() {
+        guard !didLoadBundledModels else { return }
+        didLoadBundledModels = true
         // The build script emits lexical order. Avoid sorting the bundled
         // model during the first prediction request in the keyboard process.
         let loadedEntries = Self.loadEntries(from: modelURL)
@@ -107,25 +155,42 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         // that table bounded instead of allocating and sorting a second copy
         // of the full frequency model at keyboard startup.
         frequentEntries = Self.mostFrequentEntries(from: loadedEntries, maximum: 96)
+        unigramFrequency = Dictionary(uniqueKeysWithValues: loadedEntries.map { ($0.word, $0.frequency) })
         bundledBigrams = Self.loadBigrams(from: nextWordURL)
-        self.defaults = defaults
-        learnedWords = Self.intDictionary(from: defaults, forKey: learnedWordsKey)
-        learnedBigrams = Self.nestedIntDictionary(from: defaults, forKey: learnedBigramsKey)
-        recency = Self.intDictionary(from: defaults, forKey: recencyKey)
-        recencyClock = recency.values.max() ?? 0
+        bundledTrigrams = Self.loadTrigrams(from: trigramURL)
+        sentenceStartEntries = Self.loadEntries(from: sentenceStartURL)
     }
 
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate] {
+        modelLock.lock()
+        defer { modelLock.unlock() }
+        loadBundledModelsLocked()
         let prefix = request.composingText
         let maximumResults = max(request.maximumResults, 0)
         guard maximumResults > 0 else { return [] }
         let previous = request.precedingWords.last
+        let earlier = request.precedingWords.count >= 2
+            ? request.precedingWords[request.precedingWords.count - 2]
+            : nil
         let learnedNext = previous.flatMap { learnedBigrams[$0] } ?? [:]
         let bundledNext = previous.flatMap { bundledBigrams[$0] } ?? []
+        let trigramNext: [NextWord]
+        if let earlier, let previous {
+            trigramNext = bundledTrigrams[Self.trigramKey(earlier, previous)] ?? []
+        } else {
+            trigramNext = []
+        }
         var bundledCounts: [String: Int] = [:]
         for next in bundledNext {
             bundledCounts[next.word] = max(bundledCounts[next.word, default: 0], next.count)
         }
+        var trigramCounts: [String: Int] = [:]
+        for next in trigramNext {
+            trigramCounts[next.word] = max(trigramCounts[next.word, default: 0], next.count)
+        }
+        let hasContinuations = previous != nil && (
+            !bundledNext.isEmpty || !learnedNext.isEmpty || !trigramNext.isEmpty
+        )
 
         // Keep only the requested winners while scanning. The old path built
         // and sorted up to 4,096 temporary candidates on every keypress.
@@ -134,14 +199,19 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         var considered = Set<String>()
         considered.reserveCapacity(maximumResults * 16)
 
-        func consider(word: String, frequency: Int) {
-            guard word != prefix, considered.insert(word).inserted else { return }
-            let score = log(Double(max(frequency, 1)) + 1)
+        func consider(word: String, frequency: Int, unigramWeight: Double) {
+            guard word != prefix else { return }
+            // Next-word ranking should move forward. Repeating the word that
+            // was just committed makes a suggestion chain look stuck.
+            if prefix.isEmpty, word == previous { return }
+            guard considered.insert(word).inserted else { return }
+            let score = unigramWeight * log(Double(max(frequency, 1)) + 1)
                 + Double(learnedWords[word, default: 0]) * 1.00
                 + Double(learnedNext[word, default: 0]) * 1.80
                 // Corpus context is a stronger next-word signal than global
                 // word frequency, while local choices still adapt the result.
                 + log(Double(bundledCounts[word, default: 0]) + 1) * 1.70
+                + log(Double(trigramCounts[word, default: 0]) + 1) * 2.20
                 + recencyScore(for: word)
             let candidate = SinhalaPredictionCandidate(text: word, score: score)
             let insertionIndex = ranked.firstIndex {
@@ -154,10 +224,20 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         }
 
         if prefix.isEmpty {
-            // This list is already frequency ordered, so a compact slice is
-            // enough to establish useful next-word defaults.
-            for entry in frequentEntries.prefix(max(maximumResults * 8, 24)) {
-                consider(word: entry.word, frequency: entry.frequency)
+            if hasContinuations {
+                // Contextual next-word should stay on actual followers. Mixing
+                // in globally common words made the rail stall on ඇති / වන.
+            } else if previous == nil {
+                let starts = sentenceStartEntries.isEmpty
+                    ? frequentEntries.prefix(max(maximumResults * 8, 24))
+                    : ArraySlice(sentenceStartEntries.prefix(max(maximumResults * 8, 24)))
+                for entry in starts {
+                    consider(word: entry.word, frequency: entry.frequency, unigramWeight: 1.0)
+                }
+            } else {
+                for entry in frequentEntries.prefix(max(maximumResults * 8, 24)) {
+                    consider(word: entry.word, frequency: entry.frequency, unigramWeight: 1.0)
+                }
             }
         } else {
             let firstMatch = firstIndex(atOrAfter: prefix)
@@ -165,42 +245,59 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             for index in firstMatch..<upperBound {
                 let entry = entries[index]
                 guard hasUnicodeScalarPrefix(entry.word, prefix) else { break }
-                consider(word: entry.word, frequency: entry.frequency)
+                consider(word: entry.word, frequency: entry.frequency, unigramWeight: 1.0)
             }
             // Personal words need not exist in the bundled corpus to be
             // returned as a completion.
             for (word, count) in learnedWords where hasUnicodeScalarPrefix(word, prefix) {
-                consider(word: word, frequency: count)
+                consider(word: word, frequency: count, unigramWeight: 1.0)
             }
             // A single edit is enough to rescue the common near-miss without
             // turning the candidate rail into a spell-check UI. Restrict the
             // scan to the personal model, which is intentionally compact.
             if prefix.count >= 3 {
                 for (word, count) in learnedWords where editDistanceAtMostOne(prefix, word) {
-                    consider(word: word, frequency: count)
+                    consider(word: word, frequency: count, unigramWeight: 1.0)
                 }
             }
         }
 
         // Contextual selections can be custom words which are absent from the
         // corpus's initial frequency slice. Include them without a full sort.
+        let continuationUnigramWeight: Double = prefix.isEmpty && hasContinuations ? 0.20 : 1.0
         for (word, count) in learnedNext where prefix.isEmpty || hasUnicodeScalarPrefix(word, prefix) {
-            consider(word: word, frequency: learnedWords[word, default: count])
+            consider(
+                word: word,
+                frequency: unigramFrequency[word, default: learnedWords[word, default: count]],
+                unigramWeight: continuationUnigramWeight
+            )
         }
-        // A corpus continuation can be missing from the compact unigram
-        // slice. Include it explicitly so context is useful from the first
-        // word, before personal learning has accumulated.
         for next in bundledNext where prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) {
-            consider(word: next.word, frequency: 0)
+            consider(
+                word: next.word,
+                frequency: unigramFrequency[next.word, default: 0],
+                unigramWeight: continuationUnigramWeight
+            )
+        }
+        for next in trigramNext where prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) {
+            consider(
+                word: next.word,
+                frequency: unigramFrequency[next.word, default: 0],
+                unigramWeight: continuationUnigramWeight
+            )
         }
         return ranked
     }
 
     func recordSelection(_ word: String, after precedingWord: String?) {
+        modelLock.lock()
+        defer { modelLock.unlock() }
         record(word, after: precedingWord, selectionBoost: 4, persistImmediately: true)
     }
 
     func recordCommittedWord(_ word: String, after precedingWord: String?) {
+        modelLock.lock()
+        defer { modelLock.unlock() }
         record(word, after: precedingWord, selectionBoost: 1, persistImmediately: false)
     }
 
@@ -223,11 +320,17 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             }
             learnedBigrams[precedingWord] = followers
         }
-        if persistImmediately { flushPendingPersistence() }
+        if persistImmediately { persistLocked() }
         else { schedulePersistence() }
     }
 
     func flushPendingPersistence() {
+        modelLock.lock()
+        defer { modelLock.unlock() }
+        persistLocked()
+    }
+
+    private func persistLocked() {
         persistenceWorkItem?.cancel()
         persistenceWorkItem = nil
         defaults.set(learnedWords, forKey: learnedWordsKey)
@@ -320,11 +423,34 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         guard let modelURL,
               let contents = try? String(contentsOf: modelURL, encoding: .utf8) else { return [] }
         return contents.split(whereSeparator: \.isNewline).compactMap { line in
+            guard !line.hasPrefix("#") else { return nil }
             let fields = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
             guard fields.count == 2,
                   let frequency = Int(fields[1]),
                   Self.isValidModelWord(fields[0]) else { return nil }
             return Entry(word: String(fields[0]), frequency: frequency)
+        }
+    }
+
+    private static func trigramKey(_ earlier: String, _ previous: String) -> String {
+        earlier + "\u{1E}" + previous
+    }
+
+    private static func loadTrigrams(from modelURL: URL?) -> [String: [NextWord]] {
+        guard let modelURL,
+              let contents = try? String(contentsOf: modelURL, encoding: .utf8) else { return [:] }
+        var grouped: [String: [NextWord]] = [:]
+        for line in contents.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+            let fields = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count == 4, let count = Int(fields[3]),
+                  Self.isValidModelWord(fields[0]),
+                  Self.isValidModelWord(fields[1]),
+                  Self.isValidModelWord(fields[2]) else { continue }
+            let key = trigramKey(String(fields[0]), String(fields[1]))
+            grouped[key, default: []].append(NextWord(word: String(fields[2]), count: count))
+        }
+        return grouped.mapValues { values in
+            values.sorted { lhs, rhs in lhs.count == rhs.count ? lhs.word < rhs.word : lhs.count > rhs.count }
         }
     }
 

@@ -288,7 +288,7 @@ private struct OpenSourceNoticesView: View {
 
                 NoticeView(
                     title: "CleanSinhalaTextCorpus",
-                    detail: "SinhalaNextWordModel.tsv is a compact, count-only bigram model derived from the first 256 MiB (decompressed) of corpus_part_0.gz in CleanSinhalaTextCorpus by Remeinium AI and Kusal Darshana (2025). The model keeps up to six continuations for 1,024 common preceding-word contexts. Source text is not distributed with Akshara.",
+                    detail: "SinhalaNextWordModel.tsv and SinhalaTrigramModel.tsv are compact count-only models derived from the full corpus_part_0.gz (~1.0 GiB decompressed) in CleanSinhalaTextCorpus by Remeinium AI and Kusal Darshana (2025). Conversational lines are up-weighted. The next-word table keeps up to sixteen continuations for 30,000 preceding-word contexts. Empty-context suggestions use a curated spoken-opener list. Source text is not distributed with Akshara.",
                     links: [
                         ("Dataset", AksharaLinks.cleanSinhalaTextCorpus),
                         ("Dataset DOI", AksharaLinks.cleanSinhalaTextCorpusDOI),

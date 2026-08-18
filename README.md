@@ -4,8 +4,13 @@ Native iOS host app and system-wide Custom Keyboard Extension. The keyboard proc
 
 ## Prediction data
 
-The bundled next-word model contains aggregate Sinhala word-pair counts derived
-from [Remeinium CleanSinhalaTextCorpus](https://huggingface.co/datasets/Remeinium/CleanSinhalaTextCorpus), by Remeinium AI and Kusal Darshana (2025), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The source corpus is not included; attribution details are in `AksharaKeyboard/Resources/SinhalaNextWordModel-ATTRIBUTION.md`.
+The bundled next-word, trigram, and sentence-start models contain aggregate
+Sinhala counts derived from
+[Remeinium CleanSinhalaTextCorpus](https://huggingface.co/datasets/Remeinium/CleanSinhalaTextCorpus),
+by Remeinium AI and Kusal Darshana (2025), under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The source corpus is
+not included; attribution details are in
+`AksharaKeyboard/Resources/SinhalaNextWordModel-ATTRIBUTION.md`.
 
 ## Open and test
 

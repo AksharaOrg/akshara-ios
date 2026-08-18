@@ -1,5 +1,9 @@
-# prefix<TAB>preceding word (optional)<TAB>expected top three, comma-separated
+# prefix<TAB>preceding words (space-separated, optional)<TAB>expected top three, comma-separated
 ක		කර,කරන,කළ
 අ		අතර,අපි,අද
-	අතර	එය,ඔහු,එහි
-ක	අඩු	කිරීමට,කිරීම,කර
+	අතර	එය,ඔහු,ඔවුන්
+ක	අඩු	කර,කිරීමට,කිරීම
+		මම,ඔබ,අපි
+	මම	හිතන්නේ,මගේ,එය
+	බලාපොරොත්තු	වන,වේ,වෙමි
+	මම බලාපොරොත්තු	වෙමි,වෙනවා,වන

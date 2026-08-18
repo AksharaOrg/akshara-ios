@@ -128,15 +128,55 @@ enum KeyboardPreferences {
 
     static let supportsSuggestions = true
 
-    static var defaults: UserDefaults {
-        UserDefaults(suiteName: appGroupIdentifier) ?? .standard
+    /// Values read on every keypress / hit-test. `reload()` refreshes this
+    /// snapshot so the typing path never opens the App Group suite mid-tap.
+    struct HotPathCache {
+        var hapticsEnabled = false
+        var hapticIntensity = 0.75
+        var keyClicksEnabled = true
+        var keySpacing = KeySpacing.standard
+        var keySpacingHorizontalGap = 6.0
+        var longPressPunctuationEnabled = true
+        var characterPreviewEnabled = false
+        var doubleSpacePeriodEnabled = true
+        var smartQuotesEnabled = true
+        var deleteRepeatInterval = 0.08
+        var highContrastEnabled = false
     }
+
+    private(set) static var hotPath = HotPathCache()
+
+    /// Opening the App Group suite is measurable work in a keyboard's hot
+    /// path. Keep one process-local handle; `reload()` still synchronizes it
+    /// whenever the extension becomes visible.
+    static let defaults: UserDefaults = {
+        UserDefaults(suiteName: appGroupIdentifier) ?? .standard
+    }()
 
     /// The keyboard extension runs in a separate process from the settings
     /// app. Refresh its App Group cache as it becomes visible so changes made
     /// in the app are reflected before the extension rebuilds its layout.
     static func reload() {
         defaults.synchronize()
+        refreshHotPathCache()
+    }
+
+    static func refreshHotPathCache() {
+        let spacing = keySpacing()
+        let strength = hapticStrength()
+        hotPath = HotPathCache(
+            hapticsEnabled: hapticsEnabled(),
+            hapticIntensity: strength.intensity,
+            keyClicksEnabled: keyClicksEnabled(),
+            keySpacing: spacing,
+            keySpacingHorizontalGap: spacing.horizontalGap,
+            longPressPunctuationEnabled: longPressPunctuationEnabled(),
+            characterPreviewEnabled: characterPreviewEnabled(),
+            doubleSpacePeriodEnabled: doubleSpacePeriodEnabled(),
+            smartQuotesEnabled: smartQuotesEnabled(),
+            deleteRepeatInterval: deleteRepeatSpeed().interval,
+            highContrastEnabled: highContrastEnabled()
+        )
     }
 
     /// The app and keyboard extension are separate processes. Flush each
@@ -147,6 +187,7 @@ enum KeyboardPreferences {
         let store = defaults
         store.set(value, forKey: key)
         store.synchronize()
+        refreshHotPathCache()
     }
 
     static func selectedMode() -> SinhalaEngine.Mode {

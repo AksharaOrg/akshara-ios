@@ -6,6 +6,10 @@ xcuserdata/
 *.xcuserstate
 *.xcscmblueprint
 
+# Local CleanSinhalaTextCorpus downloads used to regenerate n-gram models.
+# Never commit source text; only the compact TSV derivatives are bundled.
+.corpus-cache/
+
 # Xcode build products and archives
 build/
 DerivedData/

@@ -1,12 +1,28 @@
 import UIKit
 import OSLog
 
+/// KeyboardKit keys glass styling off the OS (`isLiquidGlassEnabled` when
+/// the major version is > 18) and leaves `KeyboardViewStyle.background` nil
+/// so the system surface shows through. Host sniffing is not used: iMessage
+/// and other glass apps do not expose `glass` / `UIKB` class names, so a
+/// "no signals → opaque canvas" fallback paints a grey card on Liquid Glass.
+private enum KeyboardChromeAppearance {
+    static var usesLiquidGlassSurfaces: Bool = {
+        if #available(iOS 26.0, *) { return true }
+        return false
+    }()
+}
+
 /// Keeps the generators alive for the lifetime of the keyboard. Apple recommends
 /// preparing a generator before its event, then preparing it again after firing
 /// when another event may follow soon. A keyboard is exactly that interaction.
 private final class KeyFeedback {
     private let impact: UIImpactFeedbackGenerator
     private let selection: UISelectionFeedbackGenerator
+    private var prepareWorkItem: DispatchWorkItem?
+    /// Re-arm the Taptic Engine after typing pauses, not after every letter in
+    /// a burst — continuous prepare() contention is a common source of lag.
+    private let prepareIdleDelay: TimeInterval = 0.05
 
     init(view: UIView) {
         if #available(iOS 18.0, *) {
@@ -19,27 +35,46 @@ private final class KeyFeedback {
     }
 
     func prepare() {
-        guard KeyboardPreferences.hapticsEnabled() else { return }
+        guard KeyboardPreferences.hotPath.hapticsEnabled else { return }
+        prepareWorkItem?.cancel()
+        prepareWorkItem = nil
         impact.prepare()
         selection.prepare()
     }
 
     func keyPressed() {
-        guard KeyboardPreferences.hapticsEnabled() else { return }
-        // Keep the native light waveform, with just a small reduction from
-        // its default strength so it remains perceptible without feeling busy.
-        impact.impactOccurred(intensity: CGFloat(KeyboardPreferences.hapticStrength().intensity))
-        // `prepare()` only lowers latency when it happens before the next
-        // event. Calling it immediately before `impactOccurred()` made every
-        // pulse wait for the Taptic Engine to wake. Re-arm after this key so
-        // the following keypress is already prepared.
-        impact.prepare()
+        let prefs = KeyboardPreferences.hotPath
+        guard prefs.hapticsEnabled else { return }
+        // Intensity is snapshotted with the rest of the hot-path prefs so this
+        // never opens the App Group suite on a keypress.
+        impact.impactOccurred(intensity: CGFloat(prefs.hapticIntensity))
+        scheduleIdlePrepare()
     }
 
     func selectionChanged() {
-        guard KeyboardPreferences.hapticsEnabled() else { return }
+        guard KeyboardPreferences.hotPath.hapticsEnabled else { return }
         selection.selectionChanged()
-        selection.prepare()
+        scheduleIdlePrepare()
+    }
+
+    /// One extra tick after the key-down impact, so the spacebar wink reads as
+    /// a confirmation rather than another letter.
+    func signatureWink() {
+        guard KeyboardPreferences.hotPath.hapticsEnabled else { return }
+        selection.selectionChanged()
+        scheduleIdlePrepare()
+    }
+
+    private func scheduleIdlePrepare() {
+        prepareWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, KeyboardPreferences.hotPath.hapticsEnabled else { return }
+            self.impact.prepare()
+            self.selection.prepare()
+            self.prepareWorkItem = nil
+        }
+        prepareWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + prepareIdleDelay, execute: work)
     }
 }
 
@@ -48,6 +83,8 @@ private final class NativeKeyButton: UIButton {
     private let isUtility: Bool
     private var longPressWasHandled = false
     private let hintLabel = UILabel()
+    /// Stable key identity for in-place Shift updates without rebuilding rows.
+    let keyName: String
     /// Called by the controller to mirror the system keyboard's character
     /// preview without making the key itself jump under the finger.
     var highlightChanged: ((NativeKeyButton, Bool) -> Void)?
@@ -63,16 +100,18 @@ private final class NativeKeyButton: UIButton {
         return true
     }
 
+    /// KeyboardKit uses liquid keycaps whenever the OS enables Liquid Glass.
     private var usesIOS26KeyboardAppearance: Bool {
-        if #available(iOS 26.0, *) { return true }
-        return false
+        KeyboardChromeAppearance.usesLiquidGlassSurfaces
     }
 
-    init(title: String?, hint: String? = nil, symbol: String? = nil, utility: Bool = false) {
+    init(keyName: String, title: String?, hint: String? = nil, symbol: String? = nil, utility: Bool = false) {
+        self.keyName = keyName
         self.isUtility = utility
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        titleLabel?.font = .systemFont(ofSize: utility ? 18 : 22, weight: utility ? .medium : .regular)
+        accessibilityIdentifier = keyName
+        titleLabel?.font = .systemFont(ofSize: utility ? 18 : 22, weight: glyphFontWeight)
         titleLabel?.adjustsFontSizeToFitWidth = true
         titleLabel?.minimumScaleFactor = 0.7
         setTitle(title, for: .normal)
@@ -92,90 +131,120 @@ private final class NativeKeyButton: UIButton {
         if let symbol {
             setImage(UIImage(systemName: symbol), for: .normal)
             tintColor = .label
-            imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: utility ? .medium : .regular)
+            imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: glyphSymbolWeight)
         }
         backgroundColor = UIColor { traits in
-            let highContrast = KeyboardPreferences.highContrastEnabled()
+            let highContrast = KeyboardPreferences.hotPath.highContrastEnabled
+            let liquidGlass = self.usesIOS26KeyboardAppearance
+            // Grey Shift / 123 / Delete / Return caps match the pre-iOS 26
+            // system keyboard. iOS 26 uses the same surface as letter keys
+            // unless the user asked for higher contrast.
+            let greyUtility = utility && (!liquidGlass || highContrast)
             if traits.userInterfaceStyle == .dark {
-                // iOS 26's dark keyboard keycaps are cool translucent
-                // surfaces, not opaque grey. Keeping alpha below one lets the
-                // keyboard's dark blue/teal material show through just like
-                // the system UK layout. Higher contrast strengthens the
-                // surface without losing that material relationship.
-                let opacity: CGFloat
-                if utility {
-                    opacity = highContrast ? 0.24 : 0.16
-                } else {
-                    opacity = highContrast ? 0.30 : 0.18
+                if liquidGlass {
+                    // iOS 26's dark keyboard keycaps are cool translucent
+                    // surfaces, not opaque grey. Keeping alpha below one lets the
+                    // keyboard's dark blue/teal material show through just like
+                    // the system UK layout. Higher contrast strengthens the
+                    // surface without losing that material relationship.
+                    let opacity: CGFloat = greyUtility
+                        ? 0.24
+                        : (highContrast ? 0.30 : 0.18)
+                    return UIColor(red: 0.90, green: 0.96, blue: 0.96, alpha: opacity)
                 }
-                return UIColor(red: 0.90, green: 0.96, blue: 0.96, alpha: opacity)
+                return greyUtility
+                    ? UIColor(white: highContrast ? 0.40 : 0.34, alpha: 1)
+                    : UIColor(white: highContrast ? 0.55 : 0.46, alpha: 1)
             }
             if #unavailable(iOS 17.0) {
-                return utility
+                return greyUtility
                     ? UIColor(red: 190 / 255, green: 193 / 255, blue: 202 / 255, alpha: 1)
                     : .white
             }
-            if !self.usesIOS26KeyboardAppearance {
-                // iOS 17–25 retain the established, two-surface keyboard:
-                // character keys are white while modifier keys are cooler and
-                // darker.  The all-white treatment is specific to iOS 26.
-                return utility
+            if !liquidGlass {
+                // Opaque / pre-iOS 26 hosts keep solid keycaps. KeyboardKit
+                // uses the same split: liquid keys only when glass is enabled.
+                return greyUtility
                     ? UIColor(red: highContrast ? 0.60 : 0.71, green: highContrast ? 0.62 : 0.73, blue: highContrast ? 0.67 : 0.77, alpha: 1)
                     : .systemBackground
             }
-            // On current iOS, alphabetic utility controls (Shift, Delete,
-            // 123, Emoji, and Globe) share the white character-key surface.
-            // Treating them as the older grey system-key material made the
-            // extension visibly diverge from the UK keyboard in iOS 26.
-            return utility && highContrast
+            return greyUtility
                 ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
                 : .systemBackground
         }
-        layer.cornerRadius = utility ? 8 : 7
         layer.cornerCurve = .continuous
         layer.shadowColor = UIColor.black.cgColor
-        // The system key shadow is a fine grounding line, not a visible grey
-        // outline. The previous opacity made every Akshara key look raised.
-        // Current iOS keycaps sit almost flush against the keyboard chrome.
-        // A 0.13 shadow left a visible dark trench beneath every Akshara key
-        // when overlaid with the UK keyboard.
-        layer.shadowOpacity = usesIOS26KeyboardAppearance
-            ? 0.04
-            : (usesIOS16KeyboardAppearance ? 0.18 : 0.23)
         layer.shadowOffset = CGSize(width: 0, height: 1)
         layer.shadowRadius = 0
+        applyKeycapChrome(isPad: false)
         addTarget(self, action: #selector(pressBegan), for: .touchDown)
     }
 
     required init?(coder: NSCoder) { nil }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard keyName == "space", let titleLabel else { return }
+        // UIButton sizes the title to its text. A long Wijesekara caption
+        // or the signature phrase can otherwise draw past the keycap.
+        let inset = bounds.inset(by: contentEdgeInsets).insetBy(dx: 6, dy: 1)
+        guard inset.width > 1, inset.height > 1 else { return }
+        var frame = titleLabel.frame
+        if frame.width > inset.width {
+            frame.size.width = inset.width
+            switch contentHorizontalAlignment {
+            case .right:
+                frame.origin.x = inset.maxX - frame.width
+            case .left:
+                frame.origin.x = inset.minX
+            default:
+                frame.origin.x = inset.midX - frame.width / 2
+            }
+        } else {
+            frame.origin.x = min(max(frame.origin.x, inset.minX), inset.maxX - frame.width)
+        }
+        frame.origin.y = min(max(frame.origin.y, inset.minY), max(inset.minY, inset.maxY - frame.height))
+        titleLabel.frame = frame
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) else { return }
+        refreshDynamicColors()
+    }
+
+    /// UIButton can keep a resolved cap colour across appearance changes.
+    /// Re-assigning the dynamic colour forces it to match the new traits.
+    func refreshDynamicColors() {
+        let cap = backgroundColor
+        backgroundColor = nil
+        backgroundColor = cap
+        tintColor = tintColor
+    }
+
     override var isHighlighted: Bool {
         didSet {
-            // System keys darken on contact; keeping their geometry fixed is
-            // important for fast, consecutive taps.
-            // UIKit disables interaction on an animating view unless explicitly
-            // told otherwise. That makes rapid repeated characters and Delete
-            // taps easy to drop while the pressed-state fade is still running.
-            UIView.animate(
-                withDuration: 0.055,
-                delay: 0,
-                options: [.beginFromCurrentState, .curveEaseOut, .allowUserInteraction]
-            ) {
-                self.transform = .identity
-                self.alpha = self.isHighlighted ? 0.62 : 1
-            }
+            // Update synchronously. Two UIView animations for every letter
+            // create needless main-thread churn during rapid typing, while
+            // the system keyboard's pressed state should feel immediate.
+            transform = .identity
+            alpha = isHighlighted ? 0.62 : 1
             highlightChanged?(self, isHighlighted)
         }
     }
 
-    /// The visible gap is six points wide. Claiming half of it on each side
-    /// makes the target forgiving, while avoiding the previous vertical
-    /// overlap that could route a boundary touch to the neighbouring row.
+    /// The grid chooses the key. UIControl still asks `point(inside:)` before
+    /// `touchDown`, including when Phonetic has assigned a tap in the A / L
+    /// side margin. Slide-off uses a tight slop so Space still cancels.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -3, dy: -3).contains(point)
+        if isTracking {
+            return bounds.insetBy(dx: -4, dy: -4).contains(point)
+        }
+        return true
     }
 
     @objc private func pressBegan() {
+        // Haptic must win the touch-down turn before preview or composition.
         touchDown?()
     }
 
@@ -186,23 +255,65 @@ private final class NativeKeyButton: UIButton {
         return longPressWasHandled
     }
 
+    func setHint(_ hint: String?) {
+        hintLabel.text = hint
+        hintLabel.isHidden = hint == nil
+    }
+
+    /// A pending kombuwa already appears in the host. The ring/chip is only
+    /// a fallback if that insert has not landed yet.
+    func setCompositionPending(_ pending: Bool) {
+        if pending {
+            layer.borderWidth = 1.5
+            layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.9).cgColor
+        } else {
+            layer.borderWidth = 0
+            layer.borderColor = UIColor.clear.cgColor
+        }
+    }
+
     /// Full-width iPads use materially larger keycaps than phones. Keep that
     /// tuning on the reusable key rather than letting each row invent fonts
     /// and corner radii independently.
     func applyLayoutMetrics(isPad: Bool) {
         let titleSize: CGFloat = isPad ? (isUtility ? 22 : 28) : (isUtility ? 18 : 22)
-        titleLabel?.font = .systemFont(ofSize: titleSize, weight: isUtility ? .medium : .regular)
+        titleLabel?.font = .systemFont(ofSize: titleSize, weight: glyphFontWeight)
         // Phonetic Sinhala hints must remain secondary, but 9 pt becomes too
         // faint on modern phone displays. Keep the hierarchy while improving
         // recognition during fast touch typing.
         hintLabel.font = .systemFont(ofSize: isPad ? 12 : 10, weight: .regular)
-        layer.cornerRadius = isPad ? (isUtility ? 10 : 8) : (isUtility ? 8 : 7)
+        applyKeycapChrome(isPad: isPad)
         if let imageView {
             imageView.preferredSymbolConfiguration = .init(
                 pointSize: isPad ? 23 : 20,
-                weight: isUtility ? .medium : .regular
+                weight: glyphSymbolWeight
             )
         }
+    }
+
+    /// KeyboardKit 10.5 uses a weight slightly heavier than `.regular` for
+    /// letters and SF Symbols so iOS 26 caps match the native UK keyboard.
+    private var glyphFontWeight: UIFont.Weight {
+        if usesIOS26KeyboardAppearance { return .medium }
+        return isUtility ? .medium : .regular
+    }
+
+    private var glyphSymbolWeight: UIImage.SymbolWeight {
+        if usesIOS26KeyboardAppearance { return .medium }
+        return isUtility ? .medium : .regular
+    }
+
+    /// Liquid Glass keycaps are rounder and sit on the material, not above it.
+    /// KeyboardKit uses 9 pt and no shadow when glass is on; older iOS keeps
+    /// the raised 7–8 pt (phone) / 8–10 pt (iPad) caps.
+    private func applyKeycapChrome(isPad: Bool) {
+        if usesIOS26KeyboardAppearance {
+            layer.cornerRadius = 9
+            layer.shadowOpacity = 0
+            return
+        }
+        layer.cornerRadius = isPad ? (isUtility ? 10 : 8) : (isUtility ? 8 : 7)
+        layer.shadowOpacity = usesIOS16KeyboardAppearance ? 0.18 : 0.23
     }
 
     var isUtilityKey: Bool { isUtility }
@@ -251,6 +362,72 @@ private final class NativeKeyButton: UIButton {
             initialSpringVelocity: 0.18,
             options: [.curveEaseInOut, .beginFromCurrentState]
         , animations: changes)
+    }
+
+    func presentSpaceSignature(_ phrase: String) {
+        // Hide first, then snap to the centered phrase. Animating
+        // layoutIfNeeded() interpolates from the collapsed lower-right
+        // caption, and a long Wijesekara name starts that travel outside
+        // the keycap.
+        titleLabel?.layer.removeAllAnimations()
+        titleLabel?.alpha = 0
+        UIView.performWithoutAnimation {
+            self.setTitle(phrase, for: .normal)
+            self.setTitleColor(.label, for: .normal)
+            self.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+            self.titleLabel?.transform = .identity
+            self.contentHorizontalAlignment = .center
+            self.contentVerticalAlignment = .center
+            self.contentEdgeInsets = .zero
+            self.layoutIfNeeded()
+        }
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            titleLabel?.alpha = 1
+            return
+        }
+        titleLabel?.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+        UIView.animate(
+            withDuration: 0.28,
+            delay: 0,
+            usingSpringWithDamping: 0.88,
+            initialSpringVelocity: 0.3,
+            options: [.curveEaseOut]
+        ) {
+            self.titleLabel?.alpha = 1
+            self.titleLabel?.transform = .identity
+        }
+    }
+
+    func restoreCollapsedSpaceTitle(_ title: String, animated: Bool = true) {
+        titleLabel?.layer.removeAllAnimations()
+        let applyCollapsedTitle = {
+            UIView.performWithoutAnimation {
+                self.setTitle(title, for: .normal)
+                self.collapseSpaceTitle(animated: false)
+            }
+        }
+        guard animated, !UIAccessibility.isReduceMotionEnabled else {
+            applyCollapsedTitle()
+            return
+        }
+        UIView.animate(
+            withDuration: 0.12,
+            delay: 0,
+            options: [.curveEaseIn, .beginFromCurrentState]
+        ) {
+            self.titleLabel?.alpha = 0
+        } completion: { [weak self] finished in
+            guard let self, finished else { return }
+            applyCollapsedTitle()
+            self.titleLabel?.alpha = 0
+            UIView.animate(
+                withDuration: 0.22,
+                delay: 0,
+                options: [.curveEaseOut]
+            ) {
+                self.titleLabel?.alpha = 0.64
+            }
+        }
     }
 }
 
@@ -520,10 +697,15 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     var onSelect: ((String) -> Void)?
     var onDismiss: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onDeleteHoldBegan: (() -> Void)?
+    var onDeleteHoldEnded: (() -> Void)?
     // One long, horizontally scrolling panel contains every category. UIKit
-    // only keeps visible cells alive, while this snapshot keeps a selection
-    // stable if Frequently Used changes after an emoji is inserted.
-    private var emojiSections = EmojiCategory.allCases.map { EmojiCatalog.emoji(for: $0) }
+    // only keeps visible cells alive. Seed Recents immediately; load the full
+    // catalog off the main thread so opening Emoji does not hitch the keyboard.
+    private var emojiSections: [[String]] = EmojiCategory.allCases.map { category in
+        category == .recent ? EmojiCatalog.emoji(for: .recent) : []
+    }
+    private var emojiCatalogLoadGeneration = 0
     private var category: EmojiCategory = .recent {
         didSet {
             updateCategorySelection()
@@ -539,7 +721,6 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     private let searchKeyboard = UIStackView()
     private var searchQuery = ""
     private var emojiSuggestionButtons: [UIButton] = []
-    private var emojiDeleteRepeater: Timer?
     private enum SearchLayer { case letters, numbers, symbols }
     private var searchLayer: SearchLayer = .letters
     private var searchShift = false
@@ -560,12 +741,18 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     }
 
     private var searchUtilitySurfaceColor: UIColor {
-        guard usesIOS16EmojiSearchAppearance else {
+        UIColor { [usesIOS16EmojiSearchAppearance] traits in
+            if usesIOS16EmojiSearchAppearance {
+                return traits.userInterfaceStyle == .dark
+                    ? UIColor(white: 0.32, alpha: 1)
+                    : UIColor(red: 190 / 255, green: 193 / 255, blue: 202 / 255, alpha: 1)
+            }
+            let highContrast = KeyboardPreferences.hotPath.highContrastEnabled
+            if #available(iOS 26.0, *), !highContrast {
+                return UIColor.systemBackground.resolvedColor(with: traits)
+            }
             return UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
         }
-        return UIColor { $0.userInterfaceStyle == .dark
-            ? UIColor(white: 0.32, alpha: 1)
-            : UIColor(red: 190 / 255, green: 193 / 255, blue: 202 / 255, alpha: 1) }
     }
 
     override init(frame: CGRect) {
@@ -717,14 +904,24 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
                 let button = UIButton(type: .system)
                 button.setTitle(["space", "emoji", "Search"].contains(key) ? nil : key, for: .normal)
                 button.setTitleColor(key == "Search" ? .white : .label, for: .normal)
-                button.titleLabel?.font = .systemFont(ofSize: 20)
+                let glass = KeyboardChromeAppearance.usesLiquidGlassSurfaces
+                button.titleLabel?.font = .systemFont(ofSize: 20, weight: glass ? .medium : .regular)
                 // `face.smiling` is the native-style, open-mouth emoji key.
                 // Never give this button a title as well: UIKit otherwise
                 // renders the legacy text glyph beside the SF Symbol.
-                if key == "emoji" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal); button.tintColor = .label }
-                if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal); button.tintColor = .white }
+                if key == "emoji" {
+                    button.setImage(UIImage(systemName: "face.smiling"), for: .normal)
+                    button.tintColor = .label
+                    button.setPreferredSymbolConfiguration(.init(pointSize: 20, weight: glass ? .medium : .regular), forImageIn: .normal)
+                }
+                if key == "Search" {
+                    button.setTitle(nil, for: .normal)
+                    button.setImage(UIImage(systemName: "checkmark"), for: .normal)
+                    button.tintColor = .white
+                    button.setPreferredSymbolConfiguration(.init(pointSize: 20, weight: glass ? .medium : .regular), forImageIn: .normal)
+                }
                 button.backgroundColor = key == "Search" ? .systemBlue : (key == "⇧" || key == "⌫" || key == "123" ? searchUtilitySurfaceColor : searchKeySurfaceColor)
-                button.layer.cornerRadius = 7
+                button.layer.cornerRadius = glass ? 9 : 7
                 button.accessibilityIdentifier = key
                 button.addAction(UIAction { [weak self, weak button] _ in
                     guard let key = button?.accessibilityIdentifier else { return }
@@ -772,10 +969,27 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             searchKeyboard.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
         ])
         updateCategorySelection()
+        loadEmojiCatalogInBackground()
     }
 
     required init?(coder: NSCoder) { nil }
-    deinit { emojiDeleteRepeater?.invalidate() }
+    deinit { onDeleteHoldEnded?() }
+
+    private func loadEmojiCatalogInBackground() {
+        emojiCatalogLoadGeneration += 1
+        let generation = emojiCatalogLoadGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Touching any non-recent category materializes the cached Unicode
+            // catalog and CLDR index once. Doing that off the main thread keeps
+            // the emoji presentation animation smooth.
+            let loaded = EmojiCategory.allCases.map { EmojiCatalog.emoji(for: $0) }
+            DispatchQueue.main.async {
+                guard let self, generation == self.emojiCatalogLoadGeneration else { return }
+                self.emojiSections = loaded
+                self.collectionView.reloadData()
+            }
+        }
+    }
 
     @objc private func selectCategory(_ sender: UIButton) {
         let selectedCategory = EmojiCategory.allCases[sender.tag]
@@ -790,16 +1004,9 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     @objc private func handleEmojiDeleteHold(_ gesture: UILongPressGestureRecognizer) {
         switch gesture.state {
         case .began:
-            // Touch-down has already removed one character. Begin repeating
-            // after the hold threshold, like the system keyboard.
-            onDelete?()
-            let repeater = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                self?.onDelete?()
-            }
-            emojiDeleteRepeater = repeater
+            onDeleteHoldBegan?()
         case .ended, .cancelled, .failed:
-            emojiDeleteRepeater?.invalidate()
-            emojiDeleteRepeater = nil
+            onDeleteHoldEnded?()
         default:
             break
         }
@@ -876,6 +1083,14 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal) }
             button.backgroundColor = key == "Search" ? .systemBlue : (["⇧", "⌫", "123", "ABC", "#+="].contains(key) ? searchUtilitySurfaceColor : searchKeySurfaceColor)
         }
+    }
+
+    /// Re-resolve keycaps after a light/dark toggle while this picker is up.
+    func refreshDynamicSurfaces() {
+        refreshSearchKeys()
+        updateCategorySelection()
+        searchField.textColor = .label
+        searchField.tintColor = .systemBlue
     }
 
     private func updateCategorySelection() {
@@ -972,15 +1187,540 @@ private enum JoinerKeyImage {
     }()
 }
 
+/// Treats the rail as three generous, unbroken selection zones. UIKit can
+/// otherwise return the stack view or a divider for a touch landing in the
+/// small visual gutters beside a candidate title.
+/// QuickType-style suggestion morph. Matching grapheme clusters stay on
+/// screen; outgoing clusters fade; new clusters scale-and-fade in from left
+/// to right. "good" → "give" therefore keeps `g` still and only animates `ood`.
+private final class CandidateMorphLabel: UIView {
+    private enum Motion {
+        static let appearDuration: TimeInterval = 0.28
+        static let disappearDuration: TimeInterval = 0.16
+        static let shiftDuration: TimeInterval = 0.22
+        static let stagger: TimeInterval = 0.022
+        static let appearScale: CGFloat = 0.28
+    }
+
+    var font: UIFont = .systemFont(ofSize: 18) {
+        didSet {
+            guard oldValue != font else { return }
+            glyphViews.forEach { $0.font = font }
+            applyFrames(to: glyphViews, characters: Array(text), animated: false)
+        }
+    }
+
+    private(set) var text = ""
+    private var glyphViews: [UILabel] = []
+    private var retiringViews: [UILabel] = []
+    private var lastLayoutSize: CGSize = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isOpaque = false
+        clipsToBounds = true
+        backgroundColor = .clear
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let sizeChanged = abs(bounds.width - lastLayoutSize.width) > 0.5
+            || abs(bounds.height - lastLayoutSize.height) > 0.5
+        lastLayoutSize = bounds.size
+        guard bounds.width > 1 else { return }
+        if glyphViews.isEmpty, !text.isEmpty {
+            rebuild(text)
+            return
+        }
+        if sizeChanged {
+            applyFrames(to: glyphViews, characters: Array(text), animated: false)
+        }
+    }
+
+    func setText(_ newText: String?, animated: Bool) {
+        let incoming = newText ?? ""
+        guard incoming != text else { return }
+        settleInFlightGlyphs()
+        let canAnimate = animated
+            && !UIAccessibility.isReduceMotionEnabled
+            && bounds.width > 1
+            && window != nil
+        if !canAnimate {
+            rebuild(incoming)
+            return
+        }
+        morph(to: incoming)
+    }
+
+    private func settleInFlightGlyphs() {
+        retiringViews.forEach { view in
+            view.layer.removeAllAnimations()
+            view.removeFromSuperview()
+        }
+        retiringViews.removeAll()
+        glyphViews.forEach { view in
+            view.layer.removeAllAnimations()
+            view.transform = .identity
+            view.alpha = 1
+        }
+        applyFrames(to: glyphViews, characters: Array(text), animated: false)
+    }
+
+    private func rebuild(_ incoming: String) {
+        glyphViews.forEach { $0.removeFromSuperview() }
+        glyphViews.removeAll()
+        text = incoming
+        guard !incoming.isEmpty, bounds.width > 1 else { return }
+        let characters = Array(incoming)
+        let frames = glyphFrames(for: characters)
+        glyphViews = zip(characters, frames).map { character, frame in
+            let label = makeGlyph(character)
+            label.frame = frame
+            addSubview(label)
+            return label
+        }
+    }
+
+    private func morph(to incoming: String) {
+        let oldCharacters = Array(text)
+        let newCharacters = Array(incoming)
+        guard glyphViews.count == oldCharacters.count else {
+            rebuild(incoming)
+            return
+        }
+        let oldFrames = glyphFrames(for: oldCharacters)
+        let newFrames = glyphFrames(for: newCharacters)
+        let overlap = min(oldCharacters.count, newCharacters.count)
+
+        var nextViews = [UILabel?](repeating: nil, count: newCharacters.count)
+        var outgoing: [UILabel] = []
+
+        for index in oldCharacters.indices {
+            let view = glyphViews[index]
+            view.frame = oldFrames[index]
+            let isShared = index < overlap && oldCharacters[index] == newCharacters[index]
+            if isShared {
+                nextViews[index] = view
+            } else {
+                outgoing.append(view)
+            }
+        }
+
+        retiringViews.append(contentsOf: outgoing)
+        UIView.animate(
+            withDuration: Motion.disappearDuration,
+            delay: 0,
+            options: [.curveEaseIn, .beginFromCurrentState, .allowUserInteraction]
+        ) {
+            outgoing.forEach { $0.alpha = 0 }
+        } completion: { [weak self] _ in
+            guard let self else { return }
+            for view in outgoing {
+                guard self.retiringViews.contains(where: { $0 === view }) else { continue }
+                view.removeFromSuperview()
+                self.retiringViews.removeAll { $0 === view }
+            }
+        }
+
+        var appearOrder = 0
+        for index in newCharacters.indices {
+            if let kept = nextViews[index] {
+                let target = newFrames[index]
+                if abs(kept.frame.midX - target.midX) > 0.5 || abs(kept.frame.minY - target.minY) > 0.5 {
+                    UIView.animate(
+                        withDuration: Motion.shiftDuration,
+                        delay: 0,
+                        options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+                    ) {
+                        kept.frame = target
+                    }
+                } else {
+                    kept.frame = target
+                }
+                continue
+            }
+
+            let label = makeGlyph(newCharacters[index])
+            label.frame = newFrames[index]
+            label.alpha = 0
+            label.transform = CGAffineTransform(scaleX: Motion.appearScale, y: Motion.appearScale)
+            addSubview(label)
+            nextViews[index] = label
+            let delay = Motion.stagger * TimeInterval(appearOrder)
+            appearOrder += 1
+            UIView.animate(
+                withDuration: Motion.appearDuration,
+                delay: delay,
+                options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+            ) {
+                label.alpha = 1
+                label.transform = .identity
+            }
+        }
+
+        glyphViews = nextViews.compactMap { $0 }
+        text = incoming
+    }
+
+    private func makeGlyph(_ character: Character) -> UILabel {
+        let label = UILabel()
+        label.text = String(character)
+        label.font = font
+        label.textColor = .label
+        label.textAlignment = .center
+        label.baselineAdjustment = .alignCenters
+        label.isUserInteractionEnabled = false
+        label.backgroundColor = .clear
+        return label
+    }
+
+    private func applyFrames(to views: [UILabel], characters: [Character], animated: Bool) {
+        guard views.count == characters.count else { return }
+        let frames = glyphFrames(for: characters)
+        let changes = {
+            for (view, frame) in zip(views, frames) {
+                view.frame = frame
+            }
+        }
+        guard animated else {
+            changes()
+            return
+        }
+        UIView.animate(
+            withDuration: Motion.shiftDuration,
+            delay: 0,
+            options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction],
+            animations: changes
+        )
+    }
+
+    private func glyphFrames(for characters: [Character]) -> [CGRect] {
+        guard !characters.isEmpty else { return [] }
+        let sizes = characters.map { String($0).size(withAttributes: [.font: font]) }
+        let totalWidth = sizes.reduce(CGFloat.zero) { $0 + $1.width }
+        // Center the ink box, not the line box. Native QuickType sits on the
+        // typographic mid-line; `lineHeight` includes leftover leading that
+        // dropped Sinhala (and even Latin) a few points in this short rail.
+        let inkHeight = font.ascender - font.descender
+        let y = ((bounds.height - inkHeight) / 2) - 1
+        var x = (bounds.width - totalWidth) / 2
+        if totalWidth > bounds.width - 8 {
+            x = 4
+        }
+        return sizes.map { size in
+            let frame = CGRect(x: x, y: y, width: size.width, height: max(font.lineHeight, inkHeight))
+            x += size.width
+            return frame
+        }
+    }
+}
+
+private final class CandidateButton: UIButton {
+    private let morphLabel = CandidateMorphLabel()
+    private(set) var displayedText: String?
+    var onActivate: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        adjustsImageWhenHighlighted = false
+        isEnabled = true
+        morphLabel.isUserInteractionEnabled = false
+        insertSubview(morphLabel, at: 0)
+        isAccessibilityElement = false
+        accessibilityTraits = .button
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        titleLabel?.isHidden = true
+        morphLabel.frame = bounds
+    }
+
+    override var isHighlighted: Bool {
+        get { super.isHighlighted }
+        set {
+            super.isHighlighted = newValue
+            morphLabel.alpha = newValue ? 0.35 : 1
+        }
+    }
+
+    override func accessibilityActivate() -> Bool {
+        guard displayedText != nil else { return false }
+        onActivate?()
+        return true
+    }
+
+    var candidateFont: UIFont {
+        get { morphLabel.font }
+        set { morphLabel.font = newValue }
+    }
+
+    func setCandidate(_ text: String?, animated: Bool) {
+        displayedText = text
+        // Stay enabled. Disabling a UIButton mid-touch cancels the gesture,
+        // which is what made suggestion taps miss after a phonetic keystroke.
+        isEnabled = true
+        isAccessibilityElement = text != nil
+        accessibilityLabel = text
+        morphLabel.setText(text, animated: animated)
+    }
+}
+
+private final class CandidateRailView: UIView {
+    var candidateButtons: [CandidateButton] = []
+    /// Extra hit area, typically the gap down to the first key row, so a tap
+    /// on the bottom of a suggestion is not stolen by Q / W / E.
+    var hitOutsets: UIEdgeInsets = .zero
+    var onSelect: ((CandidateButton) -> Void)?
+    private var highlightedButton: CandidateButton?
+
+    private var expandedHitBounds: CGRect {
+        bounds.inset(by: UIEdgeInsets(
+            top: -hitOutsets.top,
+            left: -hitOutsets.left,
+            bottom: -hitOutsets.bottom,
+            right: -hitOutsets.right
+        ))
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        expandedHitBounds.contains(point)
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard !isHidden, alpha > 0.01, isUserInteractionEnabled,
+              expandedHitBounds.contains(point) else { return nil }
+        // Own the touch even when a ranking pass blanks a UIButton. The rail
+        // inserts on touch-down from `touchesBegan`, not `touchUpInside`.
+        return self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        guard let point = touches.first?.location(in: self),
+              let button = suggestionButton(at: point) else { return }
+        highlightedButton?.isHighlighted = false
+        highlightedButton = button
+        button.isHighlighted = true
+        onSelect?(button)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        guard let point = touches.first?.location(in: self) else { return }
+        let button = suggestionButton(at: point)
+        if button !== highlightedButton {
+            highlightedButton?.isHighlighted = false
+            highlightedButton = button
+            button?.isHighlighted = true
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        highlightedButton?.isHighlighted = false
+        highlightedButton = nil
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        highlightedButton?.isHighlighted = false
+        highlightedButton = nil
+    }
+
+    func suggestionButton(at point: CGPoint) -> CandidateButton? {
+        let selectable = candidateButtons.filter { $0.displayedText != nil }
+        guard !selectable.isEmpty else { return nil }
+        let widthPerCandidate = bounds.width / CGFloat(max(candidateButtons.count, 1))
+        let index = min(candidateButtons.count - 1, max(0, Int(point.x / max(widthPerCandidate, 1))))
+        if candidateButtons.indices.contains(index),
+           candidateButtons[index].displayedText != nil {
+            return candidateButtons[index]
+        }
+        return selectable.min { lhs, rhs in
+            abs(lhs.center.x - point.x) < abs(rhs.center.x - point.x)
+        }
+    }
+}
+
+/// Fills gutters between keycaps. Phonetic layouts also expand each key to
+/// its full row cell — including the A / L side margins and Shift / Delete
+/// leftover — matching the system English keyboard. Wijesekara keeps the
+/// conservative half-gap snap so a narrow Shift is not stolen by ්‍ර.
+private final class KeyboardGridView: UIStackView {
+    /// Extra hit area around the stack so side chrome and the strips above
+    /// and below the grid still reach an edge key — not a neighbour.
+    var hitExpansion: UIEdgeInsets = .zero
+    var horizontalGap: CGFloat = 6
+    /// Phonetic / Smart Phonetic: each key owns its row cell out to the
+    /// midpoints of neighbouring gaps and the row's leading/trailing edge.
+    var expandsToRowEdges = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        insetsLayoutMarginsFromSafeArea = false
+        isLayoutMarginsRelativeArrangement = false
+    }
+
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+        insetsLayoutMarginsFromSafeArea = false
+        isLayoutMarginsRelativeArrangement = false
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        expandedHitBounds.contains(point)
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
+        guard self.point(inside: point, with: event) else { return nil }
+
+        let keysByRow = liveKeysByRow()
+        let keys = keysByRow.flatMap { $0 }
+        guard !keys.isEmpty else { return nil }
+
+        if let painted = keyContainingPaintedCap(at: point, keys: keys) {
+            return painted
+        }
+        if expandsToRowEdges {
+            return keyOwningRowCell(at: point, keysByRow: keysByRow)
+        }
+        return nearestKeyInGutter(at: point, keys: keys)
+    }
+
+    private var expandedHitBounds: CGRect {
+        bounds.inset(by: UIEdgeInsets(
+            top: -hitExpansion.top,
+            left: -hitExpansion.left,
+            bottom: -hitExpansion.bottom,
+            right: -hitExpansion.right
+        ))
+    }
+
+    private func keyContainingPaintedCap(
+        at point: CGPoint,
+        keys: [(button: NativeKeyButton, frame: CGRect)]
+    ) -> NativeKeyButton? {
+        var inside: [(button: NativeKeyButton, frame: CGRect)] = []
+        for item in keys where item.frame.contains(point) {
+            inside.append(item)
+        }
+        if inside.count == 1 { return inside[0].button }
+        if inside.count > 1 {
+            return inside.min { lhs, rhs in
+                hypot(lhs.frame.midX - point.x, lhs.frame.midY - point.y)
+                    < hypot(rhs.frame.midX - point.x, rhs.frame.midY - point.y)
+            }?.button
+        }
+        return nil
+    }
+
+    /// System-keyboard cells: edge keys of a row own the empty margin (A, L,
+    /// Shift, Delete, Q, P) and every key owns half of the gutter beside it.
+    private func keyOwningRowCell(
+        at point: CGPoint,
+        keysByRow: [[(button: NativeKeyButton, frame: CGRect)]]
+    ) -> NativeKeyButton? {
+        let rows = arrangedSubviews.compactMap { $0 as? UIStackView }
+        guard rows.count == keysByRow.count else { return nil }
+
+        for (rowIndex, rowKeys) in keysByRow.enumerated() {
+            guard !rowKeys.isEmpty else { continue }
+            let cells = rowCells(for: rowKeys, rowIndex: rowIndex, rows: rows)
+            for (key, cell) in zip(rowKeys, cells) where cell.contains(point) {
+                return key.button
+            }
+        }
+        return nil
+    }
+
+    private func rowCells(
+        for rowKeys: [(button: NativeKeyButton, frame: CGRect)],
+        rowIndex: Int,
+        rows: [UIStackView]
+    ) -> [CGRect] {
+        let rowFrame = rows[rowIndex].convert(rows[rowIndex].bounds, to: self)
+        let minY: CGFloat
+        if rowIndex == 0 {
+            minY = rowFrame.minY - hitExpansion.top
+        } else {
+            let previous = rows[rowIndex - 1].convert(rows[rowIndex - 1].bounds, to: self)
+            minY = (previous.maxY + rowFrame.minY) / 2
+        }
+        let maxY: CGFloat
+        if rowIndex == rows.count - 1 {
+            maxY = rowFrame.maxY + hitExpansion.bottom
+        } else {
+            let next = rows[rowIndex + 1].convert(rows[rowIndex + 1].bounds, to: self)
+            maxY = (rowFrame.maxY + next.minY) / 2
+        }
+        let leading = rowFrame.minX - hitExpansion.left
+        let trailing = rowFrame.maxX + hitExpansion.right
+
+        return rowKeys.enumerated().map { index, item in
+            let left = index == 0
+                ? leading
+                : (rowKeys[index - 1].frame.maxX + item.frame.minX) / 2
+            let right = index == rowKeys.count - 1
+                ? trailing
+                : (item.frame.maxX + rowKeys[index + 1].frame.minX) / 2
+            return CGRect(x: left, y: minY, width: max(0, right - left), height: max(0, maxY - minY))
+        }
+    }
+
+    private func nearestKeyInGutter(
+        at point: CGPoint,
+        keys: [(button: NativeKeyButton, frame: CGRect)]
+    ) -> NativeKeyButton? {
+        let keyUnion = keys.reduce(into: CGRect.null) { $0 = $0.union($1.frame) }
+        let inChrome = !keyUnion.insetBy(dx: -0.5, dy: -0.5).contains(point)
+        let maxSnapX = inChrome ? max(horizontalGap / 2, hitExpansion.left, hitExpansion.right) : horizontalGap / 2
+        let maxSnapY = inChrome ? max(spacing / 2, hitExpansion.top, hitExpansion.bottom) : spacing / 2
+
+        var best: NativeKeyButton?
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (key, frame) in keys {
+            let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+            let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+            guard dx <= maxSnapX + 0.5, dy <= maxSnapY + 0.5 else { continue }
+            let distance = dx * dx + dy * dy
+            if distance < bestDistance {
+                bestDistance = distance
+                best = key
+            }
+        }
+        return best
+    }
+
+    private func liveKeysByRow() -> [[(button: NativeKeyButton, frame: CGRect)]] {
+        arrangedSubviews.compactMap { $0 as? UIStackView }.map { row in
+            row.arrangedSubviews.compactMap { view -> (NativeKeyButton, CGRect)? in
+                guard let key = view as? NativeKeyButton,
+                      key.isUserInteractionEnabled, !key.isHidden, key.alpha > 0.01 else { return nil }
+                let frame = key.convert(key.bounds, to: self)
+                guard !frame.isEmpty else { return nil }
+                return (key, frame)
+            }
+        }
+    }
+}
+
 /// The iOS character-preview balloon. Drawing it in a separate overlay
 /// prevents Auto Layout from moving keyboard rows while a finger is down.
 private final class KeyPreviewView: UIView {
     private let glyphLabel = UILabel()
     private let shapeLayer = CAShapeLayer()
-    private var glyphBottomConstraint: NSLayoutConstraint!
     private var lowerWidth: CGFloat = 30
     private var lowerCenterX: CGFloat = 30
     private var lowerHeight: CGFloat = 42
+    private var upperHeight: CGFloat = 54
+    private var configuredGeometry = CGSize.zero
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -989,18 +1729,14 @@ private final class KeyPreviewView: UIView {
         layer.shadowOpacity = 0.10
         layer.shadowOffset = CGSize(width: 0, height: 1)
         layer.shadowRadius = 1.5
+        // Frame-based glyph placement avoids Auto Layout on every key preview.
         glyphLabel.textAlignment = .center
         glyphLabel.textColor = .label
-        glyphLabel.font = .systemFont(ofSize: 30, weight: .regular)
-        glyphLabel.translatesAutoresizingMaskIntoConstraints = false
+        glyphLabel.font = .systemFont(
+            ofSize: 30,
+            weight: KeyboardChromeAppearance.usesLiquidGlassSurfaces ? .medium : .regular
+        )
         addSubview(glyphLabel)
-        NSLayoutConstraint.activate([
-            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            glyphLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            glyphLabel.topAnchor.constraint(equalTo: topAnchor, constant: 3)
-        ])
-        glyphBottomConstraint = glyphLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -(lowerHeight + 6))
-        glyphBottomConstraint.isActive = true
         layer.insertSublayer(shapeLayer, at: 0)
     }
 
@@ -1009,6 +1745,12 @@ private final class KeyPreviewView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         shapeLayer.frame = bounds
+        glyphLabel.frame = CGRect(
+            x: 4,
+            y: 3,
+            width: max(0, bounds.width - 8),
+            height: max(0, bounds.height - lowerHeight - 9)
+        )
         let w = bounds.width, h = bounds.height
         let lowerLeft = max(6, lowerCenterX - lowerWidth / 2)
         let lowerRight = min(w - 6, lowerCenterX + lowerWidth / 2)
@@ -1032,19 +1774,64 @@ private final class KeyPreviewView: UIView {
         shapeLayer.path = path.cgPath
         shapeLayer.fillColor = UIColor { traits in
             traits.userInterfaceStyle == .dark ? UIColor(white: 0.46, alpha: 1) : .systemBackground
-        }.cgColor
+        }.resolvedColor(with: traitCollection).cgColor
     }
 
     func display(_ title: String) { glyphLabel.text = title }
 
     func configure(lowerWidth: CGFloat, lowerCenterX: CGFloat, lowerHeight: CGFloat, upperHeight: CGFloat) {
+        let geometry = CGSize(width: lowerWidth + lowerCenterX, height: lowerHeight + upperHeight)
+        let unchanged = abs(self.lowerWidth - lowerWidth) < 0.5
+            && abs(self.lowerCenterX - lowerCenterX) < 0.5
+            && abs(self.lowerHeight - lowerHeight) < 0.5
+            && abs(self.upperHeight - upperHeight) < 0.5
+            && configuredGeometry == geometry
         self.lowerWidth = lowerWidth
         self.lowerCenterX = lowerCenterX
         self.lowerHeight = lowerHeight
-        glyphLabel.font = .systemFont(ofSize: min(30, max(18, upperHeight - 8)), weight: .regular)
-        glyphBottomConstraint.constant = -(lowerHeight + 6)
+        self.upperHeight = upperHeight
+        configuredGeometry = geometry
+        glyphLabel.font = .systemFont(
+            ofSize: min(30, max(18, upperHeight - 8)),
+            weight: KeyboardChromeAppearance.usesLiquidGlassSurfaces ? .medium : .regular
+        )
+        guard !unchanged else { return }
         setNeedsLayout()
     }
+}
+
+/// Compact dead-key chip for a pending Wijesekara kombuwa. Marked text
+/// splits Sinhala clusters in many hosts, so the mark lives here until a
+/// consonant arrives and we insert the finished syllable once.
+private final class PendingCompositionChip: UIView {
+    private let label = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark ? UIColor(white: 0.46, alpha: 1) : .systemBackground
+        }
+        layer.cornerRadius = 8
+        layer.cornerCurve = .continuous
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.12
+        layer.shadowOffset = CGSize(width: 0, height: 1)
+        layer.shadowRadius = 1.5
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.textAlignment = .center
+        label.textColor = .label
+        label.font = .systemFont(ofSize: 22, weight: .medium)
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func display(_ text: String) { label.text = text }
 }
 
 /// Non-interactive, press-and-slide alternate picker. The originating key
@@ -1166,10 +1953,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             if usesIOS16Appearance || width < 380 { return 5 }
             // The current UK layout's leading edge lands at 20 px on a 3x
             // phone display (6⅔ pt), rather than a rounded 7 pt.
-            return KeyboardPreferences.keySpacing() == .standard ? 20 / 3 : 7
+            return KeyboardPreferences.hotPath.keySpacing == .standard ? 20 / 3 : 7
         }
 
-        var horizontalGap: CGFloat { CGFloat(KeyboardPreferences.keySpacing().horizontalGap) }
+        var horizontalGap: CGFloat { CGFloat(KeyboardPreferences.hotPath.keySpacingHorizontalGap) }
 
         private var usableWidth: CGFloat {
             max(0, width - horizontalInset * 2)
@@ -1231,9 +2018,28 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private let maximumMarkedPhoneticSourceLength = 8
     private var visibleEntries: [String] = []
     private var visibleSources: [String] = []
-    private enum MarkedCompositionKind { case prebase, independentVowel }
-    private var markedSource: String?
-    private var markedKind: MarkedCompositionKind?
+    /// Local Wijesekara kombuwa / independent-vowel buffer. The current
+    /// rendering is already in the host and is rewritten if a later key
+    /// completes the syllable.
+    private enum PendingCompositionKind { case prebase, independentVowel }
+    private var pendingSource: String?
+    private var pendingKind: PendingCompositionKind?
+    /// Exact glyphs already written for the pending cluster, if any.
+    private var pendingHostRendered: String?
+    /// Host context captured before that cluster, so a rewrite of කෙ → කේ
+    /// can stop deleting if a host treats the syllable as one unit.
+    private var pendingHostAnchor: String?
+    /// Key that started the dead-key, used to keep the chip and ring in place.
+    private var pendingAnchorKey: String?
+    private var lastLetterKey: String?
+    private var pendingCompositionChip: PendingCompositionChip?
+    private var lastInputTimestamp: TimeInterval = 0
+    /// Own `insertText` / `deleteBackward` calls notify `textDidChange`.
+    /// Ignore those so the next letter does not read proxy context.
+    private var isApplyingOwnEdit = false
+    private var ownEditDepth = 0
+    private var ownEditGeneration = 0
+    private var ownEditClearWork: DispatchWorkItem?
     private var mode: SinhalaEngine.Mode = .sls
     private var lastSpaceTimestamp: TimeInterval?
     /// UIKit can temporarily give a keyboard extension a full-screen root
@@ -1241,25 +2047,50 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// bottom-anchored, fixed-height container so it is usable immediately
     /// without allowing equal-height rows to stretch into that transient frame.
     private let keyboardContentContainer = UIView()
-    private let keyboardStack = UIStackView()
-    private let candidateBar = UIView()
+    /// Pre-iOS 26 keyboard colour. Left clear on iOS 26 so the system Liquid
+    /// Glass surface is the only backdrop — KeyboardKit's standard style.
+    private let keyboardChrome = UIView()
+    private let keyboardStack = KeyboardGridView()
+    private let candidateBar = CandidateRailView()
     private var candidateBarHeight: NSLayoutConstraint!
+    private var candidateBarTopInset: NSLayoutConstraint!
+    private var keyboardStackTopInset: NSLayoutConstraint!
+    private var keyboardStackBottomInset: NSLayoutConstraint!
     private var keyboardContentHeight: NSLayoutConstraint!
-    private var keyboardHostMinimumHeight: NSLayoutConstraint!
+    /// Host height at priority 999. Soft enough to yield to UIKit's temporary
+    /// encapsulated height during attach, then settles to the calibrated strip.
+    private var keyboardHostHeight: NSLayoutConstraint!
     private var keyboardLeadingInset: NSLayoutConstraint!
     private var keyboardTrailingInset: NSLayoutConstraint!
     private var metricConstraints: [(NSLayoutConstraint, () -> CGFloat)] = []
     private var metricMargins: [(UIStackView, () -> UIEdgeInsets)] = []
-    private var candidateButtons: [UIButton] = []
+    private var candidateButtons: [CandidateButton] = []
     private var candidates: [String?] = [nil, nil, nil]
     private var predictionPrefix = ""
+    private let predictionQueue = DispatchQueue(label: "lk.org.akshara.prediction", qos: .userInitiated)
+    private var predictionGeneration = 0
+    /// Set only by UIKit when the host editor can have changed independently
+    /// of this extension. Avoid a synchronous proxy-context lookup for every
+    /// ordinary keystroke.
+    private var documentStateMayHaveChanged = true
+    /// Preceding-word context for ranking. Refreshed only when the host may
+    /// have changed or a word boundary commits — not on every letter.
+    private var cachedPrecedingWords: [String] = []
+    private var precedingWordsCacheValid = false
     // Transliteration must render in the same touch turn. Candidate ranking is
     // secondary UI, so coalesce it while the user is actively spelling a word
     // instead of scanning the dictionary and redrawing three buttons per key.
     private var pendingPredictionUpdate: DispatchWorkItem?
+    /// Guards VoiceOver activate + touch-down from inserting the same chip twice.
+    private var lastPredictionInsertAt: TimeInterval = 0
+    private var lastInsertedPrediction: String?
     private var emojiPicker: EmojiPickerView?
     private let trackpadSurface = UIView()
     private var deleteRepeater: Timer?
+    /// First Delete touch-down of the current hold, used to switch from
+    /// character repeat to word repeat like the system keyboard.
+    private var deleteRepeatBeganAt: TimeInterval = 0
+    private var deleteRepeatUsesWords = false
     private var keyPreview: KeyPreviewView?
     private var alternatePicker: AlternateCharacterPickerView?
     private var presentedAlternateChoices: [(display: String, input: String)] = []
@@ -1271,9 +2102,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var spaceTrackpadLastX: CGFloat = 0
     private var spaceTrackpadRemainder: CGFloat = 0
     private var spaceTrackpadLastTimestamp: TimeInterval = 0
+    private var spaceSignatureHoldPending = false
+    private var spaceSignatureHoldConsumed = false
+    private var spaceSignatureHoldTimer: DispatchWorkItem?
+    private var spaceSignatureStartLocation: CGPoint = .zero
+    private var spaceSignatureTapCount = 0
+    private var spaceSignatureTapTimestamp: TimeInterval = 0
+    private var spaceSignatureRestoreWork: DispatchWorkItem?
     private var appliedLayoutProfile: LayoutProfile?
     private var appliedLayoutWidth: CGFloat = 0
     private var lastLoggedLayoutBounds: CGSize = .zero
+    private var lastLoggedVisibilityReason: String = ""
+    private var pendingRevealWorkItem: DispatchWorkItem?
     private var needsKeyRebuildWhenGeometryIsStable = true
     private var appliedReturnKeyTitle: String?
     private var appliedKeyboardType: UIKeyboardType?
@@ -1283,6 +2123,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var showsInputModeSwitchKey = false
     private var hasHostTextInputConnection = false
     private var inputModeSwitchKeyRefreshScheduled = false
+    /// Last scheme applied to keys. Appearance toggles while the keyboard is
+    /// up must rebuild caps; UIButton and SF Symbols otherwise keep the old
+    /// resolved colours until the input is switched.
+    private var lastSyncedInterfaceStyle: UIUserInterfaceStyle = .unspecified
+    private var appearanceRebuildScheduled = false
 
     private var usesIOS16KeyboardAppearance: Bool {
         if #available(iOS 17.0, *) { return false }
@@ -1334,11 +2179,38 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         switch layoutProfile {
         case .padPortrait, .padLandscape: return 44
         case .phoneLandscape: return 28
-        // Keep the compact iPhone rail three points shorter, matching the
-        // desired overall keyboard height without changing key geometry.
-        case .phonePortrait: return 26
+        // Match the compact UK rail. Extra toolbar height made the extension
+        // taller than the system keyboard.
+        case .phonePortrait:
+            if #available(iOS 26.0, *) { return 26 }
+            return 30
         case .compactPad: return 25.5
         }
+    }
+
+    /// Clearance below rounded chrome. iOS 26 glass already clips the
+    /// extension; adding a second inset just creates an empty strip.
+    private var contentTopInset: CGFloat {
+        if #available(iOS 26.0, *) { return 0 }
+        guard layoutProfile == .phonePortrait || layoutProfile == .compactPad else { return 0 }
+        return 4
+    }
+
+    /// Gap between the candidate rail and the first key row. Keep iOS 17+ at
+    /// 7 pt so Standard spacing remains the measured UK height; the old +4 pt
+    /// transform (and the 11 pt stand-in) made the extension taller than UK.
+    private var keyGridTopInset: CGFloat {
+        usesIOS16KeyboardAppearance ? 11 : 7
+    }
+
+    /// Space under the bottom row, matching the UK dock gap above the globe.
+    private var keyGridBottomInset: CGFloat {
+        usesIOS16KeyboardAppearance ? 2 : 7
+    }
+
+    /// True on iOS 26, matching KeyboardKit's OS-version glass flag.
+    private var usesLiquidGlassKeyboardChrome: Bool {
+        KeyboardChromeAppearance.usesLiquidGlassSurfaces
     }
 
     /// Preserve the calibrated standard-keyboard geometry from the release
@@ -1359,15 +2231,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // UK on the iPhone 17 Pro uses four 43 pt key rows with three 11 pt
         // gaps. With the candidate rail and the existing top/bottom insets,
         // 219 pt preserves that geometry exactly for Standard spacing.
-        case .phonePortrait: return (usesStandardPhoneGeometry ? 219 : 214) + topRowHeight
-        case .compactPad: return 214 + topRowHeight
+        case .phonePortrait: return (usesStandardPhoneGeometry ? 219 : 214) + topRowHeight + contentTopInset
+        case .compactPad: return 214 + topRowHeight + contentTopInset
         }
     }
 
     private var usesStandardPhoneGeometry: Bool {
-        layoutProfile == .phonePortrait && KeyboardPreferences.keySpacing() == .standard
+        layoutProfile == .phonePortrait && KeyboardPreferences.hotPath.keySpacing == .standard
     }
 
+    /// Uniform UK portrait key height. Phonetic, Smart Phonetic, and
+    /// Wijesekara share this; only key widths differ by layout.
     private var standardPhoneRowHeight: CGFloat? {
         usesStandardPhoneGeometry ? 43 : nil
     }
@@ -1395,72 +2269,200 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         self.normalKeyboardBaseHeight + (showsCandidateBar ? candidateHeight : 0)
     }
 
+    private var lastLoggedHostHeightReport: CGFloat?
+
+    private func applyHostHeightConstraint(reason: String) {
+        let height = normalKeyboardHeight
+        keyboardHostHeight?.constant = height
+        preferredContentSize = CGSize(width: 0, height: height)
+        if emojiPicker == nil {
+            keyboardContentHeight?.constant = height
+            candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
+        }
+        if lastLoggedHostHeightReport != height {
+            lastLoggedHostHeightReport = height
+            Self.layoutLogger.debug(
+                "hostHeight \(reason, privacy: .public) reported=\(Int(height), privacy: .public)"
+            )
+        }
+    }
+
     /// The container fixes the content height, so width is the only geometry
-    /// required before it is safe to build keys. This lets us render during
-    /// UIKit's temporary full-height attachment frame without stretching keys.
+    /// required before it is safe to build keys. Keys stay bottom-anchored in
+    /// UIKit's temporary full-height attachment frame without stretching.
     private var hasUsableKeyboardWidth: Bool {
         view.bounds.width > 0
     }
 
     private func logKeyboardLayout(_ event: String) {
         let bounds = view.bounds.size
+        let frame = view.frame.size
         let profile = String(describing: layoutProfile)
+        let contentH = keyboardContentHeight?.constant ?? -1
+        let hostH = keyboardHostHeight?.constant ?? -1
+        let containerH = keyboardContentContainer.bounds.height
+        let superH = view.superview?.bounds.height ?? -1
+        let windowH = view.window?.bounds.height ?? -1
+        let preferredSize = preferredContentSize.height
+        let preferred = normalKeyboardHeight
+        let oversize = max(0, bounds.height - preferred)
         Self.layoutLogger.debug(
-            "\(event, privacy: .public) bounds=\(Int(bounds.width), privacy: .public)x\(Int(bounds.height), privacy: .public) preferredHeight=\(Int(self.normalKeyboardHeight), privacy: .public) ready=\(self.hasUsableKeyboardWidth, privacy: .public) profile=\(profile, privacy: .public) pending=\(self.needsKeyRebuildWhenGeometryIsStable, privacy: .public)"
+            """
+            \(event, privacy: .public) \
+            bounds=\(Int(bounds.width), privacy: .public)x\(Int(bounds.height), privacy: .public) \
+            frame=\(Int(frame.width), privacy: .public)x\(Int(frame.height), privacy: .public) \
+            preferredHeight=\(Int(preferred), privacy: .public) \
+            preferredSize=\(Int(preferredSize), privacy: .public) \
+            contentH=\(Int(contentH), privacy: .public) \
+            hostH=\(Int(hostH), privacy: .public) \
+            containerH=\(Int(containerH), privacy: .public) \
+            superH=\(Int(superH), privacy: .public) \
+            windowH=\(Int(windowH), privacy: .public) \
+            oversize=\(Int(oversize), privacy: .public) \
+            alpha=\(String(format: "%.2f", self.view.alpha), privacy: .public) \
+            glass=\(self.usesLiquidGlassKeyboardChrome, privacy: .public) \
+            ready=\(self.hasUsableKeyboardWidth, privacy: .public) \
+            profile=\(profile, privacy: .public) \
+            pending=\(self.needsKeyRebuildWhenGeometryIsStable, privacy: .public)
+            """
         )
     }
 
+    /// When the host is tall, dump the view chain so we can tell whether the
+    /// flash is our controller, UIInputView, or a sibling system backdrop.
+    private func logTallHostHierarchy(_ reason: String) {
+        var parts: [String] = []
+        var node: UIView? = view
+        for depth in 0..<10 {
+            guard let current = node else { break }
+            let name = String(describing: type(of: current))
+            let bg: String
+            if let color = current.backgroundColor {
+                bg = String(format: "bg=%.2f", color.cgColor.alpha)
+            } else {
+                bg = "bg=nil"
+            }
+            parts.append(
+                "[\(depth)]\(name) \(Int(current.bounds.width))x\(Int(current.bounds.height)) \(bg) alpha=\(String(format: "%.2f", current.alpha)) hidden=\(current.isHidden)"
+            )
+            if let parent = current.superview {
+                for sibling in parent.subviews where sibling !== current {
+                    let siblingName = String(describing: type(of: sibling))
+                    if sibling.bounds.height > normalKeyboardHeight + 72
+                        || siblingName.localizedCaseInsensitiveContains("backdrop")
+                        || siblingName.localizedCaseInsensitiveContains("glass")
+                        || siblingName.contains("UIKB") {
+                        parts.append(
+                            "  sibling:\(siblingName) \(Int(sibling.bounds.width))x\(Int(sibling.bounds.height))"
+                        )
+                    }
+                }
+            }
+            node = current.superview
+        }
+        let chain = parts.joined(separator: " | ")
+        Self.layoutLogger.debug(
+            "tall hierarchy reason=\(reason, privacy: .public) \(chain, privacy: .public)"
+        )
+    }
 
-    var enableInputClicksWhenVisible: Bool { KeyboardPreferences.keyClicksEnabled() }
+    var enableInputClicksWhenVisible: Bool { KeyboardPreferences.hotPath.keyClicksEnabled }
 
     override func loadView() {
-        let keyboardView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
-        // The system owns the keyboard material; our controller supplies a
-        // stable initial height so the extension does not visibly resize as
-        // it attaches to a host text field.
-        keyboardView.allowsSelfSizing = false
-        inputView = keyboardView
+        // KeyboardKit does not wrap the extension in `UIInputView.keyboard`.
+        // That style tints a second backdrop; on iOS 26 it sits on the system
+        // Liquid Glass and reads as a grey rounded card. A plain view lets the
+        // host draw the only surface. Older OS versions still need the keyboard
+        // style so there is a native grey canvas behind the keys.
+        if #available(iOS 26.0, *) {
+            let root = UIView(frame: .zero)
+            root.backgroundColor = .clear
+            view = root
+        } else {
+            let keyboardView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
+            keyboardView.allowsSelfSizing = false
+            inputView = keyboardView
+        }
+        preferredContentSize = CGSize(width: 0, height: 245)
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         logKeyboardLayout("viewDidLoad")
+        KeyboardPreferences.refreshHotPathCache()
         updateKeyboardAppearance()
         mode = KeyboardPreferences.selectedMode()
         configureLayout()
         keyFeedback = KeyFeedback(view: view)
         keyFeedback?.prepare()
-        rebuildKeys()
-        // A native candidate rail is populated immediately, rather than
-        // presenting a blank, segmented strip until the first character.
-        updatePredictions(for: "")
+        needsKeyRebuildWhenGeometryIsStable = true
+        hideHostWindowUntilSettled()
+        registerForUserInterfaceStyleChanges()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        applyHostHeightConstraint(reason: "viewWillAppear")
+        hideHostWindowUntilSettled()
         logKeyboardLayout("viewWillAppear")
         KeyboardPreferences.reload()
-        // `hasFullAccess` is only available inside the keyboard extension.
-        // Persist a positive confirmation for the containing app to display.
+        documentStateMayHaveChanged = true
+        precedingWordsCacheValid = false
         if hasFullAccess {
             KeyboardPreferences.setFullAccessConfirmed(true)
         }
         let selectedMode = KeyboardPreferences.selectedMode()
+        var needsRebuild = keyboardStack.arrangedSubviews.isEmpty
         if selectedMode != mode {
             commitActiveComposition()
             mode = selectedMode
+            needsRebuild = true
         }
         shouldAnimateSpaceLabel = true
         updateKeyboardAppearance()
+        lastSyncedInterfaceStyle = view.traitCollection.userInterfaceStyle
+        refreshKeyboardChrome(rebuildIfStyleChanged: false)
         keyFeedback?.prepare()
-        appliedReturnKeyTitle = returnKeyTitle
-        appliedKeyboardType = textDocumentProxy.keyboardType
-        rebuildKeys()
+        let title = returnKeyTitle
+        let keyboardType = textDocumentProxy.keyboardType
+        if title != appliedReturnKeyTitle || keyboardType != appliedKeyboardType {
+            appliedReturnKeyTitle = title
+            appliedKeyboardType = keyboardType
+            needsRebuild = true
+        }
+        if needsRebuild {
+            rebuildKeys()
+        } else {
+            applyKeyboardMetrics()
+        }
+        updatePresentationVisibility()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         logKeyboardLayout("viewDidAppear")
+        applyHostHeightConstraint(reason: "viewDidAppear")
+        refreshKeyboardChrome(rebuildIfStyleChanged: true)
+        if keyboardStack.arrangedSubviews.isEmpty {
+            rebuildKeys()
+        }
+        updatePresentationVisibility()
+        if showsCandidateBar {
+            SinhalaPredictionProviderRegistry.shared.prepareBundledModelsInBackground()
+            if candidates.allSatisfy({ $0 == nil }) {
+                updatePredictions(for: "")
+            }
+        }
+    }
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        updatePresentationVisibility()
+        let bounds = view.bounds.size
+        if abs(bounds.width - lastLoggedLayoutBounds.width) > 0.5
+            || abs(bounds.height - lastLoggedLayoutBounds.height) > 0.5 {
+            logKeyboardLayout("viewWillLayoutSubviews")
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -1471,6 +2473,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             lastLoggedLayoutBounds = bounds
             logKeyboardLayout("viewDidLayoutSubviews")
         }
+        updatePresentationVisibility()
+        syncKeyboardAppearanceIfNeeded(rebuild: true)
+        refreshKeyboardChrome(rebuildIfStyleChanged: true)
         guard hasUsableKeyboardWidth else {
             needsKeyRebuildWhenGeometryIsStable = true
             keyboardStack.isHidden = true
@@ -1478,8 +2483,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             logKeyboardLayout("deferred zero-width geometry")
             return
         }
-        // The first layout is where an extension receives its true width.
-        // Rebuild only when the profile changes, never per keystroke.
         let profile = layoutProfile
         let widthChanged = abs(view.bounds.width - appliedLayoutWidth) > 0.5
         let profileChanged = profile != appliedLayoutProfile
@@ -1488,35 +2491,110 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         appliedLayoutWidth = view.bounds.width
         applyKeyboardMetrics()
         refreshInputModeSwitchKeyWhenConnected()
-        // A width change is geometric, not structural. Recreating every key
-        // here breaks active touches while an iPad is interactively resized.
-        if needsKeyRebuildWhenGeometryIsStable || profileChanged { rebuildKeys() }
+        if needsKeyRebuildWhenGeometryIsStable || profileChanged {
+            rebuildKeys()
+        }
+    }
+
+    /// Hide the hosted keyboard window until height is near the calibrated
+    /// strip. Softens the system 874→473→245 attach sequence; cannot remove
+    /// the host-app inset animation itself (Apple limitation).
+    private func hideHostWindowUntilSettled() {
+        view.alpha = 0
+        view.window?.alpha = 0
+    }
+
+    private func updatePresentationVisibility() {
+        let preferred = normalKeyboardHeight
+        let height = view.bounds.height
+        let reason: String
+        if !hasUsableKeyboardWidth {
+            reason = "zeroWidth"
+        } else if height < preferred - 8 {
+            reason = "tooShort"
+        } else if height > preferred + 8 {
+            reason = "tooTall"
+        } else {
+            reason = "settled"
+        }
+        let settled = reason == "settled"
+        if !settled {
+            pendingRevealWorkItem?.cancel()
+            pendingRevealWorkItem = nil
+            applyPresentationAlpha(0, reason: reason)
+            return
+        }
+        guard pendingRevealWorkItem == nil, view.alpha < 0.99 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRevealWorkItem = nil
+            guard abs(self.view.bounds.height - self.normalKeyboardHeight) <= 8 else {
+                self.applyPresentationAlpha(0, reason: "reveal-aborted")
+                return
+            }
+            UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                self.applyPresentationAlpha(1, reason: "settled-fade")
+            }
+        }
+        pendingRevealWorkItem = work
+        DispatchQueue.main.async(execute: work)
+    }
+
+    private func applyPresentationAlpha(_ target: CGFloat, reason: String) {
+        let alphaChanged = abs(view.alpha - target) > 0.01
+        if alphaChanged { view.alpha = target }
+        if let window = view.window, abs(window.alpha - target) > 0.01 {
+            window.alpha = target
+        }
+        if reason != lastLoggedVisibilityReason || alphaChanged {
+            lastLoggedVisibilityReason = reason
+            logKeyboardLayout(
+                "visibility \(reason) alpha->\(String(format: "%.0f", target)) windowAlpha=\(String(format: "%.2f", view.window?.alpha ?? -1))"
+            )
+            if reason == "tooTall" {
+                logTallHostHierarchy(reason)
+            }
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        lastLoggedVisibilityReason = ""
+        pendingRevealWorkItem?.cancel()
+        pendingRevealWorkItem = nil
         stopDeleteRepeat()
         hideKeyPreview(animated: false)
         hideAlternatePicker()
-        // The emoji picker is extension-owned. It must never survive an input
-        // mode change and cover the next (native) keyboard.
         hideEmojiPicker()
         setTrackpadAppearance(active: false, animated: false)
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        cancelSpaceSignatureHold()
+        spaceSignatureRestoreWork?.cancel()
+        spaceSignatureRestoreWork = nil
+        resetSpaceSignatureTaps()
+        hidePendingCompositionChrome()
+        abandonPendingComposition(removingFromDocument: false)
         SinhalaPredictionProviderRegistry.shared.flushPendingPersistence()
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
+        guard !isApplyingOwnEdit else { return }
+        documentStateMayHaveChanged = true
         updateInputTraitsIfNeeded()
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         hasHostTextInputConnection = true
-        updateInputTraitsIfNeeded()
         refreshInputModeSwitchKeyWhenConnected()
+        guard !isApplyingOwnEdit else { return }
+        // Host-originated edits only. Own inserts also notify some editors;
+        // treating those as host changes forces a proxy-context read on the
+        // next keystroke.
+        documentStateMayHaveChanged = true
+        updateInputTraitsIfNeeded()
     }
 
     private func refreshInputModeSwitchKeyWhenConnected() {
@@ -1547,48 +2625,159 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     /// A host text field may request a keyboard appearance that differs from
-    /// the containing app's trait collection. Respect that request so the
-    /// extension follows the system keyboard shown for the same field.
+    /// the containing app's trait collection. iOS pushes that onto this
+    /// controller's traits. Pinning `overrideUserInterfaceStyle` to
+    /// `textDocumentProxy.keyboardAppearance` freezes the scheme from when
+    /// the keyboard opened, so Control Center light/dark toggles leave mixed
+    /// glass and keycaps until the input is switched.
     private func updateKeyboardAppearance() {
-        var style: UIUserInterfaceStyle
-        switch textDocumentProxy.keyboardAppearance {
-        case .dark:
-            style = .dark
-        case .light:
-            style = .light
-        default:
-            style = .unspecified
-        }
+        let style: UIUserInterfaceStyle
         switch KeyboardPreferences.appearance() {
-        case .system: break
         case .light: style = .light
         case .dark: style = .dark
+        case .system: style = .unspecified
         }
         inputView?.overrideUserInterfaceStyle = style
         view.overrideUserInterfaceStyle = style
     }
 
+    private func registerForUserInterfaceStyleChanges() {
+        if #available(iOS 17.0, *) {
+            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: KeyboardViewController, _) in
+                self.syncKeyboardAppearanceIfNeeded(rebuild: true)
+            }
+        }
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if #available(iOS 17.0, *) { return }
+        guard traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) else { return }
+        syncKeyboardAppearanceIfNeeded(rebuild: true)
+    }
+
+    private func syncKeyboardAppearanceIfNeeded(rebuild: Bool) {
+        updateKeyboardAppearance()
+        let style = traitCollection.userInterfaceStyle
+        guard style != lastSyncedInterfaceStyle else { return }
+        lastSyncedInterfaceStyle = style
+        applyKeyboardChromeSurface()
+        guard rebuild else { return }
+        scheduleAppearanceRebuild()
+    }
+
+    private func scheduleAppearanceRebuild() {
+        guard !appearanceRebuildScheduled else { return }
+        appearanceRebuildScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.appearanceRebuildScheduled = false
+            if let picker = self.emojiPicker {
+                picker.refreshDynamicSurfaces()
+                return
+            }
+            guard !self.keyboardStack.arrangedSubviews.isEmpty else { return }
+            self.rebuildKeys()
+        }
+    }
+
+    /// KeyboardKit leaves `KeyboardViewStyle.background` nil on glass. iOS 26
+    /// always uses that path: walking the host for glass class names misses
+    /// iMessage, and treating a missing match as non-glass paints a grey card
+    /// over the system material. The opaque KeyboardKit canvas is pre-iOS 26 only.
+    private func refreshKeyboardChrome(rebuildIfStyleChanged: Bool) {
+        let previous = KeyboardChromeAppearance.usesLiquidGlassSurfaces
+        let glass = detectLiquidGlassKeyboardChrome()
+        KeyboardChromeAppearance.usesLiquidGlassSurfaces = glass
+        applyKeyboardChromeSurface()
+        applySuggestionRailMargins()
+        candidateBarTopInset?.constant = contentTopInset
+        keyboardStackTopInset?.constant = keyGridTopInset
+        keyboardStackBottomInset?.constant = -keyGridBottomInset
+        if emojiPicker == nil {
+            applyHostHeightConstraint(reason: "chrome-refresh")
+        }
+        guard rebuildIfStyleChanged, previous != glass else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.rebuildKeys()
+        }
+    }
+
+    private func applyKeyboardChromeSurface() {
+        view.backgroundColor = .clear
+        keyboardChrome.isUserInteractionEnabled = false
+        keyboardChrome.layer.cornerRadius = 0
+        if usesLiquidGlassKeyboardChrome {
+            keyboardChrome.backgroundColor = .clear
+            return
+        }
+        keyboardChrome.backgroundColor = UIColor { [usesIOS16KeyboardAppearance] traits in
+            if traits.userInterfaceStyle == .dark {
+                return UIColor(red: 0.173, green: 0.173, blue: 0.173, alpha: 1)
+            }
+            if usesIOS16KeyboardAppearance {
+                return UIColor(red: 209 / 255, green: 210 / 255, blue: 216 / 255, alpha: 1)
+            }
+            return UIColor(red: 0.835, green: 0.839, blue: 0.867, alpha: 1)
+        }
+    }
+
+    /// Glass is an OS capability, not a host-tree property. iMessage's wrappers
+    /// do not advertise glass in class names, and `UIWindow.isOpaque` is true
+    /// there too — so any "opaque + no signals" fallback fires on real glass.
+    private func detectLiquidGlassKeyboardChrome() -> Bool {
+        if #available(iOS 26.0, *) { return true }
+        return false
+    }
+
+    private func applySuggestionRailMargins() {
+        candidateBar.insetsLayoutMarginsFromSafeArea = false
+        candidateBar.layoutMargins = UIEdgeInsets(top: contentTopInset, left: 0, bottom: 0, right: 0)
+    }
+
     private func configureLayout() {
+        view.backgroundColor = .clear
+        // Paint pre-iOS 26 chrome only on the calibrated content strip. Pinning
+        // it to `view` fills UIKit's temporary tall attach frame with empty gray.
         keyboardContentContainer.translatesAutoresizingMaskIntoConstraints = false
         keyboardContentContainer.clipsToBounds = false
+        keyboardContentContainer.backgroundColor = .clear
         view.addSubview(keyboardContentContainer)
+        keyboardChrome.translatesAutoresizingMaskIntoConstraints = false
+        keyboardChrome.isUserInteractionEnabled = false
+        keyboardContentContainer.insertSubview(keyboardChrome, at: 0)
+        NSLayoutConstraint.activate([
+            keyboardChrome.leadingAnchor.constraint(equalTo: keyboardContentContainer.leadingAnchor),
+            keyboardChrome.trailingAnchor.constraint(equalTo: keyboardContentContainer.trailingAnchor),
+            keyboardChrome.topAnchor.constraint(equalTo: keyboardContentContainer.topAnchor),
+            keyboardChrome.bottomAnchor.constraint(equalTo: keyboardContentContainer.bottomAnchor)
+        ])
+        applyKeyboardChromeSurface()
+
         keyboardContentHeight = keyboardContentContainer.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
-        // `preferredContentSize` is only advisory for a keyboard extension.
-        // Without a matching root constraint UIKit can settle the host at
-        // 216 pt while this container remains 248 pt, placing the prediction
-        // rail above the host's visible bounds.
-        keyboardHostMinimumHeight = view.heightAnchor.constraint(greaterThanOrEqualToConstant: normalKeyboardHeight)
+        keyboardContentHeight.priority = UILayoutPriority(999)
+        keyboardHostHeight = view.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
+        keyboardHostHeight.priority = UILayoutPriority(999)
         NSLayoutConstraint.activate([
             keyboardContentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             keyboardContentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            keyboardContentContainer.topAnchor.constraint(greaterThanOrEqualTo: view.topAnchor),
             keyboardContentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             keyboardContentHeight,
-            keyboardHostMinimumHeight
+            keyboardHostHeight
         ])
+        applyHostHeightConstraint(reason: "configureLayout")
 
         candidateBar.translatesAutoresizingMaskIntoConstraints = false
         candidateBar.isUserInteractionEnabled = true
+        candidateBar.isMultipleTouchEnabled = false
+        candidateBar.isExclusiveTouch = true
         candidateBar.backgroundColor = .clear
+        candidateBar.insetsLayoutMarginsFromSafeArea = false
+        candidateBar.onSelect = { [weak self] button in
+            self?.selectPrediction(button)
+        }
+        applySuggestionRailMargins()
         keyboardContentContainer.addSubview(candidateBar)
         let segments = UIStackView()
         segments.axis = .horizontal
@@ -1596,50 +2785,52 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         segments.translatesAutoresizingMaskIntoConstraints = false
         candidateBar.addSubview(segments)
         NSLayoutConstraint.activate([
-            segments.leadingAnchor.constraint(equalTo: candidateBar.leadingAnchor),
-            segments.trailingAnchor.constraint(equalTo: candidateBar.trailingAnchor),
-            segments.topAnchor.constraint(equalTo: candidateBar.topAnchor),
-            segments.bottomAnchor.constraint(equalTo: candidateBar.bottomAnchor)
+            segments.leadingAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.leadingAnchor),
+            segments.trailingAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.trailingAnchor),
+            segments.topAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.topAnchor),
+            segments.bottomAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.bottomAnchor)
         ])
         for index in 0..<3 {
-            let segment = UIView()
-            segments.addArrangedSubview(segment)
-            let button = UIButton(type: .system)
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.titleLabel?.font = .systemFont(ofSize: 18, weight: index == 1 ? .medium : .regular)
-            button.titleLabel?.lineBreakMode = .byTruncatingTail
-            button.setTitleColor(.label, for: .normal)
+            let button = CandidateButton()
+            button.candidateFont = .systemFont(ofSize: 18, weight: index == 1 ? .medium : .regular)
+            button.contentVerticalAlignment = .center
             button.tag = index
-            button.addTarget(self, action: #selector(selectPrediction(_:)), for: .touchUpInside)
-            segment.addSubview(button)
-            NSLayoutConstraint.activate([
-                button.leadingAnchor.constraint(equalTo: segment.leadingAnchor, constant: 8),
-                button.trailingAnchor.constraint(equalTo: segment.trailingAnchor, constant: -8),
-                button.topAnchor.constraint(equalTo: segment.topAnchor),
-                button.bottomAnchor.constraint(equalTo: segment.bottomAnchor)
-            ])
+            button.isUserInteractionEnabled = false
+            button.onActivate = { [weak self, weak button] in
+                guard let button else { return }
+                self?.selectPrediction(button)
+            }
+            // The arranged view is the control itself: its hit target is the
+            // complete third of the rail, not merely the title's bounds.
+            segments.addArrangedSubview(button)
             candidateButtons.append(button)
             guard index < 2 else { continue }
             let separator = UIView()
             separator.translatesAutoresizingMaskIntoConstraints = false
+            separator.isUserInteractionEnabled = false
             separator.backgroundColor = UIColor { traits in
                 traits.userInterfaceStyle == .dark
                     ? UIColor(white: 0.36, alpha: 0.7)
                     : UIColor(red: 0.77, green: 0.79, blue: 0.83, alpha: 0.75)
             }
-            segment.addSubview(separator)
+            button.addSubview(separator)
             NSLayoutConstraint.activate([
-                separator.trailingAnchor.constraint(equalTo: segment.trailingAnchor),
-                separator.centerYAnchor.constraint(equalTo: candidateBar.centerYAnchor),
-                separator.heightAnchor.constraint(equalToConstant: 26),
+                separator.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+                separator.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                separator.heightAnchor.constraint(equalToConstant: 20),
                 separator.widthAnchor.constraint(equalToConstant: 1)
             ])
         }
+        candidateBar.candidateButtons = candidateButtons
         candidateBarHeight = candidateBar.heightAnchor.constraint(equalToConstant: showsCandidateBar ? candidateHeight : 0)
+        candidateBarTopInset = candidateBar.topAnchor.constraint(
+            equalTo: keyboardContentContainer.topAnchor,
+            constant: contentTopInset
+        )
         NSLayoutConstraint.activate([
             candidateBar.leadingAnchor.constraint(equalTo: keyboardContentContainer.leadingAnchor),
             candidateBar.trailingAnchor.constraint(equalTo: keyboardContentContainer.trailingAnchor),
-            candidateBar.topAnchor.constraint(equalTo: keyboardContentContainer.topAnchor),
+            candidateBarTopInset,
             candidateBarHeight
         ])
         keyboardStack.axis = .vertical; keyboardStack.spacing = 8; keyboardStack.distribution = .fillEqually
@@ -1647,21 +2838,20 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyboardContentContainer.addSubview(keyboardStack)
         keyboardLeadingInset = keyboardStack.leadingAnchor.constraint(equalTo: keyboardContentContainer.leadingAnchor, constant: keyboardMetrics.horizontalInset)
         keyboardTrailingInset = keyboardStack.trailingAnchor.constraint(equalTo: keyboardContentContainer.trailingAnchor, constant: -keyboardMetrics.horizontalInset)
+        keyboardStackTopInset = keyboardStack.topAnchor.constraint(
+            equalTo: candidateBar.bottomAnchor,
+            constant: keyGridTopInset
+        )
+        keyboardStackBottomInset = keyboardStack.bottomAnchor.constraint(
+            equalTo: keyboardContentContainer.bottomAnchor,
+            constant: -keyGridBottomInset
+        )
         NSLayoutConstraint.activate([
             keyboardLeadingInset,
             keyboardTrailingInset,
-            keyboardStack.topAnchor.constraint(
-                equalTo: candidateBar.bottomAnchor,
-                constant: usesIOS16KeyboardAppearance ? 11 : 7
-            ),
-            // Give the iOS 16 grid a little more breathing room vertically
-            // without reintroducing the unwanted left/right inset.
-            keyboardStack.bottomAnchor.constraint(
-                equalTo: keyboardContentContainer.bottomAnchor,
-                constant: usesIOS16KeyboardAppearance ? -2 : -7
-            ),
+            keyboardStackTopInset,
+            keyboardStackBottomInset
         ])
-        preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
         trackpadSurface.translatesAutoresizingMaskIntoConstraints = false
         trackpadSurface.isUserInteractionEnabled = false
         trackpadSurface.layer.cornerRadius = 7
@@ -1677,13 +2867,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             trackpadSurface.topAnchor.constraint(equalTo: keyboardStack.topAnchor),
             trackpadSurface.bottomAnchor.constraint(equalTo: keyboardStack.bottomAnchor)
         ])
+        // Keys sit in front of the rail in the default z-order, and their
+        // expanded hit area can steal the bottom of a suggestion. Keep the
+        // rail above the grid so a visible candidate is always tappable.
+        keyboardContentContainer.bringSubviewToFront(candidateBar)
     }
 
     private func rebuildKeys() {
         if emojiPicker == nil {
-            keyboardContentHeight?.constant = normalKeyboardHeight
-            keyboardHostMinimumHeight?.constant = normalKeyboardHeight
-            preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
+            applyHostHeightConstraint(reason: "rebuildKeys")
         }
         guard hasUsableKeyboardWidth else {
             needsKeyRebuildWhenGeometryIsStable = true
@@ -1697,6 +2889,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         candidateBar.isHidden = !showsCandidateBar
         keyboardStack.isHidden = false
         logKeyboardLayout("rebuild keys")
+        spaceSignatureRestoreWork?.cancel()
+        spaceSignatureRestoreWork = nil
         metricConstraints.removeAll()
         metricMargins.removeAll()
         keyboardStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -1749,14 +2943,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         for (index, row) in rows.enumerated() { keyboardStack.addArrangedSubview(makeRow(row, index: index)) }
         applyKeyboardMetrics()
+        refreshPendingCompositionChrome()
+        if showsCandidateBar, candidates.allSatisfy({ $0 == nil }) {
+            updatePredictions(for: "")
+        }
     }
 
     private func applyKeyboardMetrics() {
-        candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
         if emojiPicker == nil {
-            keyboardContentHeight?.constant = normalKeyboardHeight
-            keyboardHostMinimumHeight?.constant = normalKeyboardHeight
-            preferredContentSize = CGSize(width: 0, height: normalKeyboardHeight)
+            applyHostHeightConstraint(reason: "applyMetrics")
+        } else {
+            candidateBarHeight?.constant = showsCandidateBar ? candidateHeight : 0
         }
         let baseInset = keyboardMetrics.horizontalInset
         switch KeyboardPreferences.oneHandedPosition() {
@@ -1773,19 +2970,42 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let baseVerticalGap: CGFloat = usesPadLayout ? 10 : (layoutProfile == .phoneLandscape ? 5 : 8)
         if usesStandardPhoneGeometry {
             keyboardStack.spacing = 11
+            keyboardStack.distribution = .fillEqually
         } else {
-            keyboardStack.spacing = max(3, baseVerticalGap + CGFloat(KeyboardPreferences.keySpacing().verticalAdjustment))
+            keyboardStack.spacing = max(3, baseVerticalGap + CGFloat(KeyboardPreferences.hotPath.keySpacing.verticalAdjustment))
+            keyboardStack.distribution = .fillEqually
         }
         // The matched UK grid sits four points lower inside the keyboard
         // chrome on a portrait phone. This is a visual placement adjustment;
         // row dimensions remain constrained to the measured 43 pt height.
+        // Phonetic, Smart Phonetic, and Wijesekara all use this placement.
+        applySuggestionRailMargins()
+        candidateBarTopInset?.constant = contentTopInset
+        keyboardStackTopInset?.constant = keyGridTopInset
+        keyboardStackBottomInset?.constant = -keyGridBottomInset
         keyboardStack.transform = usesStandardPhoneGeometry
             ? CGAffineTransform(translationX: 0, y: 4)
             : .identity
+        keyboardStack.horizontalGap = keyboardMetrics.horizontalGap
+        keyboardStack.expandsToRowEdges = mode != .sls
+        // The rail owns the strip between suggestions and the first row.
+        // Phonetic cell expansion used to steal the bottom of a chip.
+        keyboardStack.hitExpansion = UIEdgeInsets(
+            top: showsCandidateBar ? 0 : keyGridTopInset,
+            left: keyboardMetrics.horizontalInset,
+            bottom: keyGridBottomInset,
+            right: keyboardMetrics.horizontalInset
+        )
+        candidateBar.hitOutsets = UIEdgeInsets(
+            top: 0,
+            left: keyboardMetrics.horizontalInset,
+            bottom: keyGridTopInset + (usesStandardPhoneGeometry ? 4 : 0),
+            right: keyboardMetrics.horizontalInset
+        )
         metricConstraints.forEach { constraint, value in constraint.constant = value() }
         metricMargins.forEach { row, value in row.layoutMargins = value() }
         candidateButtons.enumerated().forEach { index, button in
-            button.titleLabel?.font = .systemFont(ofSize: usesPadLayout ? 20 : 18, weight: index == 1 ? .medium : .regular)
+            button.candidateFont = .systemFont(ofSize: usesPadLayout ? 20 : 18, weight: index == 1 ? .medium : .regular)
         }
     }
 
@@ -1856,8 +3076,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func makeKey(_ key: String) -> NativeKeyButton {
+        // Default and Next use the grey system/utility surface. Only the
+        // submit-style actions Apple paints blue get the prominent treatment.
         let utility = ["shift", "delete", "123", "ABC", "#+=", "globe", "dismiss"].contains(key)
+            || (key == "return" && !usesProminentReturnKey)
         let button = NativeKeyButton(
+            keyName: key,
             title: title(for: key),
             hint: hint(for: key),
             symbol: symbol(for: key),
@@ -1876,11 +3100,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             }
             button.titleLabel?.font = .systemFont(ofSize: fontSize, weight: .medium)
             button.titleLabel?.minimumScaleFactor = 0.75
+            if usesProminentReturnKey {
+                button.backgroundColor = .systemBlue
+                button.setTitleColor(.white, for: .normal)
+                button.tintColor = .white
+                button.layer.shadowOpacity = 0
+            }
         }
         button.touchDown = { [weak self] in
             // If iOS failed to deliver an old Delete touch-up (for example
             // after a host-app cursor move), any new contact is authoritative.
             self?.stopDeleteRepeat()
+            // Haptic first — before click, preview, or composition work.
             self?.keyFeedback?.keyPressed()
         }
         if key == "space" {
@@ -1909,7 +3140,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self?.hideKeyPreview(animated: false)
                 return
             }
-            guard KeyboardPreferences.characterPreviewEnabled() else {
+            guard KeyboardPreferences.hotPath.characterPreviewEnabled else {
                 self?.hideKeyPreview(animated: false)
                 return
             }
@@ -1917,6 +3148,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self?.showKeyPreview(for: button)
             } else {
                 self?.hideKeyPreview()
+                self?.refreshPendingCompositionChrome()
             }
         }
         if key == "globe" {
@@ -1952,7 +3184,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
-        } else if KeyboardPreferences.longPressPunctuationEnabled(), punctuationAlternates(for: key) != nil {
+        } else if KeyboardPreferences.hotPath.longPressPunctuationEnabled, punctuationAlternates(for: key) != nil {
             button.accessibilityIdentifier = key
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handlePunctuationLongPress(_:)))
             longPress.minimumPressDuration = 0.35
@@ -1963,30 +3195,56 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     /// The system keyboard visibly commits normal taps as the finger lands.
-    /// Keep Space and alternate-character keys on touch-up: a held Space
-    /// enters cursor control, and these keys must not insert their base value
-    /// before a long-press alternate is chosen.
+    /// Space stays on touch-up because a hold enters cursor control. Keys
+    /// with long-press alternates also stay on touch-up so the picker can
+    /// choose a value before anything is inserted into the host.
     private func shouldCommitOnTouchDown(_ key: String) -> Bool {
         guard key != "space" else { return false }
         return !(layer == .letters && mode == .sls && wijesekaraAlternates(for: key) != nil)
-            && !(KeyboardPreferences.longPressPunctuationEnabled() && punctuationAlternates(for: key) != nil)
+            && !(KeyboardPreferences.hotPath.longPressPunctuationEnabled && punctuationAlternates(for: key) != nil)
     }
 
     /// Mirrors the system keyboard's long-press Space behavior. UIKit gives a
     /// keyboard extension cursor movement through UITextDocumentProxy rather
     /// than exposing the host text view directly.
+    ///
+    /// A stationary hold on the collapsed language caption is the spacebar
+    /// signature instead of trackpad. Sliding off that corner still enters
+    /// cursor control, so ordinary Space-hold cursor movement is unchanged.
     @objc private func handleSpaceTrackpad(_ recognizer: UILongPressGestureRecognizer) {
         guard let button = recognizer.view as? NativeKeyButton else { return }
         switch recognizer.state {
         case .began:
-            button.markLongPressHandled()
-            commitActiveComposition()
-            setTrackpadAppearance(active: true)
-            spaceTrackpadLastX = recognizer.location(in: view).x
-            spaceTrackpadRemainder = 0
-            spaceTrackpadLastTimestamp = ProcessInfo.processInfo.systemUptime
-            keyFeedback?.prepare()
+            spaceSignatureStartLocation = recognizer.location(in: view)
+            if isIdleComposition, isSpaceSignatureLabelRegion(in: button, location: recognizer.location(in: button)) {
+                spaceSignatureHoldPending = true
+                spaceSignatureHoldConsumed = false
+                let work = DispatchWorkItem { [weak self, weak button] in
+                    guard let self, let button, self.spaceSignatureHoldPending else { return }
+                    self.spaceSignatureHoldPending = false
+                    self.spaceSignatureHoldConsumed = true
+                    button.markLongPressHandled()
+                    self.revealSpacebarSignature()
+                }
+                spaceSignatureHoldTimer = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55, execute: work)
+                return
+            }
+            beginSpaceTrackpad(from: recognizer, button: button)
         case .changed:
+            if spaceSignatureHoldConsumed { return }
+            if spaceSignatureHoldPending {
+                let location = recognizer.location(in: view)
+                let distance = hypot(
+                    location.x - spaceSignatureStartLocation.x,
+                    location.y - spaceSignatureStartLocation.y
+                )
+                if distance > 10 {
+                    cancelSpaceSignatureHold()
+                    beginSpaceTrackpad(from: recognizer, button: button)
+                }
+                return
+            }
             let location = recognizer.location(in: view)
             let now = ProcessInfo.processInfo.systemUptime
             let elapsed = max(now - spaceTrackpadLastTimestamp, 1.0 / 240.0)
@@ -2015,12 +3273,45 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             spaceTrackpadRemainder -= CGFloat(delta) * pointsPerCharacter
             keyFeedback?.selectionChanged()
         case .ended, .cancelled, .failed:
+            if spaceSignatureHoldPending {
+                cancelSpaceSignatureHold()
+                return
+            }
+            if spaceSignatureHoldConsumed {
+                spaceSignatureHoldConsumed = false
+                return
+            }
             spaceTrackpadRemainder = 0
             spaceTrackpadLastTimestamp = 0
             setTrackpadAppearance(active: false)
         default:
             break
         }
+    }
+
+    private func beginSpaceTrackpad(from recognizer: UILongPressGestureRecognizer, button: NativeKeyButton) {
+        button.markLongPressHandled()
+        commitActiveComposition()
+        resetSpaceSignatureTaps()
+        setTrackpadAppearance(active: true)
+        spaceTrackpadLastX = recognizer.location(in: view).x
+        spaceTrackpadRemainder = 0
+        spaceTrackpadLastTimestamp = ProcessInfo.processInfo.systemUptime
+        keyFeedback?.prepare()
+    }
+
+    /// The collapsed IME caption sits in the lower-right of Space. Holding
+    /// anywhere else keeps the system trackpad gesture.
+    private func isSpaceSignatureLabelRegion(in button: NativeKeyButton, location: CGPoint) -> Bool {
+        let bounds = button.bounds
+        let region = CGRect(x: bounds.midX, y: bounds.midY, width: bounds.width / 2, height: bounds.height / 2)
+        return region.contains(location)
+    }
+
+    private func cancelSpaceSignatureHold() {
+        spaceSignatureHoldTimer?.cancel()
+        spaceSignatureHoldTimer = nil
+        spaceSignatureHoldPending = false
     }
 
     private func setTrackpadAppearance(active: Bool, animated: Bool = true) {
@@ -2152,8 +3443,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func press(_ key: String) {
         guard !isSpaceTrackpadActive else { return }
-        if KeyboardPreferences.keyClicksEnabled() { UIDevice.current.playInputClick() }
-        if key != "space" { lastSpaceTimestamp = nil }
+        // A host can send, clear, or select text without dismissing this
+        // keyboard.  In that case our per-key history still describes the
+        // previous draft.  Reconcile it before interpreting the next action:
+        // otherwise a new letter can extend the sent word, and Delete can
+        // consume a selection followed by characters before that selection.
+        reconcileCompositionStateWithDocument()
+        let prefs = KeyboardPreferences.hotPath
+        if prefs.keyClicksEnabled {
+            if prefs.hapticsEnabled {
+                // Haptic already fired on touch-down. Defer the click so the
+                // two feedback systems do not contend on the same turn.
+                DispatchQueue.main.async { UIDevice.current.playInputClick() }
+            } else {
+                UIDevice.current.playInputClick()
+            }
+        }
+        if key != "space" {
+            lastSpaceTimestamp = nil
+            resetSpaceSignatureTaps()
+        }
         if key.hasPrefix(Self.topEmojiKeyPrefix) {
             let emoji = String(key.dropFirst(Self.topEmojiKeyPrefix.count))
             EmojiCatalog.record(emoji)
@@ -2161,39 +3470,97 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             return
         }
         switch key {
-        case "delete": deleteOnce()
-        case "space": insertSpace()
-        case "return": commit(suffix: "\n")
+        case "delete":
+            deleteRepeatBeganAt = CACurrentMediaTime()
+            deleteOnce()
+        case "space":
+            insertSpace()
+            // Match the system keyboard: Space on Numbers/Symbols returns to
+            // the alphabetic layer after inserting the space.
+            if layer != .letters {
+                layer = .letters
+                rebuildKeys()
+            }
+        case "return":
+            commit(suffix: "\n")
+            invalidatePrecedingWordsCache()
         case "emoji": showEmojiPicker()
         case "globe": break // Routed through handleInputModeList(_:with:).
         case "dismiss":
             commitActiveComposition()
             dismissKeyboard()
-        case "shift": shift.toggle(); rebuildKeys()
+        case "shift":
+            shift.toggle()
+            refreshShiftedKeyAppearance()
         case "123": layer = .numbers; rebuildKeys()
         case "#+=": layer = .symbols; rebuildKeys()
         case "ABC": layer = .letters; rebuildKeys()
         case "rakaranshaya":
+            lastLetterKey = key
             insertLive(shift ? "\u{200D}" : "\u{E004}")
             if shift {
                 shift = false
-                rebuildKeys()
+                refreshShiftedKeyAppearance()
             }
         case "kundaliya": commit(suffix: "෴")
-        case "yansaya": insertLive("\u{E005}")
+        case "yansaya":
+            lastLetterKey = key
+            insertLive("\u{E005}")
         default:
             let input = shift ? key.uppercased() : key
             if layer == .letters {
+                lastLetterKey = key
                 insertLive(mode == .sls ? SinhalaEngine.slsCharacter(for: key, shifted: shift) : input)
                 // Rebuilding all controls after every character creates a
-                // brief dead zone during rapid typing. The system keyboard
-                // leaves its geometry alone unless Shift actually changes.
+                // brief dead zone during rapid typing. Update titles in place
+                // when Shift releases after a letter.
                 if shift {
                     shift = false
-                    rebuildKeys()
+                    refreshShiftedKeyAppearance()
                 }
             }
             else { commit(suffix: input) }
+        }
+    }
+
+    /// Shift only changes labels and a few glyphs. Walk existing keys instead
+    /// of tearing down the whole grid (which drops touches mid-burst).
+    private func refreshShiftedKeyAppearance() {
+        guard layer == .letters else {
+            rebuildKeys()
+            return
+        }
+        for case let row as UIStackView in keyboardStack.arrangedSubviews {
+            for case let button as NativeKeyButton in row.arrangedSubviews {
+                let key = button.keyName
+                if key == "rakaranshaya" {
+                    if shift {
+                        button.setTitle(nil, for: .normal)
+                        button.setImage(joinerKeyImage(), for: .normal)
+                        button.tintColor = .label
+                        button.accessibilityLabel = "Zero Width Joiner"
+                    } else {
+                        button.setImage(nil, for: .normal)
+                        button.setTitle(title(for: key), for: .normal)
+                        button.accessibilityLabel = nil
+                    }
+                    button.setHint(hint(for: key))
+                    continue
+                }
+                if key == "shift" {
+                    let symbolName = shift ? "shift.fill" : "shift"
+                    button.setImage(UIImage(systemName: symbolName), for: .normal)
+                    continue
+                }
+                if ["delete", "emoji", "globe", "dismiss", "return", "space", "123", "ABC", "#+="].contains(key)
+                    || key.hasPrefix(Self.topEmojiKeyPrefix) {
+                    continue
+                }
+                if key == "rakaranshaya" { continue }
+                button.setImage(nil, for: .normal)
+                button.setTitle(title(for: key), for: .normal)
+                button.setHint(hint(for: key))
+            }
         }
     }
 
@@ -2203,7 +3570,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let picker = EmojiPickerView()
         picker.onSelect = { [weak self] emoji in self?.commit(suffix: emoji) }
         picker.onDismiss = { [weak self] in self?.hideEmojiPicker() }
-        picker.onDelete = { [weak self] in self?.textDocumentProxy.deleteBackward() }
+        picker.onDelete = { [weak self] in
+            self?.deleteRepeatBeganAt = CACurrentMediaTime()
+            self?.deleteOnce()
+        }
+        picker.onDeleteHoldBegan = { [weak self] in self?.beginDeleteRepeat() }
+        picker.onDeleteHoldEnded = { [weak self] in self?.stopDeleteRepeat() }
         emojiPicker = picker
         candidateBar.isHidden = true
         keyboardStack.isHidden = true
@@ -2237,9 +3609,24 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         case .send: return "Send"
         case .yahoo: return "Yahoo"
         case .done: return "Done"
-        case .emergencyCall: return "Emergency"
+        // Keep the label short enough for the return key's width; the system
+        // keyboard likewise avoids the full "Emergency Call" string here.
+        case .emergencyCall: return "Call"
         case .continue: return "Continue"
-        default: return nil
+        @unknown default: return nil
+        }
+    }
+
+    /// The system keyboard only paints submit-style Return keys blue. `.next`
+    /// stays on the standard grey surface (e.g. Wi‑Fi username → password).
+    private var usesProminentReturnKey: Bool {
+        switch textDocumentProxy.returnKeyType {
+        case .go, .google, .join, .route, .search, .send, .yahoo, .done, .emergencyCall, .continue:
+            return true
+        case .default, .next:
+            return false
+        @unknown default:
+            return false
         }
     }
 
@@ -2255,25 +3642,25 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func schedulePredictions(for prefix: String) {
-        pendingPredictionUpdate?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.pendingPredictionUpdate = nil
-            self.updatePredictions(for: prefix)
-        }
-        pendingPredictionUpdate = work
-        // This is short enough for the candidate rail to feel live, while a
-        // rapid syllable never pays for several obsolete dictionary queries.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.075, execute: work)
+        requestPredictions(for: prefix, delay: 0.075)
     }
 
     private func updatePredictions(for prefix: String) {
+        requestPredictions(for: prefix, delay: 0)
+    }
+
+    /// Gather host context on the main thread, rank on a dedicated queue, and
+    /// return only the newest result to UIKit. Typing and transliteration
+    /// therefore never wait for a dictionary scan or candidate animation.
+    private func requestPredictions(for prefix: String, delay: TimeInterval) {
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        predictionGeneration += 1
+        let generation = predictionGeneration
         guard showsCandidateBar else {
             predictionPrefix = ""
             candidates = [nil, nil, nil]
-            candidateButtons.forEach { $0.setTitle(nil, for: .normal); $0.isEnabled = false }
+            candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
             return
         }
         // The attachment path temporarily hides the rail while the input view
@@ -2285,15 +3672,39 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             candidateBar.isHidden = false
         }
         predictionPrefix = prefix
+        // Keep the previous rail visible while the next ranking runs. Blanking
+        // all three slots on every keystroke made the bar flicker; selection
+        // still rejects stale words that no longer match the live prefix.
         let request = SinhalaPredictionRequest(
             composingText: prefix,
             precedingWords: predictionContext(for: prefix),
             maximumResults: 3
         )
-        let ranked = SinhalaPredictionProviderRegistry.shared.activeProvider
-            .candidates(for: request)
-            .map(\.text)
+        let provider = SinhalaPredictionProviderRegistry.shared.activeProvider
+        let queue = predictionQueue
+        let work = DispatchWorkItem { [weak self] in
+            queue.async {
+                let ranked = provider.candidates(for: request).map(\.text)
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyPredictions(ranked, for: prefix, generation: generation)
+                }
+            }
+        }
+        pendingPredictionUpdate = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func applyPredictions(_ ranked: [String], for prefix: String, generation: Int) {
+        guard generation == predictionGeneration, showsCandidateBar else { return }
+        pendingPredictionUpdate = nil
+        predictionPrefix = prefix
         let previousCandidates = candidates
+        var ranked = ranked
+        if AksharaEasterEgg.isCompleteTrueName(rendered: prefix, phoneticSource: activePhoneticSource) {
+            ranked.removeAll { $0 == AksharaEasterEgg.trueNameDisplay }
+            ranked.insert(AksharaEasterEgg.trueNameDisplay, at: 0)
+            if ranked.count > 3 { ranked = Array(ranked.prefix(3)) }
+        }
         // iOS gives the centre slot the strongest visual weight. Preserve the
         // dictionary ranking while presenting its best match in that slot.
         switch ranked.count {
@@ -2304,22 +3715,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         for (index, button) in candidateButtons.enumerated() {
             guard previousCandidates[index] != candidates[index] else { continue }
-            let applyCandidate = {
-                button.setTitle(self.candidates[index], for: .normal)
-                button.isEnabled = self.candidates[index] != nil
-            }
-            // Match the system keyboard's quiet candidate replacement motion
-            // without animating unchanged words or delaying key input.
-            guard button.window != nil else {
-                applyCandidate()
-                continue
-            }
-            UIView.transition(
-                with: button,
-                duration: 0.16,
-                options: [.transitionCrossDissolve, .beginFromCurrentState, .allowAnimatedContent],
-                animations: applyCandidate
-            )
+            // Shared letters stay put; changed letters fade while new ones
+            // scale in left to right. Glyph transforms never relayout the keys.
+            button.setCandidate(candidates[index], animated: CACurrentMediaTime() - lastInputTimestamp > 0.12)
         }
         Self.layoutLogger.debug(
             "predictions updated count=\(ranked.count, privacy: .public) railHidden=\(self.candidateBar.isHidden, privacy: .public) railHeight=\(Int(self.candidateBar.bounds.height), privacy: .public)"
@@ -2328,33 +3726,50 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     @objc private func selectPrediction(_ sender: UIButton) {
         guard !isSpaceTrackpadActive else { return }
-        guard sender.tag < candidates.count, let candidate = candidates[sender.tag] else { return }
+        guard let candidate = displayedCandidate(on: sender), !candidate.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        if candidate == lastInsertedPrediction, now - lastPredictionInsertAt < 0.35 {
+            return
+        }
+        lastInsertedPrediction = candidate
+        lastPredictionInsertAt = now
+
+        // A delayed ranking pass must not disable this chip or rewrite the
+        // prefix after the user has already chosen a word.
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionUpdate = nil
+        predictionGeneration += 1
+
+        let isTrueName = candidate == AksharaEasterEgg.trueNameDisplay
         let precedingWord = predictionContext(for: predictionPrefix).last
-        if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
-            clearPhoneticComposition()
-        } else if markedSource != nil {
-            // Independent-vowel and pre-base Wijesekara input is already a
-            // marked range. Clearing it replaces that range; attempting a
-            // backward delete instead leaves it in place and duplicates the
-            // candidate (for example අඅම්මා).
-            clearMarkedComposition()
+        let replacingPhonetic = !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty
+        let wordToReplace = activeRenderedWord()
+
+        if replacingPhonetic {
+            clearPhoneticComposition(refreshingPredictions: false)
+            // Some hosts leave the unmarked preview in place after the
+            // anchor-based delete. Only try again when we can still see it.
+            if let before = textDocumentProxy.documentContextBeforeInput,
+               NativeBackspace.endsWith(before, suffix: wordToReplace) {
+                deleteDocumentText(wordToReplace)
+            }
         } else {
-            // The POC only predicts a word being actively built by this
-            // keyboard, so deleting its grapheme clusters is bounded and does
-            // not inspect host-app text.
-            // UITextDocumentProxy removes the composing Sinhala scalars one
-            // at a time. Counting grapheme clusters leaves the independent
-            // vowel behind for inputs such as අම්, yielding අඅම්මා.
-            for _ in predictionPrefix.unicodeScalars { textDocumentProxy.deleteBackward() }
+            abandonPendingComposition(removingFromDocument: false)
+            deleteComposingWordIfPresent(wordToReplace)
         }
         // Selecting a prediction completes a word. Match the system keyboard
         // by committing its separator as part of the selection, so the next
         // keystroke begins the following word rather than appending to it.
-        textDocumentProxy.insertText(candidate + " ")
-        // Learn only a deliberate selection. Raw host-app text and ordinary
-        // keystrokes stay ephemeral, while the user can still remove learned
-        // data later when we add dictionary-management settings.
-        SinhalaPredictionProviderRegistry.shared.activeProvider.recordSelection(candidate, after: precedingWord)
+        let inserted = isTrueName ? AksharaEasterEgg.trueNameInsert : candidate
+        insertIntoDocument(inserted + " ")
+        // Learn only a deliberate dictionary selection. The true-name flourish
+        // is a one-shot insert and must not enter the personal model.
+        if isTrueName {
+            keyFeedback?.signatureWink()
+        } else {
+            SinhalaPredictionProviderRegistry.shared.activeProvider.recordSelection(candidate, after: precedingWord)
+        }
+        resetSpaceSignatureTaps()
         // A selected candidate replaces the entire active word. Keeping the
         // old per-key deletion history would make the next Backspace delete a
         // prefix of the chosen word instead of one document character.
@@ -2362,13 +3777,41 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         visibleEntries.removeAll()
         visibleSources.removeAll()
         predictionPrefix = ""
-        candidates = [nil, nil, nil]
-        candidateButtons.forEach { $0.setTitle(nil, for: .normal); $0.isEnabled = false }
+        if isTrueName {
+            invalidatePrecedingWordsCache()
+        } else {
+            // The host proxy often lags one insert behind, so next-word
+            // ranking cannot wait for `documentContextBeforeInput`.
+            seedPrecedingWordsAfterCommit(candidate, previous: precedingWord)
+        }
+        // Keep offering the following word, the same way Space does after a
+        // commit. Clearing the rail here made suggestion chains die after
+        // a single tap.
+        updatePredictions(for: "")
+    }
+
+    private func displayedCandidate(on sender: UIButton) -> String? {
+        if let button = sender as? CandidateButton, let text = button.displayedText, !text.isEmpty {
+            return text
+        }
+        if sender.tag < candidates.count, let text = candidates[sender.tag], !text.isEmpty {
+            return text
+        }
+        return nil
     }
 
     /// `UITextDocumentProxy` gives a bounded pre-cursor window. Use it only to
     /// rank the current suggestion in memory; the provider never persists it.
+    /// Ordinary letter keys reuse a cached preceding-word list so ranking does
+    /// not pay for a proxy context read on every keystroke.
     private func predictionContext(for composingText: String) -> [String] {
+        if !precedingWordsCacheValid {
+            refreshPrecedingWordsCache(composingText: composingText)
+        }
+        return cachedPrecedingWords
+    }
+
+    private func refreshPrecedingWordsCache(composingText: String) {
         let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
         var words = (textDocumentProxy.documentContextBeforeInput ?? "")
             .components(separatedBy: separators)
@@ -2377,14 +3820,48 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             }
         // With direct Wijesekara input the current partial word is already in
         // the host document. It is not prior-word context for its own ranking.
-        if !composingText.isEmpty, words.last?.hasSuffix(composingText) == true {
+        // Use scalar matching: `String.hasSuffix` fails for Sinhala conjuncts.
+        if !composingText.isEmpty, let last = words.last, NativeBackspace.endsWith(last, suffix: composingText) {
             words.removeLast()
         }
-        return Array(words.suffix(2))
+        cachedPrecedingWords = Array(words.suffix(2))
+        precedingWordsCacheValid = true
     }
 
-    private func deleteOnce() {
+    private func invalidatePrecedingWordsCache() {
+        precedingWordsCacheValid = false
+    }
+
+    private func seedPrecedingWordsAfterCommit(_ word: String, previous: String?) {
+        var words: [String] = []
+        if let previous, !previous.isEmpty { words.append(previous) }
+        if !word.isEmpty { words.append(word) }
+        cachedPrecedingWords = Array(words.suffix(2))
+        precedingWordsCacheValid = true
+    }
+
+    private enum DeleteUnit {
+        case character
+        case word
+    }
+
+    /// System Delete: a tap removes one grapheme (or one phonetic source
+    /// letter while transliterating). A sustained hold later removes words.
+    private func deleteOnce(unit: DeleteUnit = .character) {
+        reconcileCompositionStateWithDocument()
         lastSpaceTimestamp = nil
+        resetSpaceSignatureTaps()
+        noteInput()
+        if let selected = textDocumentProxy.selectedText, !selected.isEmpty {
+            clearLocalCompositionKeepingDocument()
+            deleteBackwardFromDocument(times: 1)
+            updatePredictions(for: "")
+            return
+        }
+        if unit == .word {
+            deleteWord()
+            return
+        }
         if !phoneticBuffer.isEmpty {
             phoneticBuffer.removeLast()
             if phoneticBuffer.isEmpty {
@@ -2398,38 +3875,157 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             restorePreviousPhoneticSegmentAfterDelete()
             return
         }
-        if var source = markedSource {
-            source.removeLast()
-            if source.isEmpty {
-                clearMarkedComposition()
-            } else if let kind = markedKind {
-                updateMarkedComposition(source, kind: kind)
-            }
+        if pendingSource != nil {
+            deletePendingCompositionOnce()
             return
         }
-        guard !rawBuffer.isEmpty else { textDocumentProxy.deleteBackward(); return }
-        if let visible = visibleEntries.popLast(), let source = visibleSources.popLast() {
-            for _ in source { rawBuffer.removeLast() }
-            for _ in visible { textDocumentProxy.deleteBackward() }
-            // The key layout itself has not changed. Recreating every button
-            // here adds layout work right as the user is likely to press
-            // Delete again; refresh only the suggestion content instead.
-            updatePredictions(for: visibleEntries.joined())
+        guard !visibleEntries.isEmpty else {
+            rawBuffer = ""
+            deleteBackwardFromDocument(times: 1)
+            return
         }
+        deleteLastOwnedGrapheme()
+    }
+
+    private func deleteWord() {
+        if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
+            clearPhoneticComposition()
+            invalidatePrecedingWordsCache()
+            return
+        }
+        if pendingSource != nil {
+            discardPendingFromDocument()
+        }
+        if !visibleEntries.isEmpty {
+            let word = visibleEntries.joined()
+            deleteDocumentText(word)
+            rawBuffer = ""
+            visibleEntries.removeAll()
+            visibleSources.removeAll()
+            updatePredictions(for: "")
+            invalidatePrecedingWordsCache()
+            return
+        }
+        guard let before = textDocumentProxy.documentContextBeforeInput, !before.isEmpty else {
+            rawBuffer = ""
+            deleteBackwardFromDocument(times: 1)
+            return
+        }
+        let segment = NativeBackspace.lastWordSegment(in: before)
+        if segment.isEmpty {
+            deleteBackwardFromDocument(times: 1)
+        } else {
+            deleteDocumentText(segment)
+        }
+        rawBuffer = ""
+        invalidatePrecedingWordsCache()
+        updatePredictions(for: "")
+    }
+
+    private func deleteLastOwnedGrapheme() {
+        let rendered = visibleEntries.joined()
+        guard let split = NativeBackspace.lastGrapheme(in: rendered) else {
+            rawBuffer = ""
+            deleteBackwardFromDocument(times: 1)
+            return
+        }
+        trimOwnedEntries(to: split.remaining)
+        deleteDocumentText(split.cluster)
+        updatePredictions(for: split.remaining)
+    }
+
+    /// Drops trailing Wijesekara history so it matches `remainingRendered`.
+    /// One grapheme can span several keys (`ක` + `ා` → `කා`).
+    private func trimOwnedEntries(to remainingRendered: String) {
+        while visibleEntries.joined() != remainingRendered {
+            guard !visibleEntries.isEmpty else { return }
+            let prefix = visibleEntries.dropLast().joined()
+            let lastVisible = visibleEntries.removeLast()
+            let lastSource = visibleSources.isEmpty ? lastVisible : visibleSources.removeLast()
+            if rawBuffer.hasSuffix(lastSource) {
+                rawBuffer.removeLast(lastSource.count)
+            } else {
+                for _ in lastSource where !rawBuffer.isEmpty { rawBuffer.removeLast() }
+            }
+            if remainingRendered.hasPrefix(prefix), prefix != remainingRendered {
+                let kept = String(remainingRendered.dropFirst(prefix.count))
+                if !kept.isEmpty {
+                    visibleEntries.append(kept)
+                    visibleSources.append(kept)
+                    rawBuffer += kept
+                }
+                return
+            }
+        }
+        while visibleSources.count > visibleEntries.count {
+            visibleSources.removeLast()
+        }
+    }
+
+    private func clearLocalCompositionKeepingDocument() {
+        rawBuffer = ""
+        visibleEntries.removeAll()
+        visibleSources.removeAll()
+        phoneticBuffer = ""
+        lastPhoneticRendered = ""
+        phoneticCompositionAnchor = nil
+        committedPhoneticSegments.removeAll()
+        abandonPendingComposition(removingFromDocument: false)
+        invalidatePrecedingWordsCache()
+    }
+
+    /// Delete `word` only when it is still immediately before the caret.
+    /// Missing proxy context is treated as "still ours": many hosts omit
+    /// `documentContextBeforeInput` unless Full Access is on.
+    private func deleteComposingWordIfPresent(_ word: String) {
+        guard !word.isEmpty else { return }
+        if let before = textDocumentProxy.documentContextBeforeInput,
+           !NativeBackspace.endsWith(before, suffix: word) {
+            return
+        }
+        deleteDocumentText(word)
+    }
+
+    /// Keeps the extension-owned composition history in sync with the host
+    /// editor without reading or retaining its text. `UITextDocumentProxy`
+    /// can change independently when the host sends a message, clears a
+    /// draft, applies an edit, or the user selects text. We only need to know
+    /// whether the rendered word owned by this keyboard remains immediately
+    /// before the insertion point.
+    private func reconcileCompositionStateWithDocument() {
+        guard documentStateMayHaveChanged else { return }
+        documentStateMayHaveChanged = false
+        let renderedWord = activeRenderedWord()
+        guard !renderedWord.isEmpty else { return }
+
+        // Nil context is not evidence that the host discarded our word —
+        // keyboard extensions often receive nil without Full Access. Sinhala
+        // conjuncts also make `String.hasSuffix` fail, which was abandoning
+        // Wijesekara kombuwa / prediction state between keystrokes.
+        guard let before = textDocumentProxy.documentContextBeforeInput else { return }
+        guard !NativeBackspace.endsWith(before, suffix: renderedWord) else { return }
+
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionUpdate = nil
+        predictionGeneration += 1
+        rawBuffer = ""
+        visibleEntries.removeAll()
+        visibleSources.removeAll()
+        phoneticBuffer = ""
+        lastPhoneticRendered = ""
+        phoneticCompositionAnchor = nil
+        committedPhoneticSegments.removeAll()
+        abandonPendingComposition(removingFromDocument: false)
+        predictionPrefix = ""
+        invalidatePrecedingWordsCache()
+        candidates = [nil, nil, nil]
+        candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
     }
 
     @objc private func handleDeleteLongPress(_ recognizer: UILongPressGestureRecognizer) {
         switch recognizer.state {
         case .began:
-            stopDeleteRepeat()
-            // The initial touch-down already deleted one character. A
-            // confirmed hold begins with the next character, then repeats.
-            deleteOnce()
-            let repeater = Timer(timeInterval: KeyboardPreferences.deleteRepeatSpeed().interval, repeats: true) { [weak self] _ in
-                self?.deleteOnce()
-            }
-            deleteRepeater = repeater
-            RunLoop.main.add(repeater, forMode: .common)
+            beginDeleteRepeat()
         case .ended, .cancelled, .failed:
             stopDeleteRepeat()
         default:
@@ -2437,9 +4033,45 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
+    /// The system keyboard keeps deleting characters, then switches to words
+    /// after a sustained hold. Touch-down already removed the first unit.
+    private func beginDeleteRepeat() {
+        if deleteRepeatBeganAt == 0 {
+            deleteRepeatBeganAt = CACurrentMediaTime()
+        }
+        stopDeleteRepeat()
+        deleteOnce()
+        startDeleteRepeatTimer()
+    }
+
+    private func startDeleteRepeatTimer() {
+        let interval = deleteRepeatUsesWords
+            ? max(0.15, KeyboardPreferences.hotPath.deleteRepeatInterval * 2.2)
+            : KeyboardPreferences.hotPath.deleteRepeatInterval
+        let repeater = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.handleDeleteRepeatTick()
+        }
+        deleteRepeater = repeater
+        RunLoop.main.add(repeater, forMode: .common)
+    }
+
+    private func handleDeleteRepeatTick() {
+        let elapsed = CACurrentMediaTime() - deleteRepeatBeganAt
+        if !deleteRepeatUsesWords, elapsed >= 1.55 {
+            deleteRepeatUsesWords = true
+            deleteRepeater?.invalidate()
+            deleteRepeater = nil
+            startDeleteRepeatTimer()
+            deleteOnce(unit: .word)
+            return
+        }
+        deleteOnce(unit: deleteRepeatUsesWords ? .word : .character)
+    }
+
     @objc private func stopDeleteRepeat() {
         deleteRepeater?.invalidate()
         deleteRepeater = nil
+        deleteRepeatUsesWords = false
     }
 
     /// Direct Wijesekara alternates that do not fit on a phone's primary
@@ -2499,6 +4131,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 : alternates[0].input
             hideAlternatePicker()
             button.suppressesCharacterPreview = false
+            lastLetterKey = key
             insertLive(choice)
         case .cancelled, .failed:
             hideAlternatePicker()
@@ -2595,6 +4228,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func commit(suffix: String) {
+        flushPendingComposition()
         learnActiveWord()
         let formattedSuffix = smartTypography(for: suffix)
         if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
@@ -2602,28 +4236,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             updatePredictions(for: "")
             return
         }
-        if markedSource != nil {
-            commitMarkedComposition(suffix: formattedSuffix)
-            rawBuffer = ""
-            visibleEntries.removeAll()
-            visibleSources.removeAll()
-            updatePredictions(for: "")
-            return
-        }
         rawBuffer = ""
         visibleEntries.removeAll()
         visibleSources.removeAll()
         updatePredictions(for: "")
-        // Text commitment does not alter the key geometry. Rebuilding this
-        // hierarchy after every Space, punctuation mark, or Return creates a
-        // brief input dead zone for the next rapid touch.
-        textDocumentProxy.insertText(formattedSuffix)
+        insertIntoDocument(formattedSuffix)
     }
 
-    /// Uses the system's marked-text session for multistage Sinhala input.
-    /// The provisional glyph stays visible and is replaced in place until the
-    /// next unrelated key commits it.
+    /// Direct Wijesekara insert. Kombuwa and independent vowels are written
+    /// immediately, then rewritten in place if a following key completes the
+    /// syllable (`ෙ` + `ක` → `කෙ`, `අ` + `ා` → `ආ`).
     private func insertLive(_ source: String) {
+        noteInput()
         if mode != .sls {
             phoneticBuffer += source
             updatePhoneticComposition()
@@ -2633,26 +4257,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             insertRepaya()
             return
         }
-        if let markedSource, let markedKind {
-            switch markedKind {
-            case .prebase where canExtendPrebase(markedSource, with: source):
-                updateMarkedComposition(markedSource + source, kind: .prebase)
+        if let pendingSource, let pendingKind {
+            switch pendingKind {
+            case .prebase where SinhalaEngine.canExtendPrebase(pendingSource, with: source):
+                updatePendingComposition(pendingSource + source, kind: .prebase)
                 return
-            case .independentVowel where combinesWithIndependentVowel(markedSource, suffix: source):
-                updateMarkedComposition(markedSource + source, kind: .independentVowel)
+            case .independentVowel where SinhalaEngine.combinesWithIndependentVowel(pendingSource, suffix: source):
+                updatePendingComposition(pendingSource + source, kind: .independentVowel)
                 return
             default:
-                commitMarkedComposition()
+                flushPendingComposition()
                 insertLive(source)
                 return
             }
         }
         if source == "ෙ" {
-            updateMarkedComposition(source, kind: .prebase)
+            beginPendingComposition(source, kind: .prebase)
             return
         }
-        if isIndependentVowel(source) {
-            updateMarkedComposition(source, kind: .independentVowel)
+        if SinhalaEngine.isIndependentVowel(source) {
+            beginPendingComposition(source, kind: .independentVowel)
             return
         }
         insertRendered(source)
@@ -2663,33 +4287,21 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// joined cluster (`ර්‍ක`), instead of appending a visible standalone
     /// `ර්‍` after the consonant.
     private func insertRepaya() {
-        if markedSource != nil { commitMarkedComposition() }
+        flushPendingComposition()
         guard let previousSource = visibleSources.last,
               let previousRendered = visibleEntries.last,
-              isSinhalaConsonant(previousRendered) else {
+              SinhalaEngine.isSinhalaConsonant(previousRendered) else {
             insertRendered("\u{E002}")
             return
         }
 
-        textDocumentProxy.deleteBackward()
+        deleteDocumentText(previousRendered)
         visibleEntries.removeLast()
         visibleSources.removeLast()
         if rawBuffer.hasSuffix(previousSource) {
             rawBuffer.removeLast(previousSource.count)
         }
         insertRendered("\u{E002}" + previousSource)
-    }
-
-    private func updateMarkedComposition(_ source: String, kind: MarkedCompositionKind) {
-        let rendered = SinhalaEngine.transliterate(source, mode: mode)
-        let caret = (rendered as NSString).length
-        textDocumentProxy.setMarkedText(rendered, selectedRange: NSRange(location: caret, length: 0))
-        markedSource = source
-        markedKind = kind
-        // The marked cluster replaces only the tail of the word. Keep the
-        // already committed Wijesekara glyphs in the provider request rather
-        // than treating this cluster as a new word.
-        schedulePredictions(for: visibleEntries.joined() + rendered)
     }
 
     private func updatePhoneticComposition() {
@@ -2705,7 +4317,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         } else {
             removeActivePhoneticRendering()
         }
-        if !rendered.isEmpty { textDocumentProxy.insertText(rendered) }
+        insertIntoDocument(rendered)
 
         lastPhoneticRendered = rendered
         schedulePredictions(for: rendered)
@@ -2713,7 +4325,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func commitPhoneticComposition(suffix: String = "") {
         guard !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty else { return }
-        if !suffix.isEmpty { textDocumentProxy.insertText(suffix) }
+        insertIntoDocument(suffix)
         phoneticBuffer = ""
         lastPhoneticRendered = ""
         phoneticCompositionAnchor = nil
@@ -2721,16 +4333,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         updatePredictions(for: "")
     }
 
-    private func clearPhoneticComposition() {
-        removeActivePhoneticRendering()
+    private func clearPhoneticComposition(refreshingPredictions: Bool = true) {
+        let rendered = committedPhoneticSegments.map(\.rendered).joined() + lastPhoneticRendered
+        let anchor = committedPhoneticSegments.isEmpty ? phoneticCompositionAnchor : nil
+        deleteDocumentText(rendered, stoppingAt: anchor)
         phoneticBuffer = ""
         lastPhoneticRendered = ""
         phoneticCompositionAnchor = nil
-        for segment in committedPhoneticSegments.reversed() {
-            for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
-        }
         committedPhoneticSegments.removeAll()
-        updatePredictions(for: "")
+        if refreshingPredictions {
+            updatePredictions(for: "")
+        }
     }
 
     /// Move a prefix out of the host editor's marked range only when splitting
@@ -2778,7 +4391,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             updatePredictions(for: "")
             return
         }
-        for _ in segment.rendered.unicodeScalars { textDocumentProxy.deleteBackward() }
+        deleteDocumentText(segment.rendered)
         segment.source.removeLast()
         phoneticBuffer = segment.source
         if phoneticBuffer.isEmpty {
@@ -2790,28 +4403,21 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func removeActivePhoneticRendering() {
         guard !lastPhoneticRendered.isEmpty else { return }
-
-        let maximumDeletes = lastPhoneticRendered.unicodeScalars.count
-        for _ in 0..<maximumDeletes {
-            textDocumentProxy.deleteBackward()
-            guard let anchor = phoneticCompositionAnchor else { continue }
-            if textDocumentProxy.documentContextBeforeInput == anchor { return }
-        }
+        deleteDocumentText(lastPhoneticRendered, stoppingAt: phoneticCompositionAnchor)
     }
 
     private func commitActiveComposition() {
         if !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty {
             commitPhoneticComposition()
         }
-        commitMarkedComposition()
+        flushPendingComposition()
     }
 
     private func activeRenderedWord() -> String {
         if mode != .sls {
             return committedPhoneticSegments.map(\.rendered).joined() + lastPhoneticRendered
         }
-        let marked = markedSource.map { SinhalaEngine.transliterate($0, mode: mode) } ?? ""
-        return visibleEntries.joined() + marked
+        return visibleEntries.joined()
     }
 
     private func learnActiveWord() {
@@ -2822,7 +4428,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func smartTypography(for suffix: String) -> String {
-        guard KeyboardPreferences.smartQuotesEnabled(), (suffix == "'" || suffix == "\"") else { return suffix }
+        guard KeyboardPreferences.hotPath.smartQuotesEnabled, (suffix == "'" || suffix == "\"") else { return suffix }
         let previous = textDocumentProxy.documentContextBeforeInput?.last
         let opensQuote = previous == nil || previous?.isWhitespace == true || previous?.isPunctuation == true
         switch suffix {
@@ -2832,26 +4438,114 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
-    private func commitMarkedComposition(suffix: String = "") {
-        guard let source = markedSource else { return }
+    private func beginPendingComposition(_ source: String, kind: PendingCompositionKind) {
+        pendingSource = source
+        pendingKind = kind
+        pendingHostRendered = nil
+        pendingHostAnchor = nil
+        pendingAnchorKey = lastLetterKey
+        writePendingClusterToDocument(SinhalaEngine.transliterate(source, mode: mode), source: source)
+        refreshPendingCompositionChrome()
+        schedulePredictions(for: visibleEntries.joined())
+    }
+
+    private func updatePendingComposition(_ source: String, kind: PendingCompositionKind) {
         let rendered = SinhalaEngine.transliterate(source, mode: mode)
-        // Explicitly clear just the active composition before committing it.
-        // Some host fields append `insertText` after a selected marked range,
-        // producing a duplicate (for example, තේ තේ) instead of replacing it.
-        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-        textDocumentProxy.insertText(rendered + suffix)
+        let previousSource = pendingSource
+        pendingSource = source
+        pendingKind = kind
+        if pendingHostRendered == nil {
+            writePendingClusterToDocument(rendered, source: source)
+        } else if pendingHostRendered != rendered {
+            rewritePendingCluster(to: rendered, source: source, previousSource: previousSource)
+        }
+        refreshPendingCompositionChrome()
+        schedulePredictions(for: visibleEntries.joined())
+    }
+
+    private func writePendingClusterToDocument(_ rendered: String, source: String) {
+        pendingHostAnchor = textDocumentProxy.documentContextBeforeInput
+        insertIntoDocument(rendered)
+        pendingHostRendered = rendered
         rawBuffer += source
         visibleEntries.append(rendered)
         visibleSources.append(source)
-        markedSource = nil
-        markedKind = nil
     }
 
-    private func clearMarkedComposition() {
-        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-        textDocumentProxy.unmarkText()
-        markedSource = nil
-        markedKind = nil
+    private func rewritePendingCluster(to rendered: String, source: String, previousSource: String?) {
+        removePendingHostRendering()
+        insertIntoDocument(rendered)
+        pendingHostRendered = rendered
+        if let previousSource, rawBuffer.hasSuffix(previousSource) {
+            rawBuffer.removeLast(previousSource.count)
+        }
+        rawBuffer += source
+        if !visibleEntries.isEmpty {
+            visibleEntries[visibleEntries.count - 1] = rendered
+            visibleSources[visibleSources.count - 1] = source
+        } else {
+            visibleEntries.append(rendered)
+            visibleSources.append(source)
+        }
+    }
+
+    /// Ends local composition state. A lone kombuwa is already visible in
+    /// the host, so this does not wait for a consonant.
+    private func flushPendingComposition() {
+        guard let source = pendingSource else { return }
+        if pendingHostRendered == nil {
+            insertRendered(source)
+        }
+        abandonPendingComposition(removingFromDocument: false)
+    }
+
+    private func discardPendingFromDocument() {
+        if pendingHostRendered != nil {
+            popPendingVisibleEntry()
+            removePendingHostRendering()
+        }
+        abandonPendingComposition(removingFromDocument: false)
+    }
+
+    private func deletePendingCompositionOnce() {
+        guard var source = pendingSource, let kind = pendingKind else { return }
+        source.removeLast()
+        if source.isEmpty {
+            discardPendingFromDocument()
+            updatePredictions(for: visibleEntries.joined())
+            return
+        }
+        updatePendingComposition(source, kind: kind)
+    }
+
+    private func popPendingVisibleEntry() {
+        guard let source = pendingSource else { return }
+        if visibleSources.last == source {
+            visibleEntries.removeLast()
+            visibleSources.removeLast()
+        }
+        if rawBuffer.hasSuffix(source) {
+            rawBuffer.removeLast(source.count)
+        }
+    }
+
+    private func removePendingHostRendering() {
+        guard let rendered = pendingHostRendered, !rendered.isEmpty else { return }
+        deleteDocumentText(rendered, stoppingAt: pendingHostAnchor)
+        pendingHostRendered = nil
+    }
+
+    private func abandonPendingComposition(removingFromDocument: Bool) {
+        if removingFromDocument {
+            discardPendingFromDocument()
+            return
+        }
+        pendingSource = nil
+        pendingKind = nil
+        pendingHostRendered = nil
+        pendingHostAnchor = nil
+        pendingAnchorKey = nil
+        hidePendingCompositionChrome()
     }
 
     private func insertRendered(_ source: String) {
@@ -2859,73 +4553,206 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         rawBuffer += source
         visibleEntries.append(rendered)
         visibleSources.append(source)
-        textDocumentProxy.insertText(rendered)
+        insertIntoDocument(rendered)
         schedulePredictions(for: visibleEntries.joined())
     }
 
-    private func containsConsonant(_ text: String) -> Bool {
-        text.unicodeScalars.contains { (0x0D9A...0x0DC6).contains($0.value) }
+    private func noteInput() {
+        lastInputTimestamp = CACurrentMediaTime()
     }
 
-    private func canExtendPrebase(_ source: String, with suffix: String) -> Bool {
-        let scalars = Array(source.unicodeScalars)
-        guard scalars.first?.value == 0x0DD9 else { return false }
-        let prebaseCount = scalars.prefix { $0.value == 0x0DD9 }.count
-        let hasConsonant = scalars.contains { (0x0D9A...0x0DC6).contains($0.value) }
-        if !hasConsonant {
-            return (suffix == "ෙ" && prebaseCount < 2) || isSinhalaConsonant(suffix)
+    /// Own proxy mutations notify `textDidChange` in some hosts. Suppress
+    /// reconcile until the current run-loop turn (and a brief follow-up)
+    /// has passed, so typing does not pay for `documentContextBeforeInput`.
+    private func performDocumentEdit(_ body: () -> Void) {
+        ownEditDepth += 1
+        isApplyingOwnEdit = true
+        ownEditGeneration += 1
+        let generation = ownEditGeneration
+        ownEditClearWork?.cancel()
+        body()
+        ownEditDepth -= 1
+        guard ownEditDepth == 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.ownEditGeneration == generation, self.ownEditDepth == 0 else { return }
+            self.isApplyingOwnEdit = false
+            self.ownEditClearWork = nil
         }
-        // After a single kombuwa and a base, a trailing key can produce
-        // කේ, කො, කෞ, or (after කො) කෝ.
-        guard prebaseCount == 1 else { return false }
-        if scalars.count == 2 { return ["්", "ා", "ෟ"].contains(suffix) }
-        if scalars.count == 3, scalars[2].value == 0x0DCF { return suffix == "්" }
-        return false
+        ownEditClearWork = work
+        DispatchQueue.main.async(execute: work)
     }
 
-    private func isSinhalaConsonant(_ text: String) -> Bool {
-        text.unicodeScalars.first.map { (0x0D9A...0x0DC6).contains($0.value) } ?? false
+    private func insertIntoDocument(_ text: String) {
+        guard !text.isEmpty else { return }
+        performDocumentEdit { textDocumentProxy.insertText(text) }
     }
 
-    private func isIndependentVowel(_ text: String) -> Bool {
-        text.unicodeScalars.first.map { (0x0D85...0x0D96).contains($0.value) } ?? false
-    }
-
-    private func combinesWithIndependentVowel(_ source: String, suffix: String) -> Bool {
-        guard let vowel = source.unicodeScalars.first,
-              let sign = suffix.unicodeScalars.first else { return false }
-        switch vowel.value {
-        case 0x0D85: return [0x0DCF, 0x0DD0, 0x0DD1].contains(sign.value) // අා/ැ/ෑ
-        case 0x0D91: return sign.value == 0x0DCA // එ්
-        case 0x0D89: return sign.value == 0x0DD3 // ඉී
-        case 0x0D94: return [0x0DCA, 0x0DDF, 0x0DD6].contains(sign.value) // ඔ්/ෞ/ූ
-        case 0x0D8B: return [0x0DDF, 0x0DD6].contains(sign.value) // උෞ/ූ
-        case 0x0D8D: return sign.value == 0x0DD8 // ඍෘ
-        default: return false
+    private func deleteBackwardFromDocument(times: Int) {
+        guard times > 0 else { return }
+        performDocumentEdit {
+            for _ in 0..<times { self.textDocumentProxy.deleteBackward() }
         }
+    }
+
+    /// Remove `text` immediately before the caret. Hosts disagree on whether
+    /// Sinhala clusters are one `deleteBackward()` or many, so stop as soon
+    /// as the expected prefix is restored (or the suffix is already gone).
+    private func deleteDocumentText(_ text: String, stoppingAt expected: String? = nil) {
+        guard !text.isEmpty else { return }
+        performDocumentEdit {
+            let expected = expected
+                ?? textDocumentProxy.documentContextBeforeInput.flatMap {
+                    NativeBackspace.removingSuffix($0, suffix: text)
+                }
+            let maximumDeletes = text.unicodeScalars.count
+            for _ in 0..<maximumDeletes {
+                let current = self.textDocumentProxy.documentContextBeforeInput
+                if let expected, current == expected { return }
+                self.textDocumentProxy.deleteBackward()
+                let after = self.textDocumentProxy.documentContextBeforeInput
+                if let expected, after == expected { return }
+                if expected == nil, let after, !NativeBackspace.endsWith(after, suffix: text) {
+                    return
+                }
+            }
+        }
+    }
+
+    private func keyButton(named name: String) -> NativeKeyButton? {
+        for case let row as UIStackView in keyboardStack.arrangedSubviews {
+            for case let button as NativeKeyButton in row.arrangedSubviews where button.keyName == name {
+                return button
+            }
+        }
+        return nil
+    }
+
+    private func refreshPendingCompositionChrome() {
+        keyboardStack.arrangedSubviews.forEach { row in
+            row.subviews.compactMap { $0 as? NativeKeyButton }.forEach {
+                $0.setCompositionPending($0.keyName == pendingAnchorKey && pendingHostRendered == nil)
+            }
+        }
+        guard let source = pendingSource, pendingHostRendered == nil else {
+            hidePendingCompositionChip()
+            return
+        }
+        let rendered = SinhalaEngine.transliterate(source, mode: mode)
+        guard let key = pendingAnchorKey, let button = keyButton(named: key), !button.isHighlighted else {
+            hidePendingCompositionChip()
+            return
+        }
+        showPendingCompositionChip(rendered, over: button)
+    }
+
+    private func hidePendingCompositionChrome() {
+        keyboardStack.arrangedSubviews.forEach { row in
+            row.subviews.compactMap { $0 as? NativeKeyButton }.forEach {
+                $0.setCompositionPending(false)
+            }
+        }
+        hidePendingCompositionChip()
+    }
+
+    private func showPendingCompositionChip(_ text: String, over button: NativeKeyButton) {
+        let chip = pendingCompositionChip ?? PendingCompositionChip()
+        if chip.superview == nil {
+            view.addSubview(chip)
+            pendingCompositionChip = chip
+        }
+        chip.display(text)
+        let keyFrame = button.convert(button.bounds, to: view)
+        let size = CGSize(width: max(36, keyFrame.width + 8), height: 34)
+        chip.frame = CGRect(
+            x: min(max(keyFrame.midX - size.width / 2, view.bounds.minX + 2), view.bounds.maxX - size.width - 2),
+            y: max(0, keyFrame.minY - size.height - 4),
+            width: size.width,
+            height: size.height
+        )
+        view.bringSubviewToFront(chip)
+    }
+
+    private func hidePendingCompositionChip() {
+        pendingCompositionChip?.removeFromSuperview()
+        pendingCompositionChip = nil
     }
 
     /// Matches the standard iOS double-space shortcut: the second tap turns
     /// the prior space into a period followed by one ready for the next word.
     private func insertSpace() {
         let now = CACurrentMediaTime()
+        let wasIdle = isIdleComposition
         // The second tap follows the first committed space. Only replace that
         // space when it follows a word; never manufacture punctuation at the
         // start of a field or after an existing sentence terminator.
         let characterBeforeSpace = textDocumentProxy.documentContextBeforeInput?.dropLast().last
         let followsWord = characterBeforeSpace.map { $0.isLetter || $0.isNumber } ?? false
-        let isDoubleSpace = KeyboardPreferences.doubleSpacePeriodEnabled()
+        let isDoubleSpace = KeyboardPreferences.hotPath.doubleSpacePeriodEnabled
             && rawBuffer.isEmpty && followsWord
             && (lastSpaceTimestamp.map { now - $0 < 0.45 } ?? false)
         if isDoubleSpace {
-            textDocumentProxy.deleteBackward()
-            textDocumentProxy.insertText(". ")
+            performDocumentEdit {
+                self.textDocumentProxy.deleteBackward()
+                self.textDocumentProxy.insertText(". ")
+            }
             lastSpaceTimestamp = nil
+            invalidatePrecedingWordsCache()
+            noteIdleSpaceSignatureTap(wasIdle: wasIdle, at: now)
             return
         }
 
         commit(suffix: " ")
+        noteIdleSpaceSignatureTap(wasIdle: wasIdle, at: now)
         lastSpaceTimestamp = now
+        invalidatePrecedingWordsCache()
+    }
+
+    private var isIdleComposition: Bool {
+        phoneticBuffer.isEmpty && committedPhoneticSegments.isEmpty && pendingSource == nil && visibleEntries.isEmpty
+    }
+
+    private var activePhoneticSource: String {
+        committedPhoneticSegments.map(\.source).joined() + phoneticBuffer
+    }
+
+    /// Seven idle Space taps, no slower than a second apart, wink the caption.
+    /// Each tap still inserts normally, so a run of spaces is never eaten.
+    private func noteIdleSpaceSignatureTap(wasIdle: Bool, at now: TimeInterval) {
+        guard wasIdle else {
+            resetSpaceSignatureTaps()
+            return
+        }
+        if now - spaceSignatureTapTimestamp > 1.05 {
+            spaceSignatureTapCount = 0
+        }
+        spaceSignatureTapTimestamp = now
+        spaceSignatureTapCount += 1
+        guard spaceSignatureTapCount >= 7 else { return }
+        revealSpacebarSignature()
+        resetSpaceSignatureTaps()
+    }
+
+    private func resetSpaceSignatureTaps() {
+        spaceSignatureTapCount = 0
+        spaceSignatureTapTimestamp = 0
+    }
+
+    private func spaceKeyButton() -> NativeKeyButton? {
+        keyButton(named: "space")
+    }
+
+    private func revealSpacebarSignature() {
+        guard let button = spaceKeyButton(), !isSpaceTrackpadActive else { return }
+        spaceSignatureRestoreWork?.cancel()
+        button.presentSpaceSignature(AksharaEasterEgg.spacebarPhrase)
+        keyFeedback?.signatureWink()
+        let work = DispatchWorkItem { [weak self, weak button] in
+            guard let self, let button else { return }
+            button.restoreCollapsedSpaceTitle(self.title(for: "space") ?? "අක්ෂර")
+            self.spaceSignatureRestoreWork = nil
+        }
+        spaceSignatureRestoreWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.05, execute: work)
     }
 
 }

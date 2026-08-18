@@ -151,6 +151,44 @@ enum SinhalaEngine {
         return output.precomposedStringWithCanonicalMapping
     }
 
+    static func isSinhalaConsonant(_ text: String) -> Bool {
+        text.unicodeScalars.first.map { (0x0D9A...0x0DC6).contains($0.value) } ?? false
+    }
+
+    static func isIndependentVowel(_ text: String) -> Bool {
+        text.unicodeScalars.first.map { (0x0D85...0x0D96).contains($0.value) } ?? false
+    }
+
+    /// Whether a following Wijesekara key can still rewrite a kombuwa sequence
+    /// (`ෙක` → `කේ` / `කො` / `කෞ` / `කෝ`).
+    static func canExtendPrebase(_ source: String, with suffix: String) -> Bool {
+        let scalars = Array(source.unicodeScalars)
+        guard scalars.first?.value == 0x0DD9 else { return false }
+        let prebaseCount = scalars.prefix { $0.value == 0x0DD9 }.count
+        let hasConsonant = scalars.contains { (0x0D9A...0x0DC6).contains($0.value) }
+        if !hasConsonant {
+            return (suffix == "ෙ" && prebaseCount < 2) || isSinhalaConsonant(suffix)
+        }
+        guard prebaseCount == 1 else { return false }
+        if scalars.count == 2 { return ["්", "ා", "ෟ"].contains(suffix) }
+        if scalars.count == 3, scalars[2].value == 0x0DCF { return suffix == "්" }
+        return false
+    }
+
+    static func combinesWithIndependentVowel(_ source: String, suffix: String) -> Bool {
+        guard let vowel = source.unicodeScalars.first,
+              let sign = suffix.unicodeScalars.first else { return false }
+        switch vowel.value {
+        case 0x0D85: return [0x0DCF, 0x0DD0, 0x0DD1].contains(sign.value) // අා/ැ/ෑ
+        case 0x0D91: return sign.value == 0x0DCA // එ්
+        case 0x0D89: return sign.value == 0x0DD3 // ඉී
+        case 0x0D94: return [0x0DCA, 0x0DDF, 0x0DD6].contains(sign.value) // ඔ්/ෞ/ූ
+        case 0x0D8B: return [0x0DDF, 0x0DD6].contains(sign.value) // උෞ/ූ
+        case 0x0D8D: return sign.value == 0x0DD8 // ඍෘ
+        default: return false
+        }
+    }
+
     static func transliterate(_ source: String, mode: Mode) -> String {
         if mode == .sls { return normalizeSLS(source) }
         if mode == .smartPhonetic { return transliterateSmartPhonetic(source) }
@@ -256,5 +294,75 @@ enum SinhalaEngine {
             advance(1)
         }
         return output
+    }
+}
+
+/// Quiet, local-only flourishes. The spacebar wink never inserts text. The
+/// suggestion-rail true name only replaces the current word if the user
+/// taps it; continuing to type or hitting Space keeps the real word.
+enum AksharaEasterEgg {
+    static let spacebarPhrase = "Made in Sri Lanka 🇱🇰"
+    static let trueNameDisplay = "✦ අක්ෂර"
+    static let trueNameInsert = "Made in Sri Lanka 🇱🇰"
+
+    /// Exact finished word only. Prefixes such as `akshar` or `අක්ෂරය` never match.
+    /// Phonetic `akshara` renders as `අක්ශර`; `akShara` and Wijesekara produce `අක්ෂර`.
+    static func isCompleteTrueName(rendered: String, phoneticSource: String) -> Bool {
+        let names: Set<String> = ["අක්ෂර", "අක්ශර"]
+        guard names.contains(rendered) else { return false }
+        if phoneticSource.isEmpty { return true }
+        return phoneticSource.lowercased() == "akshara"
+    }
+}
+
+/// Units the system keyboard uses for Delete. A tap removes one extended
+/// grapheme cluster; a sustained hold later removes a word, including a
+/// trailing space at the caret.
+enum NativeBackspace {
+    static func lastGrapheme(in text: String) -> (remaining: String, cluster: String)? {
+        guard let last = text.last else { return nil }
+        return (String(text.dropLast()), String(last))
+    }
+
+    static func lastWordSegment(in text: String) -> String {
+        guard !text.isEmpty else { return "" }
+        var result: [Character] = []
+        if let last = text.last, last.isWhitespace || last.isNewline {
+            result.append(last)
+        }
+        var remaining = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var foundContent = false
+        while let char = remaining.popLast() {
+            let isDelimiter = char.isWhitespace || char.isNewline || char.isPunctuation
+            if isDelimiter && foundContent { break }
+            foundContent = !isDelimiter
+            result.append(char)
+        }
+        return String(result.reversed())
+    }
+
+    static func endsWith(_ text: String, suffix: String) -> Bool {
+        guard !suffix.isEmpty else { return true }
+        let textScalars = text.unicodeScalars
+        let suffixScalars = suffix.unicodeScalars
+        if textScalars.count >= suffixScalars.count,
+           textScalars.suffix(suffixScalars.count).elementsEqual(suffixScalars) {
+            return true
+        }
+        return text.hasSuffix(suffix)
+    }
+
+    static func removingSuffix(_ text: String, suffix: String) -> String? {
+        guard !suffix.isEmpty else { return text }
+        let textScalars = text.unicodeScalars
+        let suffixScalars = suffix.unicodeScalars
+        if textScalars.count >= suffixScalars.count,
+           textScalars.suffix(suffixScalars.count).elementsEqual(suffixScalars) {
+            return String(String.UnicodeScalarView(textScalars.dropLast(suffixScalars.count)))
+        }
+        if text.hasSuffix(suffix) {
+            return String(text.dropLast(suffix.count))
+        }
+        return nil
     }
 }
