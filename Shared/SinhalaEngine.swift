@@ -189,6 +189,16 @@ enum SinhalaEngine {
         }
     }
 
+    /// Whether `text` begins with the Unicode scalars of `prefix`. Grapheme
+    /// clusters such as කා make `String.hasPrefix` fail for a typed ක.
+    static func hasUnicodeScalarPrefix(_ text: String, _ prefix: String) -> Bool {
+        var textScalars = text.unicodeScalars.makeIterator()
+        for scalar in prefix.unicodeScalars {
+            guard textScalars.next() == scalar else { return false }
+        }
+        return true
+    }
+
     static func transliterate(_ source: String, mode: Mode) -> String {
         if mode == .sls { return normalizeSLS(source) }
         if mode == .smartPhonetic { return transliterateSmartPhonetic(source) }

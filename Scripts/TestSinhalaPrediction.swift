@@ -186,3 +186,105 @@ if "ක්‍රමය".hasPrefix("ක") {
 
 guard backspacePassed else { exit(1) }
 print("Native backspace helpers passed")
+
+var touchWeightPassed = true
+func expectTouch(_ condition: Bool, label: String) {
+    guard condition else {
+        fputs("FAIL touch weights \(label)\n", stderr)
+        touchWeightPassed = false
+        return
+    }
+}
+
+let akshaRendered = SinhalaEngine.transliterate("aksha", mode: .phonetic)
+let akShaRendered = SinhalaEngine.transliterate("akSha", mode: .phonetic)
+let akshaRanked = provider.candidates(for: .init(
+    composingText: akshaRendered,
+    precedingWords: [],
+    maximumResults: 64
+))
+let akShaRanked = provider.candidates(for: .init(
+    composingText: akShaRendered,
+    precedingWords: [],
+    maximumResults: 64
+))
+let akshaWeights = provider.nextKeyWeights(
+    latinBuffer: "aksha",
+    mode: .phonetic,
+    shifted: false,
+    from: akshaRanked,
+    precedingWords: []
+)
+let akShaWeights = provider.nextKeyWeights(
+    latinBuffer: "akSha",
+    mode: .phonetic,
+    shifted: false,
+    from: akShaRanked,
+    precedingWords: []
+)
+// Phonetic `sh` renders ශ; the frequency list's අක්ෂර uses ෂ (`akSha`).
+expectTouch(
+    (akshaWeights["r"] ?? 0) > 0 || (akShaWeights["r"] ?? 0) > 0,
+    label: "aksha/akSha → r"
+)
+
+let sRendered = SinhalaEngine.transliterate("s", mode: .phonetic)
+let sRanked = provider.candidates(for: .init(
+    composingText: sRendered,
+    precedingWords: [],
+    maximumResults: 64
+))
+let sWeights = provider.nextKeyWeights(
+    latinBuffer: "s",
+    mode: .phonetic,
+    shifted: false,
+    from: sRanked,
+    precedingWords: []
+)
+expectTouch((sWeights["h"] ?? 0) > 0, label: "s → h rewrite")
+
+let startRanked = provider.candidates(for: .init(
+    composingText: "",
+    precedingWords: [],
+    maximumResults: 64
+))
+let startWeights = provider.nextKeyWeights(
+    latinBuffer: "",
+    mode: .phonetic,
+    shifted: false,
+    from: startRanked,
+    precedingWords: []
+)
+expectTouch(startWeights.isEmpty, label: "empty buffer does not inflate keys")
+
+let afterAthara = provider.candidates(for: .init(
+    composingText: "",
+    precedingWords: ["අතර"],
+    maximumResults: 64
+))
+let afterAtharaWeights = provider.nextKeyWeights(
+    latinBuffer: "",
+    mode: .phonetic,
+    shifted: false,
+    from: afterAthara,
+    precedingWords: ["අතර"]
+)
+expectTouch(afterAtharaWeights.isEmpty, label: "no inflation without a composing letter")
+
+let smartSRendered = SinhalaEngine.transliterate("s", mode: .smartPhonetic)
+let smartSRanked = provider.candidates(for: .init(
+    composingText: smartSRendered,
+    precedingWords: [],
+    maximumResults: 64
+))
+let smartSWeights = provider.nextKeyWeights(
+    latinBuffer: "s",
+    mode: .smartPhonetic,
+    shifted: false,
+    from: smartSRanked,
+    precedingWords: []
+)
+expectTouch((smartSWeights["h"] ?? 0) > 0, label: "smart phonetic s → h")
+
+guard touchWeightPassed else { exit(1) }
+print("Phonetic next-key touch weights passed (akSha r=\(akShaWeights["r"] ?? 0) s→h=\(sWeights["h"] ?? 0))")

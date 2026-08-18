@@ -101,6 +101,8 @@ private struct KeyboardSettingsView: View {
     @State private var appearance = KeyboardPreferences.appearance()
     @State private var highContrastEnabled = KeyboardPreferences.highContrastEnabled()
     @State private var deleteRepeatSpeed = KeyboardPreferences.deleteRepeatSpeed()
+    @State private var showTouchAreas = KeyboardPreferences.showTouchAreas()
+    @State private var predictiveTouchAreas = KeyboardPreferences.predictiveTouchAreas()
 
     var body: some View {
         Form {
@@ -165,6 +167,17 @@ private struct KeyboardSettingsView: View {
                 } label: {
                     SettingLabel(title: "One-handed", detail: "Aligns a narrower key grid", icon: "hand.tap", color: .purple)
                 }
+                Toggle(isOn: $predictiveTouchAreas) {
+                    SettingLabel(
+                        title: "Predictive touch areas",
+                        detail: "Grow likely next letters. Off keeps the usual A, L, Z, and M expansion.",
+                        icon: "sparkles",
+                        color: .orange
+                    )
+                }
+                Toggle(isOn: $showTouchAreas) {
+                    SettingLabel(title: "Show touch areas", detail: "Draw key hit cells over the grid", icon: "square.dashed", color: .mint)
+                }
             }
 
             Section("Appearance") {
@@ -193,6 +206,8 @@ private struct KeyboardSettingsView: View {
         .onChange(of: appearance) { KeyboardPreferences.setAppearance($0) }
         .onChange(of: highContrastEnabled) { KeyboardPreferences.setHighContrastEnabled($0) }
         .onChange(of: deleteRepeatSpeed) { KeyboardPreferences.setDeleteRepeatSpeed($0) }
+        .onChange(of: showTouchAreas) { KeyboardPreferences.setShowTouchAreas($0) }
+        .onChange(of: predictiveTouchAreas) { KeyboardPreferences.setPredictiveTouchAreas($0) }
     }
 }
 

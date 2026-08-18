@@ -125,6 +125,8 @@ enum KeyboardPreferences {
     static let appearanceKey = "keyboardAppearance"
     static let highContrastKey = "keyboardHighContrastEnabled"
     static let emojiSkinToneKey = "keyboardEmojiSkinTone"
+    static let showTouchAreasKey = "keyboardShowTouchAreas"
+    static let predictiveTouchAreasKey = "keyboardPredictiveTouchAreas"
 
     static let supportsSuggestions = true
 
@@ -142,6 +144,8 @@ enum KeyboardPreferences {
         var smartQuotesEnabled = true
         var deleteRepeatInterval = 0.08
         var highContrastEnabled = false
+        var showTouchAreas = false
+        var predictiveTouchAreas = false
     }
 
     private(set) static var hotPath = HotPathCache()
@@ -175,7 +179,9 @@ enum KeyboardPreferences {
             doubleSpacePeriodEnabled: doubleSpacePeriodEnabled(),
             smartQuotesEnabled: smartQuotesEnabled(),
             deleteRepeatInterval: deleteRepeatSpeed().interval,
-            highContrastEnabled: highContrastEnabled()
+            highContrastEnabled: highContrastEnabled(),
+            showTouchAreas: showTouchAreas(),
+            predictiveTouchAreas: predictiveTouchAreas()
         )
     }
 
@@ -329,6 +335,12 @@ enum KeyboardPreferences {
 
     static func highContrastEnabled() -> Bool { defaults.object(forKey: highContrastKey) as? Bool ?? false }
     static func setHighContrastEnabled(_ enabled: Bool) { persist(enabled, forKey: highContrastKey) }
+
+    static func showTouchAreas() -> Bool { defaults.object(forKey: showTouchAreasKey) as? Bool ?? false }
+    static func setShowTouchAreas(_ enabled: Bool) { persist(enabled, forKey: showTouchAreasKey) }
+
+    static func predictiveTouchAreas() -> Bool { defaults.object(forKey: predictiveTouchAreasKey) as? Bool ?? false }
+    static func setPredictiveTouchAreas(_ enabled: Bool) { persist(enabled, forKey: predictiveTouchAreasKey) }
 
     private static func enumValue<Value: RawRepresentable>(forKey key: String, default defaultValue: Value) -> Value where Value.RawValue == String {
         defaults.string(forKey: key).flatMap(Value.init(rawValue:)) ?? defaultValue

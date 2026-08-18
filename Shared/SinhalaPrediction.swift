@@ -24,6 +24,29 @@ protocol SinhalaPredictionProviding: AnyObject {
     /// in the host field. This lets the personal model learn naturally while
     /// keeping the extension's privacy boundary intact.
     func recordCommittedWord(_ word: String, after precedingWord: String?)
+    /// Letter-key inflation weights in 0...1, keyed by lowercase QWERTY
+    /// identity (`a`...`z`). Empty composing buffer returns no weights: hit
+    /// cells stay tiled until the user has started a word.
+    func nextKeyWeights(
+        latinBuffer: String,
+        mode: SinhalaEngine.Mode,
+        shifted: Bool,
+        from ranked: [SinhalaPredictionCandidate],
+        precedingWords: [String]
+    ) -> [String: Double]
+}
+
+extension SinhalaPredictionProviding {
+    func nextKeyWeights(
+        latinBuffer: String,
+        mode: SinhalaEngine.Mode,
+        shifted: Bool,
+        from ranked: [SinhalaPredictionCandidate],
+        precedingWords: [String]
+    ) -> [String: Double] {
+        _ = (latinBuffer, mode, shifted, ranked, precedingWords)
+        return [:]
+    }
 }
 
 /// Provider registry modelled after ShanKeyboard's separation of dictionary,
@@ -156,7 +179,13 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         // of the full frequency model at keyboard startup.
         frequentEntries = Self.mostFrequentEntries(from: loadedEntries, maximum: 96)
         unigramFrequency = Dictionary(uniqueKeysWithValues: loadedEntries.map { ($0.word, $0.frequency) })
-        bundledBigrams = Self.loadBigrams(from: nextWordURL)
+        // The next-word TSV is ~18 MB / 450k lines. Materializing it as one
+        // String plus a dictionary jetsams keyboard extensions on iOS 16
+        // (≈40 MB limit, iPhone X). Unigram + trigram + sentence-start still
+        // fill the rail. iOS 17+ devices get the contextual table.
+        if Self.canLoadNextWordModel {
+            bundledBigrams = Self.loadBigrams(from: nextWordURL)
+        }
         bundledTrigrams = Self.loadTrigrams(from: trigramURL)
         sentenceStartEntries = Self.loadEntries(from: sentenceStartURL)
     }
@@ -287,6 +316,49 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             )
         }
         return ranked
+    }
+
+    func nextKeyWeights(
+        latinBuffer: String,
+        mode: SinhalaEngine.Mode,
+        shifted: Bool,
+        from ranked: [SinhalaPredictionCandidate],
+        precedingWords: [String]
+    ) -> [String: Double] {
+        guard mode != .sls, !latinBuffer.isEmpty, !ranked.isEmpty else { return [:] }
+        var scores: [String: Double] = [:]
+        let currentRendered = SinhalaEngine.transliterate(latinBuffer, mode: mode)
+        var rewriteCache: [String: Double] = [:]
+        for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+            let lower = String(UnicodeScalar(scalar)!)
+            let source = shifted ? lower.uppercased() : lower
+            let nextRendered = Self.strippingTrailingVirama(
+                SinhalaEngine.transliterate(latinBuffer + source, mode: mode)
+            )
+            guard !nextRendered.isEmpty, nextRendered != currentRendered else { continue }
+            var score = 0.0
+            for candidate in ranked where SinhalaEngine.hasUnicodeScalarPrefix(candidate.text, nextRendered) {
+                score += candidate.score
+            }
+            if score == 0 {
+                if let cached = rewriteCache[nextRendered] {
+                    score = cached
+                } else {
+                    let extra = candidates(for: SinhalaPredictionRequest(
+                        composingText: nextRendered,
+                        precedingWords: precedingWords,
+                        maximumResults: 8
+                    ))
+                    score = extra.reduce(0) { $0 + $1.score }
+                    rewriteCache[nextRendered] = score
+                }
+            }
+            if score > 0 {
+                scores[lower, default: 0] += score
+            }
+        }
+        guard let maximum = scores.values.max(), maximum > 0 else { return [:] }
+        return scores.mapValues { $0 / maximum }
     }
 
     func recordSelection(_ word: String, after precedingWord: String?) {
@@ -420,8 +492,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     }
 
     private static func loadEntries(from modelURL: URL?) -> [Entry] {
-        guard let modelURL,
-              let contents = try? String(contentsOf: modelURL, encoding: .utf8) else { return [] }
+        guard let contents = utf8Contents(of: modelURL) else { return [] }
         return contents.split(whereSeparator: \.isNewline).compactMap { line in
             guard !line.hasPrefix("#") else { return nil }
             let fields = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
@@ -432,13 +503,31 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         }
     }
 
+    private static func strippingTrailingVirama(_ text: String) -> String {
+        guard text.unicodeScalars.last?.value == 0x0DCA else { return text }
+        return String(String.UnicodeScalarView(text.unicodeScalars.dropLast()))
+    }
+
     private static func trigramKey(_ earlier: String, _ previous: String) -> String {
         earlier + "\u{1E}" + previous
     }
 
+    /// Keyboard extensions on iOS 16 are jetsam'd well below the size of
+    /// `SinhalaNextWordModel.tsv`. Newer OS versions allow the extra table.
+    private static var canLoadNextWordModel: Bool {
+        if #available(iOS 17.0, *) { return true }
+        return false
+    }
+
+    private static func utf8Contents(of url: URL?) -> String? {
+        guard let url, let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+            return nil
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     private static func loadTrigrams(from modelURL: URL?) -> [String: [NextWord]] {
-        guard let modelURL,
-              let contents = try? String(contentsOf: modelURL, encoding: .utf8) else { return [:] }
+        guard let contents = utf8Contents(of: modelURL) else { return [:] }
         var grouped: [String: [NextWord]] = [:]
         for line in contents.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
             let fields = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
@@ -455,8 +544,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     }
 
     private static func loadBigrams(from modelURL: URL?) -> [String: [NextWord]] {
-        guard let modelURL,
-              let contents = try? String(contentsOf: modelURL, encoding: .utf8) else { return [:] }
+        guard let contents = utf8Contents(of: modelURL) else { return [:] }
         var grouped: [String: [NextWord]] = [:]
         for line in contents.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
             let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
