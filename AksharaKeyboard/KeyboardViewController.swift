@@ -13,6 +13,42 @@ private enum KeyboardChromeAppearance {
     }()
 }
 
+/// Leftover A/L/Z/M tap diagnostics. Filter Console.app / Xcode for `AKSHARA-HIT`
+/// on the **AksharaKeyboard** process (the extension, not the host app).
+private enum KeyboardHitTrace {
+    static let leftoverKeys: Set<String> = ["a", "l", "z", "m"]
+    private static let logger = Logger(subsystem: "lk.org.akshara.keyboard", category: "HitTest")
+    private static var lastHitMessage = ""
+    private static var lastHitTime: CFTimeInterval = 0
+
+    static func isTraced(_ key: String) -> Bool { leftoverKeys.contains(key) }
+
+    static func log(_ message: String) {
+        logger.notice("\(message, privacy: .public)")
+        NSLog("[AKSHARA-HIT] %@", message)
+    }
+
+    static func logHit(_ message: String) {
+        let now = CACurrentMediaTime()
+        if message == lastHitMessage, now - lastHitTime < 0.08 { return }
+        lastHitMessage = message
+        lastHitTime = now
+        log(message)
+    }
+
+    static func fmt(_ point: CGPoint) -> String {
+        String(format: "(%.1f,%.1f)", point.x, point.y)
+    }
+
+    static func fmt(_ rect: CGRect) -> String {
+        String(format: "(%.1f,%.1f %.1fx%.1f)", rect.origin.x, rect.origin.y, rect.width, rect.height)
+    }
+
+    static func fmt(_ insets: UIEdgeInsets) -> String {
+        String(format: "L%.1f R%.1f", insets.left, insets.right)
+    }
+}
+
 /// Isolated so iOS 16 does not dyld-crash on `UICornerConfiguration`.
 /// Putting those types on always-available methods was enough for the
 /// keyboard extension to abort and switch back to the system keyboard.
@@ -102,6 +138,32 @@ private final class KeyFeedback {
     }
 }
 
+private final class AlwaysHitLayer: CALayer {
+    override func hitTest(_ p: CGPoint) -> CALayer? {
+        bounds.contains(p) ? self : nil
+    }
+
+    override func contains(_ p: CGPoint) -> Bool {
+        bounds.contains(p)
+    }
+}
+
+/// Fills a key's layout item, including KeyboardKit-style leftover beside
+/// the painted cap. iOS 26 does not deliver taps to fully clear pixels, so
+/// this view keeps a near-invisible fill in the leftover.
+private final class KeyHitFillView: UIView {
+    override class var layerClass: AnyClass { AlwaysHitLayer.self }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
 /// A small UIKit key control tuned for the system keyboard's dense, tactile feel.
 private final class NativeKeyButton: UIButton {
     private let isUtility: Bool
@@ -118,6 +180,18 @@ private final class NativeKeyButton: UIButton {
     /// the control avoids UIKit highlight transitions resurrecting the normal
     /// character preview behind an alternate picker.
     var suppressesCharacterPreview = false
+    /// Extra points around the cap while this control is tracking. Delete
+    /// needs a wide slop so a held finger can settle without UIKit treating
+    /// the touch as having left the key.
+    var trackingHitOutset: CGFloat = 4
+    /// KeyboardKit `edgeInsets`: leftover is part of this control's bounds;
+    /// only the painted cap is inset (A / L / Z / M).
+    private(set) var capInsets: UIEdgeInsets = .zero
+    private let capView = UIView()
+    private let hitFill = KeyHitFillView()
+    private let keycapFill: UIColor
+    private var hintTop: NSLayoutConstraint!
+    private var hintTrailing: NSLayoutConstraint!
 
     private var usesIOS16KeyboardAppearance: Bool {
         if #available(iOS 17.0, *) { return false }
@@ -132,45 +206,12 @@ private final class NativeKeyButton: UIButton {
     init(keyName: String, title: String?, hint: String? = nil, symbol: String? = nil, utility: Bool = false) {
         self.keyName = keyName
         self.isUtility = utility
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        accessibilityIdentifier = keyName
-        titleLabel?.font = .systemFont(ofSize: utility ? 18 : 22, weight: glyphFontWeight)
-        titleLabel?.adjustsFontSizeToFitWidth = true
-        titleLabel?.minimumScaleFactor = 0.7
-        setTitle(title, for: .normal)
-        setTitleColor(.label, for: .normal)
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.font = .systemFont(ofSize: 9, weight: .regular)
-        hintLabel.textColor = .secondaryLabel
-        hintLabel.textAlignment = .right
-        hintLabel.text = hint
-        hintLabel.isHidden = hint == nil
-        hintLabel.isUserInteractionEnabled = false
-        addSubview(hintLabel)
-        NSLayoutConstraint.activate([
-            hintLabel.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            hintLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
-        ])
-        if let symbol {
-            setImage(UIImage(systemName: symbol), for: .normal)
-            tintColor = .label
-            imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: glyphSymbolWeight)
-        }
-        backgroundColor = UIColor { traits in
+        self.keycapFill = UIColor { traits in
             let highContrast = KeyboardPreferences.hotPath.highContrastEnabled
-            let liquidGlass = self.usesIOS26KeyboardAppearance
-            // Grey Shift / 123 / Delete / Return caps match the pre-iOS 26
-            // system keyboard. iOS 26 uses the same surface as letter keys
-            // unless the user asked for higher contrast.
+            let liquidGlass = KeyboardChromeAppearance.usesLiquidGlassSurfaces
             let greyUtility = utility && (!liquidGlass || highContrast)
             if traits.userInterfaceStyle == .dark {
                 if liquidGlass {
-                    // iOS 26's dark keyboard keycaps are cool translucent
-                    // surfaces, not opaque grey. Keeping alpha below one lets the
-                    // keyboard's dark blue/teal material show through just like
-                    // the system UK layout. Higher contrast strengthens the
-                    // surface without losing that material relationship.
                     let opacity: CGFloat = greyUtility
                         ? 0.24
                         : (highContrast ? 0.30 : 0.18)
@@ -186,8 +227,6 @@ private final class NativeKeyButton: UIButton {
                     : .white
             }
             if !liquidGlass {
-                // Opaque / pre-iOS 26 hosts keep solid keycaps. KeyboardKit
-                // uses the same split: liquid keys only when glass is enabled.
                 return greyUtility
                     ? UIColor(red: highContrast ? 0.60 : 0.71, green: highContrast ? 0.62 : 0.73, blue: highContrast ? 0.67 : 0.77, alpha: 1)
                     : .systemBackground
@@ -196,6 +235,40 @@ private final class NativeKeyButton: UIButton {
                 ? UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
                 : .systemBackground
         }
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        accessibilityIdentifier = keyName
+        titleLabel?.font = .systemFont(ofSize: utility ? 18 : 22, weight: glyphFontWeight)
+        titleLabel?.adjustsFontSizeToFitWidth = true
+        titleLabel?.minimumScaleFactor = 0.7
+        setTitle(title, for: .normal)
+        setTitleColor(.label, for: .normal)
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.font = .systemFont(ofSize: 9, weight: .regular)
+        hintLabel.textColor = .secondaryLabel
+        hintLabel.textAlignment = .right
+        hintLabel.text = hint
+        hintLabel.isHidden = hint == nil
+        hintLabel.isUserInteractionEnabled = false
+        capView.isUserInteractionEnabled = false
+        capView.isHidden = true
+        capView.layer.cornerCurve = .continuous
+        capView.layer.shadowColor = UIColor.black.cgColor
+        capView.layer.shadowOffset = CGSize(width: 0, height: 1)
+        capView.layer.shadowRadius = 0
+        hitFill.isUserInteractionEnabled = false
+        insertSubview(hitFill, at: 0)
+        insertSubview(capView, at: 1)
+        addSubview(hintLabel)
+        hintTop = hintLabel.topAnchor.constraint(equalTo: topAnchor, constant: 3)
+        hintTrailing = hintLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
+        NSLayoutConstraint.activate([hintTop, hintTrailing])
+        if let symbol {
+            setImage(UIImage(systemName: symbol), for: .normal)
+            tintColor = .label
+            imageView?.preferredSymbolConfiguration = .init(pointSize: 20, weight: glyphSymbolWeight)
+        }
+        backgroundColor = keycapFill
         layer.cornerCurve = .continuous
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOffset = CGSize(width: 0, height: 1)
@@ -208,6 +281,10 @@ private final class NativeKeyButton: UIButton {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        hitFill.frame = bounds
+        if capInsets != .zero {
+            capView.frame = bounds.inset(by: capInsets)
+        }
         guard keyName == "space", let titleLabel else { return }
         // UIButton sizes the title to its text. A long Wijesekara caption
         // or the signature phrase can otherwise draw past the keycap.
@@ -240,9 +317,14 @@ private final class NativeKeyButton: UIButton {
     /// UIButton can keep a resolved cap colour across appearance changes.
     /// Re-assigning the dynamic colour forces it to match the new traits.
     func refreshDynamicColors() {
-        let cap = backgroundColor
-        backgroundColor = nil
-        backgroundColor = cap
+        if capInsets != .zero {
+            capView.backgroundColor = nil
+            capView.backgroundColor = keycapFill
+        } else {
+            let cap = backgroundColor
+            backgroundColor = nil
+            backgroundColor = cap
+        }
         tintColor = tintColor
     }
 
@@ -257,17 +339,40 @@ private final class NativeKeyButton: UIButton {
         }
     }
 
-    /// The grid chooses the key. UIControl still asks `point(inside:)` before
-    /// `touchDown`, including when Phonetic has assigned a tap in the A / L
-    /// side margin. Slide-off uses a tight slop so Space still cancels.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         if isTracking {
-            return bounds.insetBy(dx: -4, dy: -4).contains(point)
+            return bounds.insetBy(dx: -trackingHitOutset, dy: -trackingHitOutset).contains(point)
         }
         return true
     }
 
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
+        let hit = bounds.contains(point) ? self : nil
+        if KeyboardHitTrace.isTraced(keyName) {
+            let inCap = bounds.inset(by: capInsets).contains(point)
+            KeyboardHitTrace.logHit(
+                "btn \(keyName) hitTest pt=\(KeyboardHitTrace.fmt(point)) boundsContains=\(bounds.contains(point)) inCap=\(inCap) leftover=\(!inCap && capInsets != .zero) -> \(hit == nil ? "nil" : "self")"
+            )
+        }
+        return hit
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if KeyboardHitTrace.isTraced(keyName), let touch = touches.first {
+            let local = touch.location(in: self)
+            let inCap = bounds.inset(by: capInsets).contains(local)
+            KeyboardHitTrace.log(
+                "btn \(keyName) touchesBegan loc=\(KeyboardHitTrace.fmt(local)) inCap=\(inCap) leftover=\(!inCap && capInsets != .zero) insets=\(KeyboardHitTrace.fmt(capInsets))"
+            )
+        }
+        super.touchesBegan(touches, with: event)
+    }
+
     @objc private func pressBegan() {
+        KeyboardHitTrace.log(
+            "btn \(keyName) touchDown/pressBegan insets=\(KeyboardHitTrace.fmt(capInsets))"
+        )
         // Haptic must win the touch-down turn before preview or composition.
         touchDown?()
     }
@@ -307,6 +412,7 @@ private final class NativeKeyButton: UIButton {
         // recognition during fast touch typing.
         hintLabel.font = .systemFont(ofSize: isPad ? 12 : 10, weight: .regular)
         applyKeycapChrome(isPad: isPad)
+        applyCharacterEdgeInsets(capInsets)
         if let imageView {
             imageView.preferredSymbolConfiguration = .init(
                 pointSize: isPad ? 23 : 20,
@@ -331,16 +437,55 @@ private final class NativeKeyButton: UIButton {
     /// KeyboardKit uses 9 pt and no shadow when glass is on; older iOS keeps
     /// the raised 7–8 pt (phone) / 8–10 pt (iPad) caps.
     private func applyKeycapChrome(isPad: Bool) {
+        let target = capInsets != .zero ? capView.layer : layer
         if usesIOS26KeyboardAppearance {
-            layer.cornerRadius = 9
-            layer.shadowOpacity = 0
+            target.cornerRadius = 9
+            target.shadowOpacity = 0
+            if capInsets != .zero { layer.shadowOpacity = 0 }
             return
         }
-        layer.cornerRadius = isPad ? (isUtility ? 10 : 8) : (isUtility ? 8 : 7)
-        layer.shadowOpacity = usesIOS16KeyboardAppearance ? 0.18 : 0.23
+        target.cornerRadius = isPad ? (isUtility ? 10 : 8) : (isUtility ? 8 : 7)
+        target.shadowOpacity = usesIOS16KeyboardAppearance ? 0.18 : 0.23
+        if capInsets != .zero { layer.shadowOpacity = 0 }
+    }
+
+    /// KeyboardKit layout items fill the leftover; `edgeInsets` shrink only
+    /// the painted cap. The control's bounds still contain the tap.
+    func applyCharacterEdgeInsets(_ insets: UIEdgeInsets) {
+        capInsets = insets
+        contentEdgeInsets = insets
+        hintTop.constant = 3 + insets.top
+        hintTrailing.constant = -4 - insets.right
+        let usesSplitCap = insets != .zero
+        capView.isHidden = !usesSplitCap
+        if usesSplitCap {
+            backgroundColor = .clear
+            layer.shadowOpacity = 0
+            capView.backgroundColor = keycapFill
+            // Compositor bait: leftover is otherwise fully clear, and iOS 26
+            // never starts hit-testing those pixels.
+            hitFill.backgroundColor = UIColor(white: 0.5, alpha: 0.02)
+        } else {
+            backgroundColor = keycapFill
+            capView.backgroundColor = nil
+            hitFill.backgroundColor = .clear
+        }
+        applyKeycapChrome(isPad: traitCollection.userInterfaceIdiom == .pad)
+        setNeedsLayout()
     }
 
     var isUtilityKey: Bool { isUtility }
+
+    /// Painted cap in the button's own bounds. A/L/Z/M leftover is outside this.
+    var paintedCapBounds: CGRect { bounds.inset(by: capInsets) }
+
+    var calloutFillColor: UIColor { keycapFill }
+
+    var keycapCornerRadius: CGFloat {
+        if usesIOS26KeyboardAppearance { return 9 }
+        if traitCollection.userInterfaceIdiom == .pad { return isUtility ? 10 : 8 }
+        return isUtility ? 8 : 7
+    }
 
     var supportsCharacterPreview: Bool {
         !isUtility && currentTitle != nil && currentTitle != " "
@@ -875,6 +1020,8 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         delete.addTarget(self, action: #selector(deleteEmojiInput), for: .touchDown)
         let deleteHold = UILongPressGestureRecognizer(target: self, action: #selector(handleEmojiDeleteHold(_:)))
         deleteHold.minimumPressDuration = 0.4
+        deleteHold.allowableMovement = 80
+        deleteHold.cancelsTouchesInView = false
         delete.addGestureRecognizer(deleteHold)
         categoryBar.addArrangedSubview(delete)
         delete.widthAnchor.constraint(equalToConstant: 51).isActive = true
@@ -1029,7 +1176,12 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         switch gesture.state {
         case .began:
             onDeleteHoldBegan?()
-        case .ended, .cancelled, .failed:
+        case .ended, .failed:
+            onDeleteHoldEnded?()
+        case .cancelled:
+            if let button = gesture.view as? UIControl, button.isTracking || button.isHighlighted {
+                return
+            }
             onDeleteHoldEnded?()
         default:
             break
@@ -1700,29 +1852,85 @@ private final class KeyboardGridView: UIStackView {
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
-        guard self.point(inside: point, with: event) else { return nil }
+        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else {
+            KeyboardHitTrace.logHit(
+                "grid hitTest SKIP enabled=\(isUserInteractionEnabled) hidden=\(isHidden) alpha=\(alpha) pt=\(KeyboardHitTrace.fmt(point))"
+            )
+            return nil
+        }
+        guard self.point(inside: point, with: event) else {
+            KeyboardHitTrace.logHit(
+                "grid hitTest OUTSIDE pt=\(KeyboardHitTrace.fmt(point)) expanded=\(KeyboardHitTrace.fmt(expandedHitBounds))"
+            )
+            return nil
+        }
 
         let slots = hitSlots()
-        guard !slots.isEmpty else { return nil }
+        guard !slots.isEmpty else {
+            KeyboardHitTrace.logHit("grid hitTest EMPTY slots pt=\(KeyboardHitTrace.fmt(point))")
+            return nil
+        }
 
-        if let painted = keyContainingPaintedCap(at: point, slots: slots) {
-            return painted
-        }
-        if expandsToRowEdges {
+        var reason = "none"
+        var result: NativeKeyButton?
+        if let owner = slots.first(where: {
+            $0.button.convert($0.button.bounds, to: self).contains(point)
+        }) {
+            reason = "bounds"
+            result = owner.button
+        } else if let painted = keyContainingPaintedCap(at: point, slots: slots) {
+            reason = "paintedCap"
+            result = painted
+        } else if expandsToRowEdges {
             if let inflated = keyOwningInflatedCell(at: point, slots: slots) {
-                return inflated
+                reason = "inflated"
+                result = inflated
+            } else if let tiled = slots.first(where: { $0.tiled.contains(point) })?.button {
+                reason = "tiled"
+                result = tiled
             }
-            return slots.first { $0.tiled.contains(point) }?.button
+        } else if let gutter = nearestKeyInGutter(at: point, slots: slots) {
+            reason = "gutter"
+            result = gutter
         }
-        return nearestKeyInGutter(at: point, slots: slots)
+
+        logHitResolution(point: point, reason: reason, result: result, slots: slots)
+        return result
+    }
+
+    private func logHitResolution(
+        point: CGPoint,
+        reason: String,
+        result: NativeKeyButton?,
+        slots: [HitSlot]
+    ) {
+        let key = result?.keyName ?? "nil"
+
+        var leftover = false
+        var inButtonBounds = false
+        var inCap = false
+        if let result {
+            let local = result.convert(point, from: self)
+            inButtonBounds = result.bounds.contains(local)
+            inCap = result.bounds.inset(by: result.capInsets).contains(local)
+            leftover = result.capInsets != .zero && inButtonBounds && !inCap
+        } else {
+            leftover = slots.contains {
+                KeyboardHitTrace.isTraced($0.button.keyName)
+                    && $0.button.convert($0.button.bounds, to: self).inset(by: $0.button.capInsets).contains(point) == false
+                    && ($0.tiled.contains(point) || $0.inflated.contains(point))
+            }
+        }
+        KeyboardHitTrace.logHit(
+            "grid hitTest pt=\(KeyboardHitTrace.fmt(point)) -> \(key) reason=\(reason) inButtonBounds=\(inButtonBounds) inCap=\(inCap) leftover=\(leftover) uiKitWillAccept=\(inButtonBounds)"
+        )
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         bringSubviewToFront(touchOverlay)
-        touchOverlay.isHidden = !KeyboardPreferences.hotPath.showTouchAreas
-        guard !touchOverlay.isHidden else { return }
+        touchOverlay.showsDebugTouchAreas = KeyboardPreferences.hotPath.showTouchAreas
+        touchOverlay.isHidden = false
         touchOverlay.frame = expandedHitBounds
         let origin = expandedHitBounds.origin
         touchOverlay.slots = hitSlots().map { slot in
@@ -1734,7 +1942,23 @@ private final class KeyboardGridView: UIStackView {
                 isLetter: slot.isLetter
             )
         }
+        logLeftoverGeometryIfNeeded()
         touchOverlay.setNeedsDisplay()
+    }
+
+    private var lastLeftoverGeometryDump = ""
+
+    private func logLeftoverGeometryIfNeeded() {
+        let leftover = liveKeysByRow().flatMap { $0 }.filter { KeyboardHitTrace.isTraced($0.button.keyName) }
+        guard !leftover.isEmpty else { return }
+        let dump = leftover.map { item in
+            let cap = item.frame.inset(by: item.button.capInsets)
+            return "\(item.button.keyName) frame=\(KeyboardHitTrace.fmt(item.frame)) insets=\(KeyboardHitTrace.fmt(item.button.capInsets)) cap=\(KeyboardHitTrace.fmt(cap))"
+        }.joined(separator: " | ")
+        let summary = "layout leftover \(dump) expandsToRowEdges=\(expandsToRowEdges) overlayHidden=\(touchOverlay.isHidden)"
+        guard summary != lastLeftoverGeometryDump else { return }
+        lastLeftoverGeometryDump = summary
+        KeyboardHitTrace.log(summary)
     }
 
     private var expandedHitBounds: CGRect {
@@ -1780,7 +2004,7 @@ private final class KeyboardGridView: UIStackView {
                     : tiled
                 slots.append(HitSlot(
                     button: item.button,
-                    cap: item.frame,
+                    cap: item.frame.inset(by: item.button.capInsets),
                     tiled: tiled,
                     inflated: inflated,
                     weight: weight
@@ -1947,12 +2171,16 @@ private final class KeyTouchOverlayView: UIView {
     }
 
     var slots: [Slot] = []
+    /// Debug paint for "Show touch areas". When false, leftover is still
+    /// filled at ~2% alpha so iOS 26 delivers taps in otherwise empty pixels.
+    var showsDebugTouchAreas = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = false
         backgroundColor = .clear
         clipsToBounds = false
+        isUserInteractionEnabled = false
     }
 
     required init?(coder: NSCoder) {
@@ -1960,109 +2188,190 @@ private final class KeyTouchOverlayView: UIView {
         isOpaque = false
         backgroundColor = .clear
         clipsToBounds = false
+        isUserInteractionEnabled = false
     }
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
-        for slot in slots {
-            context.setFillColor(UIColor.systemBlue.withAlphaComponent(0.12).cgColor)
-            context.fill(slot.tiled)
-            if slot.weight > 0, slot.isLetter {
-                context.setFillColor(UIColor.systemOrange.withAlphaComponent(0.12 + 0.35 * slot.weight).cgColor)
-                context.fill(slot.inflated)
+        if showsDebugTouchAreas {
+            for slot in slots {
+                context.setFillColor(UIColor.systemBlue.withAlphaComponent(0.12).cgColor)
+                context.fill(slot.tiled)
+                if slot.weight > 0, slot.isLetter {
+                    context.setFillColor(UIColor.systemOrange.withAlphaComponent(0.12 + 0.35 * slot.weight).cgColor)
+                    context.fill(slot.inflated)
+                }
+                context.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.85).cgColor)
+                context.setLineWidth(1)
+                context.stroke(slot.cap.insetBy(dx: 0.5, dy: 0.5))
             }
-            context.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.85).cgColor)
-            context.setLineWidth(1)
-            context.stroke(slot.cap.insetBy(dx: 0.5, dy: 0.5))
+            return
         }
+
+        context.setFillColor(UIColor(white: 0.5, alpha: 0.02).cgColor)
+        for slot in slots {
+            fill(slot.tiled, subtracting: slot.cap, in: context)
+            if slot.weight > 0, slot.isLetter {
+                fill(slot.inflated, subtracting: slot.tiled, in: context)
+            }
+        }
+    }
+
+    private func fill(_ outer: CGRect, subtracting inner: CGRect, in context: CGContext) {
+        guard !outer.isNull, !outer.isEmpty else { return }
+        let hole = inner.intersection(outer)
+        if hole.isNull || hole.isEmpty {
+            context.fill(outer)
+            return
+        }
+        context.addRect(outer)
+        context.addRect(hole)
+        context.fillPath(using: .evenOdd)
     }
 }
 
-/// The iOS character-preview balloon. Drawing it in a separate overlay
-/// prevents Auto Layout from moving keyboard rows while a finger is down.
+/// iOS key-pop silhouette: one path, rounded convex corners via tangent
+/// arcs, and a vertical S-curve neck between the bubble and the stem.
+private struct KeyCalloutShape {
+    var stemRect: CGRect
+    var bubbleCornerRadius: CGFloat
+    var stemCornerRadius: CGFloat
+    var neckHeight: CGFloat
+
+    func path(in bounds: CGRect) -> CGPath {
+        let path = CGMutablePath()
+        let bubbleR = min(bubbleCornerRadius, bounds.width / 2, max(0, stemRect.minY) / 2)
+        let stemR = min(stemCornerRadius, stemRect.width / 2, stemRect.height / 2)
+        let neck = min(max(neckHeight, 8), max(8, stemRect.height * 0.45))
+
+        let bubbleTopLeft = CGPoint(x: bounds.minX, y: bounds.minY)
+        let bubbleTopRight = CGPoint(x: bounds.maxX, y: bounds.minY)
+        let bubbleBottomRight = CGPoint(x: bounds.maxX, y: stemRect.minY)
+        let stemTopRight = CGPoint(x: stemRect.maxX, y: stemRect.minY + neck)
+        let stemBottomRight = CGPoint(x: stemRect.maxX, y: stemRect.maxY)
+        let stemBottomLeft = CGPoint(x: stemRect.minX, y: stemRect.maxY)
+        let stemTopLeft = CGPoint(x: stemRect.minX, y: stemRect.minY + neck)
+        let bubbleBottomLeft = CGPoint(x: bounds.minX, y: stemRect.minY)
+
+        path.move(to: CGPoint(x: bounds.minX + bubbleR, y: bounds.minY))
+        path.addArc(tangent1End: bubbleTopRight, tangent2End: bubbleBottomRight, radius: bubbleR)
+        path.addLine(to: bubbleBottomRight)
+        addVerticalSCurve(to: path, from: bubbleBottomRight, to: stemTopRight)
+        path.addArc(tangent1End: stemBottomRight, tangent2End: stemBottomLeft, radius: stemR)
+        path.addArc(tangent1End: stemBottomLeft, tangent2End: stemTopLeft, radius: stemR)
+        path.addLine(to: stemTopLeft)
+        addVerticalSCurve(to: path, from: stemTopLeft, to: bubbleBottomLeft)
+        path.addArc(tangent1End: bubbleTopLeft, tangent2End: CGPoint(x: bounds.minX + bubbleR, y: bounds.minY), radius: bubbleR)
+        path.closeSubpath()
+        return path
+    }
+
+    /// Smooth step between two parallel verticals. End tangents stay vertical,
+    /// so the neck cannot collapse into a 90° corner.
+    private func addVerticalSCurve(to path: CGMutablePath, from start: CGPoint, to end: CGPoint) {
+        let handle = (end.y - start.y) * 0.5
+        path.addCurve(
+            to: end,
+            control1: CGPoint(x: start.x, y: start.y + handle),
+            control2: CGPoint(x: end.x, y: end.y - handle)
+        )
+    }
+}
+
+/// Character preview balloon. Shape is owned by `KeyCalloutShape`.
 private final class KeyPreviewView: UIView {
     private let glyphLabel = UILabel()
     private let shapeLayer = CAShapeLayer()
-    private var lowerWidth: CGFloat = 30
-    private var lowerCenterX: CGFloat = 30
-    private var lowerHeight: CGFloat = 42
-    private var upperHeight: CGFloat = 54
-    private var configuredGeometry = CGSize.zero
+    private var stemWidth: CGFloat = 30
+    private var stemCenterX: CGFloat = 30
+    private var stemHeight: CGFloat = 42
+    private var bubbleHeight: CGFloat = 55
+    private var stemCornerRadius: CGFloat = 7
+    private var fillColor: UIColor = .systemBackground
+
+    static let bubbleCornerRadius: CGFloat = 12
+    static let neckHeight: CGFloat = 20
+    static let sideOverhang: CGFloat = 24
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.10
+        layer.shadowOpacity = 0.12
         layer.shadowOffset = CGSize(width: 0, height: 1)
-        layer.shadowRadius = 1.5
-        // Frame-based glyph placement avoids Auto Layout on every key preview.
+        layer.shadowRadius = 4
         glyphLabel.textAlignment = .center
         glyphLabel.textColor = .label
-        glyphLabel.font = .systemFont(
-            ofSize: 30,
-            weight: KeyboardChromeAppearance.usesLiquidGlassSurfaces ? .medium : .regular
-        )
+        glyphLabel.font = Self.calloutFont(forBubbleHeight: 55)
+        glyphLabel.adjustsFontSizeToFitWidth = true
+        glyphLabel.minimumScaleFactor = 0.7
         addSubview(glyphLabel)
+        shapeLayer.strokeColor = nil
+        shapeLayer.lineWidth = 0
         layer.insertSublayer(shapeLayer, at: 0)
     }
 
     required init?(coder: NSCoder) { nil }
+
+    private static func calloutFont(forBubbleHeight height: CGFloat) -> UIFont {
+        let largeTitle = UIFont.preferredFont(forTextStyle: .largeTitle).pointSize
+        return .systemFont(ofSize: min(largeTitle, max(22, height - 12)), weight: .light)
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         shapeLayer.frame = bounds
         glyphLabel.frame = CGRect(
             x: 4,
-            y: 3,
+            y: 0,
             width: max(0, bounds.width - 8),
-            height: max(0, bounds.height - lowerHeight - 9)
+            height: max(0, bubbleHeight)
         )
-        let w = bounds.width, h = bounds.height
-        let lowerLeft = max(6, lowerCenterX - lowerWidth / 2)
-        let lowerRight = min(w - 6, lowerCenterX + lowerWidth / 2)
-        let lowerTop = h - lowerHeight
-        let shoulderY = lowerTop - 10
-        let path = UIBezierPath()
-        path.move(to: CGPoint(x: 7, y: shoulderY))
-        path.addLine(to: CGPoint(x: 7, y: 10))
-        path.addQuadCurve(to: CGPoint(x: 17, y: 0), controlPoint: CGPoint(x: 7, y: 0))
-        path.addLine(to: CGPoint(x: w - 17, y: 0))
-        path.addQuadCurve(to: CGPoint(x: w - 7, y: 10), controlPoint: CGPoint(x: w - 7, y: 0))
-        path.addLine(to: CGPoint(x: w - 7, y: shoulderY))
-        path.addCurve(to: CGPoint(x: lowerRight, y: lowerTop), controlPoint1: CGPoint(x: w - 7, y: shoulderY + 5), controlPoint2: CGPoint(x: lowerRight + 5, y: lowerTop))
-        path.addLine(to: CGPoint(x: lowerRight, y: h - 7))
-        path.addQuadCurve(to: CGPoint(x: lowerRight - 7, y: h), controlPoint: CGPoint(x: lowerRight, y: h))
-        path.addLine(to: CGPoint(x: lowerLeft + 7, y: h))
-        path.addQuadCurve(to: CGPoint(x: lowerLeft, y: h - 7), controlPoint: CGPoint(x: lowerLeft, y: h))
-        path.addLine(to: CGPoint(x: lowerLeft, y: lowerTop))
-        path.addCurve(to: CGPoint(x: 7, y: shoulderY), controlPoint1: CGPoint(x: lowerLeft - 5, y: lowerTop), controlPoint2: CGPoint(x: 7, y: shoulderY + 5))
-        path.close()
-        shapeLayer.path = path.cgPath
-        shapeLayer.fillColor = UIColor { traits in
-            traits.userInterfaceStyle == .dark ? UIColor(white: 0.46, alpha: 1) : .systemBackground
-        }.resolvedColor(with: traitCollection).cgColor
+        let stemX = min(max(stemCenterX - stemWidth / 2, 0), max(0, bounds.width - stemWidth))
+        let shape = KeyCalloutShape(
+            stemRect: CGRect(
+                x: stemX,
+                y: max(0, bounds.height - stemHeight),
+                width: min(stemWidth, bounds.width),
+                height: min(stemHeight, bounds.height)
+            ),
+            bubbleCornerRadius: Self.bubbleCornerRadius,
+            stemCornerRadius: stemCornerRadius,
+            neckHeight: Self.neckHeight
+        )
+        let path = shape.path(in: bounds)
+        shapeLayer.path = path
+        layer.shadowPath = path
+        applyFill()
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        applyFill()
+    }
+
+    private func applyFill() {
+        shapeLayer.fillColor = fillColor.resolvedColor(with: traitCollection).cgColor
     }
 
     func display(_ title: String) { glyphLabel.text = title }
 
-    func configure(lowerWidth: CGFloat, lowerCenterX: CGFloat, lowerHeight: CGFloat, upperHeight: CGFloat) {
-        let geometry = CGSize(width: lowerWidth + lowerCenterX, height: lowerHeight + upperHeight)
-        let unchanged = abs(self.lowerWidth - lowerWidth) < 0.5
-            && abs(self.lowerCenterX - lowerCenterX) < 0.5
-            && abs(self.lowerHeight - lowerHeight) < 0.5
-            && abs(self.upperHeight - upperHeight) < 0.5
-            && configuredGeometry == geometry
-        self.lowerWidth = lowerWidth
-        self.lowerCenterX = lowerCenterX
-        self.lowerHeight = lowerHeight
-        self.upperHeight = upperHeight
-        configuredGeometry = geometry
-        glyphLabel.font = .systemFont(
-            ofSize: min(30, max(18, upperHeight - 8)),
-            weight: KeyboardChromeAppearance.usesLiquidGlassSurfaces ? .medium : .regular
-        )
-        guard !unchanged else { return }
+    func configure(
+        stemWidth: CGFloat,
+        stemCenterX: CGFloat,
+        stemHeight: CGFloat,
+        bubbleHeight: CGFloat,
+        stemCornerRadius: CGFloat,
+        fillColor: UIColor
+    ) {
+        self.stemWidth = stemWidth
+        self.stemCenterX = stemCenterX
+        self.stemHeight = stemHeight
+        self.bubbleHeight = bubbleHeight
+        self.stemCornerRadius = stemCornerRadius
+        self.fillColor = fillColor
+        glyphLabel.font = Self.calloutFont(forBubbleHeight: bubbleHeight)
+        applyFill()
         setNeedsLayout()
     }
 }
@@ -2193,7 +2502,7 @@ private final class AlternateCharacterPickerView: UIView {
     }
 }
 
-final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedback {
+final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedback, UIGestureRecognizerDelegate {
     private static let topEmojiKeyPrefix = "topEmoji:"
     private static let layoutLogger = Logger(
         subsystem: "lk.org.akshara.keyboard",
@@ -2337,13 +2646,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var keyboardStackTopInset: NSLayoutConstraint!
     private var keyboardStackBottomInset: NSLayoutConstraint!
     private var keyboardContentHeight: NSLayoutConstraint!
-    /// Host height at priority 999. Soft enough to yield to UIKit's temporary
-    /// encapsulated height during attach, then settles to the calibrated strip.
-    private var keyboardHostHeight: NSLayoutConstraint!
+    /// Host height at priority 999. Created in `configureLayout` but not
+    /// activated until `updateViewConstraints()` after `viewWillAppear`, so
+    /// it does not interrupt UIKit's initial remote-keyboard size negotiation.
+    private var keyboardHostHeight: NSLayoutConstraint?
+    /// Gates host-height activation. `updateViewConstraints` can run during
+    /// load, before the keyboard host has finished its first layout pass.
+    private var isPreparingToAppear = false
     private var keyboardLeadingInset: NSLayoutConstraint!
     private var keyboardTrailingInset: NSLayoutConstraint!
     private var metricConstraints: [(NSLayoutConstraint, () -> CGFloat)] = []
     private var metricMargins: [(UIStackView, () -> UIEdgeInsets)] = []
+    private var metricCapInsets: [(NativeKeyButton, () -> UIEdgeInsets)] = []
     private var candidateButtons: [CandidateButton] = []
     private var candidates: [String?] = [nil, nil, nil]
     private var predictionPrefix = ""
@@ -2367,10 +2681,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var emojiPicker: EmojiPickerView?
     private let trackpadSurface = UIView()
     private var deleteRepeater: Timer?
+    /// True for the whole hold, including the brief gap where the character
+    /// timer is replaced by the slower word timer.
+    private var isDeleteRepeatActive = false
     /// First Delete touch-down of the current hold, used to switch from
     /// character repeat to word repeat like the system keyboard.
     private var deleteRepeatBeganAt: TimeInterval = 0
     private var deleteRepeatUsesWords = false
+    /// The control that started this hold. Used to keep repeating if the
+    /// long-press recognizer is cancelled while the finger is still down.
+    private weak var deleteRepeatAnchor: UIView?
+    private weak var deleteRepeatRecognizer: UILongPressGestureRecognizer?
     private var keyPreview: KeyPreviewView?
     private var alternatePicker: AlternateCharacterPickerView?
     private var presentedAlternateChoices: [(display: String, input: String)] = []
@@ -3237,6 +3558,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func rebuildKeys() {
+        // Destroying the Delete key mid-hold cancels its long-press and
+        // stops repeat. Defer until the finger lifts.
+        if isDeleteRepeatActive {
+            needsKeyRebuildWhenGeometryIsStable = true
+            return
+        }
         if emojiPicker == nil {
             applyHostHeightConstraint(reason: "rebuildKeys")
         }
@@ -3256,6 +3583,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         spaceSignatureRestoreWork = nil
         metricConstraints.removeAll()
         metricMargins.removeAll()
+        metricCapInsets.removeAll()
         keyboardStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         // Match the native English fourth row: the emoji affordance sits
         // between the number key and Space. A keyboard extension can ask iOS
@@ -3364,6 +3692,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         candidateBar.hitOutsets = .zero
         metricConstraints.forEach { constraint, value in constraint.constant = value() }
         metricMargins.forEach { row, value in row.layoutMargins = value() }
+        metricCapInsets.forEach { button, value in button.applyCharacterEdgeInsets(value()) }
         candidateButtons.enumerated().forEach { index, button in
             button.candidateFont = .systemFont(ofSize: usesPadLayout ? 20 : 18, weight: index == 1 ? .medium : .regular)
         }
@@ -3377,6 +3706,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         metricConstraints.append((constraint, value))
     }
 
+    private func addCharacterEdgeInsets(to button: NativeKeyButton, value: @escaping () -> UIEdgeInsets) {
+        button.applyCharacterEdgeInsets(value())
+        metricCapInsets.append((button, value))
+    }
+
     private func makeRow(_ keys: [String], index: Int) -> UIStackView {
         let row = UIStackView(); row.axis = .horizontal; row.spacing = keyboardMetrics.horizontalGap; row.alignment = .fill
         if let standardPhoneRowHeight {
@@ -3386,15 +3720,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let isThirdLetterRow = layer == .letters && keys.contains("shift")
         let isControlRow = isThirdLetterRow || (layer != .letters && index == 2)
         let isEnglishAlphabet = layer == .letters && mode != .sls
-        row.distribution = usesPadLayout && !isBottom ? .fillEqually : ((isBottom || isControlRow) ? .fill : .fillEqually)
-        // This is the A–L row, not simply “row 1”: a number row shifts all
-        // letter indices down by one.
-        if isEnglishAlphabet && keys.contains("a") {
-            let margins = { UIEdgeInsets(top: 0, left: self.keyboardMetrics.englishSecondRowInset, bottom: 0, right: self.keyboardMetrics.englishSecondRowInset) }
-            row.layoutMargins = margins()
-            row.isLayoutMarginsRelativeArrangement = true
-            metricMargins.append((row, margins))
-        } else if usesPadLayout && isControlRow && keys.count < 10 {
+        let isEnglishNineKeyRow = isEnglishAlphabet && keys.contains("a") && keys.last == "l"
+        if isEnglishNineKeyRow || (isControlRow && isEnglishAlphabet) {
+            KeyboardHitTrace.log(
+                "makeRow[\(index)] keys=\(keys.joined()) nineKey=\(isEnglishNineKeyRow) control=\(isControlRow) stdPhone=\(usesStandardPhoneGeometry) aLInset=\(Int(keyboardMetrics.englishSecondRowInset)) zMGap=\(Int(keyboardMetrics.standardEnglishThirdRowInnerGap))"
+            )
+        }
+        row.distribution = usesPadLayout && !isBottom ? .fillEqually : ((isBottom || isControlRow || isEnglishNineKeyRow) ? .fill : .fillEqually)
+        if usesPadLayout && isControlRow && keys.count < 10 {
             // Sparse phonetic and numeric rows are centred on iPad instead of
             // becoming much wider than the upper rows. Seven-key symbol rows
             // need a larger inset than the nine-key phonetic row.
@@ -3411,6 +3744,27 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         for keyName in keys {
             let button = makeKey(keyName)
             row.addArrangedSubview(button)
+            if isEnglishNineKeyRow, keyName == "a" {
+                addMetricWidth(to: button) {
+                    self.keyboardMetrics.tenKeyWidth + self.keyboardMetrics.englishSecondRowInset
+                }
+                addCharacterEdgeInsets(to: button) {
+                    UIEdgeInsets(top: 0, left: self.keyboardMetrics.englishSecondRowInset, bottom: 0, right: 0)
+                }
+                KeyboardHitTrace.log(
+                    "row A extraWidth=\(Int(keyboardMetrics.englishSecondRowInset)) tenKey=\(Int(keyboardMetrics.tenKeyWidth))"
+                )
+            } else if isEnglishNineKeyRow, keyName == "l" {
+                addMetricWidth(to: button) {
+                    self.keyboardMetrics.tenKeyWidth + self.keyboardMetrics.englishSecondRowInset
+                }
+                addCharacterEdgeInsets(to: button) {
+                    UIEdgeInsets(top: 0, left: 0, bottom: 0, right: self.keyboardMetrics.englishSecondRowInset)
+                }
+                KeyboardHitTrace.log(
+                    "row L extraWidth=\(Int(keyboardMetrics.englishSecondRowInset)) tenKey=\(Int(keyboardMetrics.tenKeyWidth))"
+                )
+            }
             if isBottom {
                 switch keyName {
                 case "123", "ABC": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(56)) }
@@ -3425,12 +3779,31 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishThirdRowUtilityWidth : self.keyboardMetrics.englishThirdRowUtilityWidth) : self.keyboardMetrics.scaledPhoneWidth(31) }
             } else if !usesPadLayout && isControlRow && keyName == "delete" {
                 addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishThirdRowUtilityWidth : self.keyboardMetrics.englishThirdRowUtilityWidth) : self.keyboardMetrics.scaledPhoneWidth(31) }
-            } else if isControlRow {
+            } else if usesStandardPhoneGeometry, isEnglishAlphabet, isControlRow, keyName == "z" {
+                addMetricWidth(to: button) {
+                    self.keyboardMetrics.tenKeyWidth + self.keyboardMetrics.standardEnglishThirdRowInnerGap
+                }
+                addCharacterEdgeInsets(to: button) {
+                    UIEdgeInsets(top: 0, left: self.keyboardMetrics.standardEnglishThirdRowInnerGap, bottom: 0, right: 0)
+                }
+                KeyboardHitTrace.log(
+                    "row Z extraWidth=\(Int(keyboardMetrics.standardEnglishThirdRowInnerGap)) tenKey=\(Int(keyboardMetrics.tenKeyWidth))"
+                )
+            } else if usesStandardPhoneGeometry, isEnglishAlphabet, isControlRow, keyName == "m" {
+                addMetricWidth(to: button) {
+                    self.keyboardMetrics.tenKeyWidth + self.keyboardMetrics.standardEnglishThirdRowInnerGap
+                }
+                addCharacterEdgeInsets(to: button) {
+                    UIEdgeInsets(top: 0, left: 0, bottom: 0, right: self.keyboardMetrics.standardEnglishThirdRowInnerGap)
+                }
+                KeyboardHitTrace.log(
+                    "row M extraWidth=\(Int(keyboardMetrics.standardEnglishThirdRowInnerGap)) tenKey=\(Int(keyboardMetrics.tenKeyWidth))"
+                )
+            } else if isControlRow || (isEnglishNineKeyRow && keyName != "a" && keyName != "l") {
                 letterButtons.append(button)
             }
-            if usesStandardPhoneGeometry, isEnglishAlphabet, isControlRow,
-               keyName == "shift" || keyName == "m" {
-                row.setCustomSpacing(keyboardMetrics.standardEnglishThirdRowInnerGap, after: button)
+            if usesStandardPhoneGeometry, isEnglishAlphabet, isControlRow, keyName == "shift" || keyName == "m" {
+                row.setCustomSpacing(0, after: button)
             }
         }
         for button in letterButtons.dropFirst() { button.widthAnchor.constraint(equalTo: letterButtons[0].widthAnchor).isActive = true }
@@ -3529,10 +3902,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             // A touch-down timer can outlive a rapid tap when the host app
             // changes lines, causing unexpected deletion after the finger has
             // already lifted.
+            button.isExclusiveTouch = true
+            button.trackingHitOutset = 28
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
             longPress.minimumPressDuration = 0.42
+            longPress.allowableMovement = 80
             longPress.cancelsTouchesInView = false
+            longPress.delegate = self
             button.addGestureRecognizer(longPress)
+            button.addAction(UIAction { [weak self] _ in
+                self?.stopDeleteRepeat()
+            }, for: [.touchUpInside, .touchUpOutside])
         }
         if key == "space" {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleSpaceTrackpad(_:)))
@@ -3698,45 +4078,42 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func showKeyPreview(for button: NativeKeyButton) {
         guard let title = button.currentTitle else { return }
-        let keyFrame = button.convert(button.bounds, to: view)
-        // The prediction rail gives the first letter row usable room above
-        // it. Compress that row's balloon to the available height instead of
-        // dropping character preview entirely.
-        let preferredPreviewRise: CGFloat = usesPadLayout ? 64 : 54
-        let previewRise = min(preferredPreviewRise, keyFrame.minY)
-        guard previewRise >= 20 else { return }
+        // KeyboardKit only shows input callouts on phone.
+        guard !usesPadLayout else { return }
+        let capFrame = button.convert(button.paintedCapBounds, to: view)
+        let isLandscape = layoutProfile == .phoneLandscape
+        // KeyboardKit `inputItemMinSize` height is 55; landscape uses the key height.
+        let preferredBubbleHeight: CGFloat = isLandscape ? capFrame.height : 55
+        let bubbleHeight = min(preferredBubbleHeight, max(20, capFrame.minY))
+        guard bubbleHeight >= 20 else { return }
         let preview = keyPreview ?? KeyPreviewView()
         if preview.superview == nil {
             view.addSubview(preview)
             keyPreview = preview
             preview.alpha = 0
         }
-        let maximumPreviewWidth: CGFloat = usesPadLayout ? 132 : 72
-        let previewSize = CGSize(
-            // Give the upper chamber the broader, cap-like profile of the
-            // system preview while retaining a key-width lower stem.
-            width: min(max(keyFrame.width + 34, 62), maximumPreviewWidth),
-            height: keyFrame.height + previewRise
-        )
+        let previewWidth = capFrame.width + KeyPreviewView.sideOverhang
+        let previewHeight = capFrame.height + bubbleHeight
         let minX = view.bounds.minX + 2
-        let maxX = view.bounds.maxX - previewSize.width - 2
-        let x = min(max(keyFrame.midX - previewSize.width / 2, minX), maxX)
+        let maxX = view.bounds.maxX - previewWidth - 2
+        let x = min(max(capFrame.midX - previewWidth / 2, minX), maxX)
         preview.configure(
-            lowerWidth: keyFrame.width,
-            lowerCenterX: keyFrame.midX - x,
-            lowerHeight: keyFrame.height,
-            upperHeight: previewRise
+            stemWidth: capFrame.width,
+            stemCenterX: capFrame.midX - x,
+            stemHeight: capFrame.height,
+            bubbleHeight: bubbleHeight,
+            stemCornerRadius: button.keycapCornerRadius,
+            fillColor: button.calloutFillColor
         )
         preview.frame = CGRect(
             x: x,
-            y: keyFrame.minY - previewRise,
-            width: previewSize.width,
-            height: previewSize.height
+            y: capFrame.minY - bubbleHeight,
+            width: previewWidth,
+            height: previewHeight
         )
         preview.display(title)
+        preview.layoutIfNeeded()
         view.bringSubviewToFront(preview)
-        // Apple's preview appears as part of the pressed state; a springy
-        // scale animation makes it read as a separate floating tooltip.
         preview.alpha = 1
         preview.transform = .identity
     }
@@ -3804,6 +4181,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func press(_ key: String) {
+        if KeyboardHitTrace.isTraced(key) {
+            KeyboardHitTrace.log("controller press(\(key))")
+        }
         guard !isSpaceTrackpadActive else { return }
         // A host can send, clear, or select text without dismissing this
         // keyboard.  In that case our per-key history still describes the
@@ -4014,10 +4394,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         requestPredictions(for: prefix, delay: 0)
     }
 
+    private func updatePredictionsAfterDelete(for prefix: String) {
+        updatePredictions(for: prefix)
+    }
+
     /// Gather host context on the main thread, rank on a dedicated queue, and
     /// return only the newest result to UIKit. Typing and transliteration
     /// therefore never wait for a dictionary scan or candidate animation.
     private func requestPredictions(for prefix: String, delay: TimeInterval) {
+        guard !isDeleteRepeatActive else { return }
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         predictionGeneration += 1
@@ -4260,14 +4645,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// System Delete: a tap removes one grapheme (or one phonetic source
     /// letter while transliterating). A sustained hold later removes words.
     private func deleteOnce(unit: DeleteUnit = .character) {
-        reconcileCompositionStateWithDocument()
+        if !isDeleteRepeatActive {
+            reconcileCompositionStateWithDocument()
+        }
         lastSpaceTimestamp = nil
         resetSpaceSignatureTaps()
         noteInput()
         if let selected = textDocumentProxy.selectedText, !selected.isEmpty {
             clearLocalCompositionKeepingDocument()
             deleteBackwardFromDocument(times: 1)
-            updatePredictions(for: "")
+            updatePredictionsAfterDelete(for: "")
             return
         }
         if unit == .word {
@@ -4314,7 +4701,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             rawBuffer = ""
             visibleEntries.removeAll()
             visibleSources.removeAll()
-            updatePredictions(for: "")
+            updatePredictionsAfterDelete(for: "")
             invalidatePrecedingWordsCache()
             return
         }
@@ -4331,7 +4718,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         rawBuffer = ""
         invalidatePrecedingWordsCache()
-        updatePredictions(for: "")
+        updatePredictionsAfterDelete(for: "")
     }
 
     private func deleteLastOwnedGrapheme() {
@@ -4343,7 +4730,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         trimOwnedEntries(to: split.remaining)
         deleteDocumentText(split.cluster)
-        updatePredictions(for: split.remaining)
+        updatePredictionsAfterDelete(for: split.remaining)
     }
 
     /// Drops trailing Wijesekara history so it matches `remainingRendered`.
@@ -4437,8 +4824,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     @objc private func handleDeleteLongPress(_ recognizer: UILongPressGestureRecognizer) {
         switch recognizer.state {
         case .began:
+            deleteRepeatAnchor = recognizer.view
+            deleteRepeatRecognizer = recognizer
             beginDeleteRepeat()
-        case .ended, .cancelled, .failed:
+        case .ended, .failed:
+            stopDeleteRepeat()
+        case .cancelled:
+            // On device, a competing keyboard-window gesture or a host
+            // round-trip stall often cancels the recognizer while the finger
+            // is still on Delete. Keep repeating until the control itself
+            // stops tracking.
+            if deleteRepeatTouchStillHeld { return }
             stopDeleteRepeat()
         default:
             break
@@ -4448,44 +4844,83 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// The system keyboard keeps deleting characters, then switches to words
     /// after a sustained hold. Touch-down already removed the first unit.
     private func beginDeleteRepeat() {
+        isDeleteRepeatActive = true
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionUpdate = nil
+        predictionGeneration += 1
         if deleteRepeatBeganAt == 0 {
             deleteRepeatBeganAt = CACurrentMediaTime()
         }
-        deleteRepeater?.invalidate()
-        deleteRepeater = nil
         deleteOnce()
         startDeleteRepeatTimer()
     }
 
     private func startDeleteRepeatTimer() {
+        deleteRepeater?.invalidate()
         let interval = deleteRepeatUsesWords
             ? max(0.15, KeyboardPreferences.hotPath.deleteRepeatInterval * 2.2)
             : KeyboardPreferences.hotPath.deleteRepeatInterval
         let repeater = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.handleDeleteRepeatTick()
         }
+        repeater.tolerance = interval * 0.2
         deleteRepeater = repeater
         RunLoop.main.add(repeater, forMode: .common)
     }
 
     private func handleDeleteRepeatTick() {
+        if !deleteRepeatTouchStillHeld {
+            stopDeleteRepeat()
+            return
+        }
         let elapsed = CACurrentMediaTime() - deleteRepeatBeganAt
         if !deleteRepeatUsesWords, elapsed >= 1.0 {
             deleteRepeatUsesWords = true
-            deleteRepeater?.invalidate()
-            deleteRepeater = nil
-            startDeleteRepeatTimer()
             deleteOnce(unit: .word)
+            startDeleteRepeatTimer()
             return
         }
         deleteOnce(unit: deleteRepeatUsesWords ? .word : .character)
     }
 
+    private var deleteRepeatTouchStillHeld: Bool {
+        if let recognizer = deleteRepeatRecognizer {
+            switch recognizer.state {
+            case .began, .changed:
+                return true
+            default:
+                break
+            }
+        }
+        guard let anchor = deleteRepeatAnchor else { return true }
+        if let button = anchor as? UIControl {
+            return button.isTracking || button.isHighlighted
+        }
+        return true
+    }
+
     @objc private func stopDeleteRepeat() {
+        let wasRepeating = isDeleteRepeatActive
         deleteRepeater?.invalidate()
         deleteRepeater = nil
+        isDeleteRepeatActive = false
         deleteRepeatUsesWords = false
         deleteRepeatBeganAt = 0
+        deleteRepeatAnchor = nil
+        deleteRepeatRecognizer = nil
+        if wasRepeating {
+            updatePredictions(for: activeRenderedWord())
+            if needsKeyRebuildWhenGeometryIsStable {
+                rebuildKeys()
+            }
+        }
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
     }
 
     /// Direct Wijesekara alternates that do not fit on a phone's primary
@@ -5014,6 +5449,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func deleteDocumentText(_ text: String, stoppingAt expected: String? = nil) {
         guard !text.isEmpty else { return }
         performDocumentEdit {
+            // Repeat must not poll `documentContextBeforeInput` on every
+            // scalar. Each read is a host round-trip, and a burst of them
+            // stalls `UIKeyboardTaskQueue` on device — after which
+            // `deleteBackward` is ignored until the next press.
+            if self.isDeleteRepeatActive, expected == nil {
+                let count = min(max(text.count, 1), 24)
+                for _ in 0..<count {
+                    self.textDocumentProxy.deleteBackward()
+                }
+                return
+            }
             let expected = expected
                 ?? textDocumentProxy.documentContextBeforeInput.flatMap {
                     NativeBackspace.removingSuffix($0, suffix: text)
