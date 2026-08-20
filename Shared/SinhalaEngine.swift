@@ -376,3 +376,118 @@ enum NativeBackspace {
         return nil
     }
 }
+
+/// Quiet spacing around punctuation. Accidental gaps such as `hello .` or
+/// `" hello` collapse, and sentence terminators gain a following space.
+enum SmartPunctuationSpacing {
+    struct Adjustment: Equatable {
+        var deletePrecedingCount: Int
+        var text: String
+
+        static func unchanged(_ text: String) -> Adjustment {
+            Adjustment(deletePrecedingCount: 0, text: text)
+        }
+    }
+
+    enum FieldKind {
+        case standard
+        case suppressesSentenceSpacing
+    }
+
+    static func adjustment(
+        inserting text: String,
+        before context: String,
+        field: FieldKind = .standard
+    ) -> Adjustment {
+        guard let first = text.first else { return .unchanged(text) }
+
+        var deletePrecedingCount = 0
+        if canCollapseOpeningSpace(before: context), shouldCollapseSpaceAfterOpening(inserting: text) {
+            deletePrecedingCount = 1
+        } else if isClosing(first), isCollapsibleSpace(context.last) {
+            deletePrecedingCount = 1
+        }
+
+        var output = text
+        if shouldAppendSentenceSpace(after: first, field: field), !output.hasSuffix(" ") {
+            let previous = deletePrecedingCount > 0 ? context.dropLast().last : context.last
+            if isSentenceBoundary(terminator: first, previous: previous, field: field) {
+                output.append(" ")
+            }
+        }
+        return Adjustment(deletePrecedingCount: deletePrecedingCount, text: output)
+    }
+
+    static func applied(
+        inserting text: String,
+        before context: String,
+        field: FieldKind = .standard
+    ) -> String {
+        let change = adjustment(inserting: text, before: context, field: field)
+        var result = context
+        if change.deletePrecedingCount > 0 {
+            result = String(result.dropLast(change.deletePrecedingCount))
+        }
+        return result + change.text
+    }
+
+    static func isOpening(_ character: Character) -> Bool {
+        switch character {
+        case "(", "[", "{", "\"", "“", "‘", "«", "‹": return true
+        default: return false
+        }
+    }
+
+    static func shouldCollapseSpaceAfterOpening(inserting text: String) -> Bool {
+        guard let first = text.first else { return false }
+        return !first.isWhitespace && !first.isNewline
+    }
+
+    static func needsContextRead(inserting text: String) -> Bool {
+        guard let first = text.first else { return false }
+        return isClosing(first)
+    }
+
+    static func canCollapseOpeningSpace(before context: String) -> Bool {
+        guard let space = context.last, isCollapsibleSpace(space),
+              let opener = context.dropLast().last else { return false }
+        return isOpening(opener)
+    }
+
+    static func hasTrailingSentenceSpace(_ context: String) -> Bool {
+        guard let space = context.last, isCollapsibleSpace(space),
+              let terminator = context.dropLast().last else { return false }
+        return sentenceTerminators.contains(terminator)
+    }
+
+    private static let sentenceTerminators: Set<Character> = [".", "?", "!", "…", "෴"]
+
+    private static func isClosing(_ character: Character) -> Bool {
+        switch character {
+        case ".", ",", ";", ":", "!", "?", ")", "]", "}", "”", "’", "»", "›", "…", "෴":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isCollapsibleSpace(_ character: Character?) -> Bool {
+        character == " " || character == "\u{00A0}"
+    }
+
+    private static func shouldAppendSentenceSpace(after character: Character, field: FieldKind) -> Bool {
+        field == .standard && sentenceTerminators.contains(character)
+    }
+
+    private static func isSentenceBoundary(
+        terminator: Character,
+        previous: Character?,
+        field: FieldKind
+    ) -> Bool {
+        guard field == .standard, let previous, !previous.isWhitespace, !previous.isNewline else {
+            return false
+        }
+        if terminator == "." { return previous.isLetter }
+        return true
+    }
+}

@@ -384,9 +384,33 @@ private final class NativeKeyButton: UIButton {
         return longPressWasHandled
     }
 
-    func setHint(_ hint: String?) {
-        hintLabel.text = hint
-        hintLabel.isHidden = hint == nil
+    func setHint(_ hint: String?, animated: Bool = false) {
+        let apply = {
+            self.hintLabel.text = hint
+            self.hintLabel.isHidden = hint == nil
+            self.hintLabel.alpha = hint == nil ? 0 : 1
+        }
+        guard animated, !UIAccessibility.isReduceMotionEnabled else {
+            apply()
+            return
+        }
+        if hint == nil {
+            // Keep the current glyph visible while it fades, then clear.
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                self.hintLabel.alpha = 0
+            } completion: { finished in
+                guard finished else { return }
+                self.hintLabel.text = nil
+                self.hintLabel.isHidden = true
+            }
+        } else {
+            hintLabel.text = hint
+            hintLabel.isHidden = false
+            hintLabel.alpha = 0
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                self.hintLabel.alpha = 1
+            }
+        }
     }
 
     /// A pending kombuwa already appears in the host. The ring/chip is only
@@ -2504,6 +2528,7 @@ private final class AlternateCharacterPickerView: UIView {
 
 final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedback, UIGestureRecognizerDelegate {
     private static let topEmojiKeyPrefix = "topEmoji:"
+    private static let oneWordEnglishSpaceTitle = "English · one word"
     private static let layoutLogger = Logger(
         subsystem: "lk.org.akshara.keyboard",
         category: "KeyboardLayout"
@@ -2618,6 +2643,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var ownEditClearWork: DispatchWorkItem?
     private var mode: SinhalaEngine.Mode = .sls
     private var lastSpaceTimestamp: TimeInterval?
+    /// After Space following `(`, `"`, or similar, the next character eats
+    /// that gap so `" hello` becomes `"hello` without a context read on every
+    /// later letter.
+    private var collapseSpaceAfterOpeningPunctuation = false
     /// Bottom-anchored keyboard strip. Subviews may overflow the top into
     /// the Liquid Glass lip; default UIView hit-testing would miss those taps.
     private final class OverflowHitView: UIView {
@@ -2663,10 +2692,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var predictionPrefix = ""
     private let predictionQueue = DispatchQueue(label: "lk.org.akshara.prediction", qos: .userInitiated)
     private var predictionGeneration = 0
-    /// Set only by UIKit when the host editor can have changed independently
-    /// of this extension. Avoid a synchronous proxy-context lookup for every
-    /// ordinary keystroke.
+    /// Set by UIKit when the host editor can have changed independently of
+    /// this extension. A live composition also validates its host rendering
+    /// before the next key: some hosts send their reset callback while an
+    /// extension-owned edit is still being coalesced.
     private var documentStateMayHaveChanged = true
+    /// Last `UITextDocumentProxy.documentIdentifier` observed while attached.
+    /// A change is a new field even when document context is nil.
+    private var lastDocumentIdentifier: UUID?
     /// Preceding-word context for ranking. Refreshed only when the host may
     /// have changed or a word boundary commits — not on every letter.
     private var cachedPrecedingWords: [String] = []
@@ -2710,11 +2743,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var spaceSignatureTapCount = 0
     private var spaceSignatureTapTimestamp: TimeInterval = 0
     private var spaceSignatureRestoreWork: DispatchWorkItem?
+    private var temporaryLatinWordActive = false
     private var appliedLayoutProfile: LayoutProfile?
     private var appliedLayoutWidth: CGFloat = 0
     private var lastLoggedLayoutBounds: CGSize = .zero
-    private var lastLoggedVisibilityReason: String = ""
-    private var pendingRevealWorkItem: DispatchWorkItem?
     private var needsKeyRebuildWhenGeometryIsStable = true
     private var appliedReturnKeyTitle: String?
     private var appliedKeyboardType: UIKeyboardType?
@@ -2933,15 +2965,23 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func applyHostHeightConstraint(reason: String) {
         let height = normalKeyboardHeight
         keyboardHostHeight?.constant = height
-        preferredContentSize = CGSize(width: 0, height: height)
         if emojiPicker == nil {
             keyboardContentHeight?.constant = height
             applyCandidateBarLayout()
         }
+        if isPreparingToAppear, keyboardHostHeight?.isActive == false {
+            view.setNeedsUpdateConstraints()
+        }
         if lastLoggedHostHeightReport != height {
             lastLoggedHostHeightReport = height
             Self.layoutLogger.debug(
-                "hostHeight \(reason, privacy: .public) reported=\(Int(height), privacy: .public)"
+                "hostHeight \(reason, privacy: .public) reported=\(Int(height), privacy: .public) active=\(self.keyboardHostHeight?.isActive == true, privacy: .public)"
+            )
+            NSLog(
+                "[AKSHARA-HEIGHT] hostHeight %@ reported=%d active=%d",
+                reason,
+                Int(height),
+                keyboardHostHeight?.isActive == true ? 1 : 0
             )
         }
     }
@@ -2956,27 +2996,31 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func logKeyboardLayout(_ event: String) {
         let bounds = view.bounds.size
         let frame = view.frame.size
+        let inputBounds = inputView?.bounds.size ?? .zero
         let profile = String(describing: layoutProfile)
         let contentH = keyboardContentHeight?.constant ?? -1
         let hostH = keyboardHostHeight?.constant ?? -1
+        let hostActive = keyboardHostHeight?.isActive == true
         let containerH = keyboardContentContainer.bounds.height
         let superH = view.superview?.bounds.height ?? -1
-        let windowH = view.window?.bounds.height ?? -1
-        let preferredSize = preferredContentSize.height
+        let windowSize = view.window?.bounds.size ?? .zero
         let preferred = normalKeyboardHeight
         let oversize = max(0, bounds.height - preferred)
+        let preparing = isPreparingToAppear
         Self.layoutLogger.debug(
             """
             \(event, privacy: .public) \
             bounds=\(Int(bounds.width), privacy: .public)x\(Int(bounds.height), privacy: .public) \
             frame=\(Int(frame.width), privacy: .public)x\(Int(frame.height), privacy: .public) \
+            input=\(Int(inputBounds.width), privacy: .public)x\(Int(inputBounds.height), privacy: .public) \
             preferredHeight=\(Int(preferred), privacy: .public) \
-            preferredSize=\(Int(preferredSize), privacy: .public) \
             contentH=\(Int(contentH), privacy: .public) \
             hostH=\(Int(hostH), privacy: .public) \
+            hostActive=\(hostActive, privacy: .public) \
+            preparing=\(preparing, privacy: .public) \
             containerH=\(Int(containerH), privacy: .public) \
             superH=\(Int(superH), privacy: .public) \
-            windowH=\(Int(windowH), privacy: .public) \
+            window=\(Int(windowSize.width), privacy: .public)x\(Int(windowSize.height), privacy: .public) \
             oversize=\(Int(oversize), privacy: .public) \
             glassLip=\(Int(self.liquidGlassTopLip), privacy: .public) \
             alpha=\(String(format: "%.2f", self.view.alpha), privacy: .public) \
@@ -2985,6 +3029,20 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             profile=\(profile, privacy: .public) \
             pending=\(self.needsKeyRebuildWhenGeometryIsStable, privacy: .public)
             """
+        )
+        NSLog(
+            "[AKSHARA-HEIGHT] %@ view=%.0fx%.0f input=%.0fx%.0f window=%.0fx%.0f hostActive=%d preparing=%d preferred=%.0f oversize=%.0f",
+            event,
+            bounds.width,
+            bounds.height,
+            inputBounds.width,
+            inputBounds.height,
+            windowSize.width,
+            windowSize.height,
+            hostActive ? 1 : 0,
+            preparing ? 1 : 0,
+            preferred,
+            oversize
         )
     }
 
@@ -3044,7 +3102,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             keyboardView.allowsSelfSizing = false
             inputView = keyboardView
         }
-        preferredContentSize = CGSize(width: 0, height: 245)
     }
 
     override func viewDidLoad() {
@@ -3057,14 +3114,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyFeedback = KeyFeedback(view: view)
         keyFeedback?.prepare()
         needsKeyRebuildWhenGeometryIsStable = true
-        hideHostWindowUntilSettled()
         registerForUserInterfaceStyleChanges()
+        logKeyboardLayout("viewDidLoad after configure")
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        isPreparingToAppear = true
         applyHostHeightConstraint(reason: "viewWillAppear")
-        hideHostWindowUntilSettled()
+        view.setNeedsUpdateConstraints()
         logKeyboardLayout("viewWillAppear")
         KeyboardPreferences.reload()
         documentStateMayHaveChanged = true
@@ -3075,9 +3133,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let selectedMode = KeyboardPreferences.selectedMode()
         var needsRebuild = keyboardStack.arrangedSubviews.isEmpty
         if selectedMode != mode {
-            commitActiveComposition()
+            cancelLocalCompositionWithoutCommit()
             mode = selectedMode
             needsRebuild = true
+        }
+        if noteDocumentIdentifierChange() {
+            cancelLocalCompositionWithoutCommit()
         }
         shouldAnimateSpaceLabel = true
         updateKeyboardAppearance()
@@ -3086,6 +3147,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyFeedback?.prepare()
         let title = returnKeyTitle
         let keyboardType = textDocumentProxy.keyboardType
+        if appliedKeyboardType != nil, keyboardType != appliedKeyboardType {
+            cancelLocalCompositionWithoutCommit()
+        }
         if title != appliedReturnKeyTitle || keyboardType != appliedKeyboardType {
             appliedReturnKeyTitle = title
             appliedKeyboardType = keyboardType
@@ -3096,7 +3160,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         } else {
             applyKeyboardMetrics()
         }
-        updatePresentationVisibility()
+    }
+
+    override func updateViewConstraints() {
+        if isPreparingToAppear, let constraint = keyboardHostHeight {
+            constraint.constant = normalKeyboardHeight
+            if !constraint.isActive {
+                logKeyboardLayout("updateViewConstraints activating host height")
+                constraint.isActive = true
+            }
+        }
+        logKeyboardLayout("updateViewConstraints")
+        super.updateViewConstraints()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -3107,7 +3182,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if keyboardStack.arrangedSubviews.isEmpty {
             rebuildKeys()
         }
-        updatePresentationVisibility()
         if showsCandidateBar {
             SinhalaPredictionProviderRegistry.shared.prepareBundledModelsInBackground()
             if candidates.allSatisfy({ $0 == nil }) {
@@ -3118,7 +3192,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        updatePresentationVisibility()
         let bounds = view.bounds.size
         if abs(bounds.width - lastLoggedLayoutBounds.width) > 0.5
             || abs(bounds.height - lastLoggedLayoutBounds.height) > 0.5 {
@@ -3133,8 +3206,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             || abs(bounds.height - lastLoggedLayoutBounds.height) > 0.5 {
             lastLoggedLayoutBounds = bounds
             logKeyboardLayout("viewDidLayoutSubviews")
+            if bounds.height > normalKeyboardHeight + 8 {
+                logTallHostHierarchy("viewDidLayoutSubviews")
+            }
         }
-        updatePresentationVisibility()
         syncKeyboardAppearanceIfNeeded(rebuild: true)
         refreshKeyboardChrome(rebuildIfStyleChanged: true)
         guard hasUsableKeyboardWidth else {
@@ -3157,79 +3232,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
-    /// Hide the hosted keyboard window until height is near the calibrated
-    /// strip. Softens the system 874→473→245 attach sequence; cannot remove
-    /// the host-app inset animation itself (Apple limitation). iOS 16 does
-    /// not use that attach dance — blanking the window there looks like a
-    /// crashed keyboard and iOS switches input modes.
-    private func hideHostWindowUntilSettled() {
-        guard !usesIOS16KeyboardAppearance else { return }
-        view.alpha = 0
-        view.window?.alpha = 0
-    }
-
-    private func updatePresentationVisibility() {
-        if usesIOS16KeyboardAppearance {
-            applyPresentationAlpha(1, reason: "ios16")
-            return
-        }
-        let preferred = normalKeyboardHeight
-        let height = view.bounds.height
-        let reason: String
-        if !hasUsableKeyboardWidth {
-            reason = "zeroWidth"
-        } else if height < preferred - 8 {
-            reason = "tooShort"
-        } else if height > preferred + 8 {
-            reason = "tooTall"
-        } else {
-            reason = "settled"
-        }
-        let settled = reason == "settled"
-        if !settled {
-            pendingRevealWorkItem?.cancel()
-            pendingRevealWorkItem = nil
-            applyPresentationAlpha(0, reason: reason)
-            return
-        }
-        guard pendingRevealWorkItem == nil, view.alpha < 0.99 else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.pendingRevealWorkItem = nil
-            guard abs(self.view.bounds.height - self.normalKeyboardHeight) <= 8 else {
-                self.applyPresentationAlpha(0, reason: "reveal-aborted")
-                return
-            }
-            UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
-                self.applyPresentationAlpha(1, reason: "settled-fade")
-            }
-        }
-        pendingRevealWorkItem = work
-        DispatchQueue.main.async(execute: work)
-    }
-
-    private func applyPresentationAlpha(_ target: CGFloat, reason: String) {
-        let alphaChanged = abs(view.alpha - target) > 0.01
-        if alphaChanged { view.alpha = target }
-        if let window = view.window, abs(window.alpha - target) > 0.01 {
-            window.alpha = target
-        }
-        if reason != lastLoggedVisibilityReason || alphaChanged {
-            lastLoggedVisibilityReason = reason
-            logKeyboardLayout(
-                "visibility \(reason) alpha->\(String(format: "%.0f", target)) windowAlpha=\(String(format: "%.2f", view.window?.alpha ?? -1))"
-            )
-            if reason == "tooTall" {
-                logTallHostHierarchy(reason)
-            }
-        }
-    }
-
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        lastLoggedVisibilityReason = ""
-        pendingRevealWorkItem?.cancel()
-        pendingRevealWorkItem = nil
+        isPreparingToAppear = false
         stopDeleteRepeat()
         hideKeyPreview(animated: false)
         hideAlternatePicker()
@@ -3242,8 +3247,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         spaceSignatureRestoreWork = nil
         resetSpaceSignatureTaps()
         hidePendingCompositionChrome()
-        abandonPendingComposition(removingFromDocument: false)
+        cancelLocalCompositionWithoutCommit()
         SinhalaPredictionProviderRegistry.shared.flushPendingPersistence()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        // Drop the host-height request so the next presentation can wait for
+        // `viewWillAppear` → `updateViewConstraints` again.
+        keyboardHostHeight?.isActive = false
+        logKeyboardLayout("viewDidDisappear")
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
@@ -3263,6 +3276,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // next keystroke.
         documentStateMayHaveChanged = true
         updateInputTraitsIfNeeded()
+        collapseSpaceAfterOpeningPunctuation = false
+        reconcileCompositionStateWithDocument()
+    }
+
+    override func selectionDidChange(_ textInput: UITextInput?) {
+        super.selectionDidChange(textInput)
+        guard !isApplyingOwnEdit else { return }
+        documentStateMayHaveChanged = true
+        collapseSpaceAfterOpeningPunctuation = false
+        reconcileCompositionStateWithDocument()
     }
 
     private func refreshInputModeSwitchKeyWhenConnected() {
@@ -3286,7 +3309,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         updateKeyboardAppearance()
         let title = returnKeyTitle
         let keyboardType = textDocumentProxy.keyboardType
+        let keyboardTypeChanged = appliedKeyboardType != nil && keyboardType != appliedKeyboardType
         guard title != appliedReturnKeyTitle || keyboardType != appliedKeyboardType else { return }
+        if keyboardTypeChanged {
+            cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
+        }
         appliedReturnKeyTitle = title
         appliedKeyboardType = keyboardType
         rebuildKeys()
@@ -3439,15 +3466,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
         keyboardContentHeight = keyboardContentContainer.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
         keyboardContentHeight.priority = UILayoutPriority(999)
-        keyboardHostHeight = view.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
-        keyboardHostHeight.priority = UILayoutPriority(999)
+        let hostHeight = view.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
+        hostHeight.priority = UILayoutPriority(999)
+        keyboardHostHeight = hostHeight
         NSLayoutConstraint.activate([
             keyboardContentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             keyboardContentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             keyboardContentContainer.topAnchor.constraint(greaterThanOrEqualTo: view.topAnchor),
             keyboardContentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            keyboardContentHeight,
-            keyboardHostHeight
+            keyboardContentHeight
         ])
         applyHostHeightConstraint(reason: "configureLayout")
 
@@ -3919,6 +3946,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
+            if KeyboardPreferences.englishForOneWordEnabled(), mode == .smartPhonetic {
+                let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(handleSpaceEnglishWordSwipe(_:)))
+                swipeUp.direction = .up
+                swipeUp.delegate = self
+                button.addGestureRecognizer(swipeUp)
+                let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(handleSpaceEnglishWordSwipe(_:)))
+                swipeDown.direction = .down
+                swipeDown.delegate = self
+                button.addGestureRecognizer(swipeDown)
+                button.accessibilityHint = "Swipe up for English, one word. Swipe down to cancel."
+            }
         }
         if layer == .letters, mode == .sls, wijesekaraAlternates(for: key) != nil {
             button.accessibilityIdentifier = key
@@ -4033,6 +4071,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func beginSpaceTrackpad(from recognizer: UILongPressGestureRecognizer, button: NativeKeyButton) {
         button.markLongPressHandled()
+        endTemporaryLatinWordMode()
         commitActiveComposition()
         resetSpaceSignatureTaps()
         setTrackpadAppearance(active: true)
@@ -4066,6 +4105,27 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         trackpadSurface.isUserInteractionEnabled = active
         trackpadSurface.alpha = active ? 0.011 : 0
         candidateBar.isUserInteractionEnabled = !active
+    }
+
+    @objc private func handleSpaceEnglishWordSwipe(_ recognizer: UISwipeGestureRecognizer) {
+        guard recognizer.state == .ended,
+              KeyboardPreferences.englishForOneWordEnabled(),
+              mode == .smartPhonetic,
+              layer == .letters,
+              let button = recognizer.view as? NativeKeyButton else { return }
+        guard !isSpaceTrackpadActive, !spaceSignatureHoldPending, !spaceSignatureHoldConsumed else { return }
+        // Swipe already cancels this touch (`cancelsTouchesInView`). Do not
+        // leave `longPressWasHandled` set — the cancelled touch never runs
+        // `consumeLongPressHandled()`, so the *next* Space tap would be eaten.
+        _ = button.consumeLongPressHandled()
+        if temporaryLatinWordActive {
+            // Swipe up or down cancels without inserting a space.
+            endTemporaryLatinWordMode()
+            return
+        }
+        // Enter only on swipe up.
+        guard recognizer.direction == .up else { return }
+        beginTemporaryLatinWordMode()
     }
 
     private func setKeyGlyphsHidden(_ hidden: Bool, animated: Bool) {
@@ -4146,6 +4206,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             return String(key.dropFirst(Self.topEmojiKeyPrefix.count))
         }
         if key == "space" {
+            if temporaryLatinWordActive {
+                return Self.oneWordEnglishSpaceTitle
+            }
             switch mode {
             case .sls: return "අක්ෂර Wijesekara"
             case .phonetic: return "අක්ෂර Phonetic"
@@ -4165,6 +4228,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func hint(for key: String) -> String? {
+        if temporaryLatinWordActive { return nil }
         if mode == .sls, layer == .letters, let alternate = wijesekaraAlternates(for: key)?.first {
             // Show the held-character result in the same quiet upper-right
             // position used for phonetic transliteration hints.
@@ -4224,12 +4288,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 rebuildKeys()
             }
         case "return":
+            if temporaryLatinWordActive {
+                endTemporaryLatinWordMode()
+            }
             commit(suffix: "\n")
+            cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
             invalidatePrecedingWordsCache()
         case "emoji": showEmojiPicker()
         case "globe": break // Routed through handleInputModeList(_:with:).
         case "dismiss":
-            commitActiveComposition()
+            cancelLocalCompositionWithoutCommit()
             dismissKeyboard()
         case "shift":
             shift.toggle()
@@ -4558,7 +4626,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // by committing its separator as part of the selection, so the next
         // keystroke begins the following word rather than appending to it.
         let inserted = isTrueName ? AksharaEasterEgg.trueNameInsert : candidate
-        insertIntoDocument(inserted + " ")
+        insertIntoDocument(inserted + " ", applyingSmartSpacing: true)
         // Learn only a deliberate dictionary selection. The true-name flourish
         // is a one-shot insert and must not enter the personal model.
         if isTrueName {
@@ -4650,6 +4718,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         lastSpaceTimestamp = nil
         resetSpaceSignatureTaps()
+        collapseSpaceAfterOpeningPunctuation = false
         noteInput()
         if let selected = textDocumentProxy.selectedText, !selected.isEmpty {
             clearLocalCompositionKeepingDocument()
@@ -4762,6 +4831,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func clearLocalCompositionKeepingDocument() {
+        cancelLocalCompositionWithoutCommit()
+    }
+
+    /// Drop every in-keyboard buffer without inserting it. Host text already
+    /// written for this composition stays where it is; a new field must not
+    /// receive the previous word.
+    private func cancelLocalCompositionWithoutCommit(refreshingPredictions: Bool = false) {
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionUpdate = nil
+        predictionGeneration += 1
         rawBuffer = ""
         visibleEntries.removeAll()
         visibleSources.removeAll()
@@ -4770,7 +4849,28 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         phoneticCompositionAnchor = nil
         committedPhoneticSegments.removeAll()
         abandonPendingComposition(removingFromDocument: false)
+        predictionPrefix = ""
+        lastSpaceTimestamp = nil
+        collapseSpaceAfterOpeningPunctuation = false
         invalidatePrecedingWordsCache()
+        candidates = [nil, nil, nil]
+        candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
+        applyKeyTouchWeights([:])
+        endTemporaryLatinWordMode()
+        if refreshingPredictions {
+            updatePredictions(for: "")
+        }
+    }
+
+    @discardableResult
+    private func noteDocumentIdentifierChange() -> Bool {
+        let current = textDocumentProxy.documentIdentifier
+        let changed = CompositionHygiene.documentIdentifierChanged(
+            previous: lastDocumentIdentifier,
+            current: current
+        )
+        lastDocumentIdentifier = current
+        return changed
     }
 
     /// Delete `word` only when it is still immediately before the caret.
@@ -4788,37 +4888,30 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// Keeps the extension-owned composition history in sync with the host
     /// editor without reading or retaining its text. `UITextDocumentProxy`
     /// can change independently when the host sends a message, clears a
-    /// draft, applies an edit, or the user selects text. We only need to know
-    /// whether the rendered word owned by this keyboard remains immediately
-    /// before the insertion point.
+    /// draft, applies an edit, or the user selects text. A new
+    /// `documentIdentifier` always cancels leftover Smart Phonetic state,
+    /// including when context is nil (common without Full Access).
     private func reconcileCompositionStateWithDocument() {
-        guard documentStateMayHaveChanged else { return }
-        documentStateMayHaveChanged = false
+        if noteDocumentIdentifierChange() {
+            documentStateMayHaveChanged = false
+            cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
+            return
+        }
         let renderedWord = activeRenderedWord()
-        guard !renderedWord.isEmpty else { return }
-
-        // Nil context is not evidence that the host discarded our word —
-        // keyboard extensions often receive nil without Full Access. Sinhala
-        // conjuncts also make `String.hasSuffix` fail, which was abandoning
-        // Wijesekara kombuwa / prediction state between keystrokes.
-        guard let before = textDocumentProxy.documentContextBeforeInput else { return }
-        guard !NativeBackspace.endsWith(before, suffix: renderedWord) else { return }
-
-        pendingPredictionUpdate?.cancel()
-        pendingPredictionUpdate = nil
-        predictionGeneration += 1
-        rawBuffer = ""
-        visibleEntries.removeAll()
-        visibleSources.removeAll()
-        phoneticBuffer = ""
-        lastPhoneticRendered = ""
-        phoneticCompositionAnchor = nil
-        committedPhoneticSegments.removeAll()
-        abandonPendingComposition(removingFromDocument: false)
-        predictionPrefix = ""
-        invalidatePrecedingWordsCache()
-        candidates = [nil, nil, nil]
-        candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
+        // Do not let `isApplyingOwnEdit` hide a host's immediate send/reset.
+        // WhatsApp-like editors can clear and reuse the same text input during
+        // the async callback window.  When a local preview exists, checking
+        // its suffix before accepting the next key is the only reliable
+        // boundary; an ordinary idle keystroke still avoids the proxy read.
+        let mustValidateActiveComposition = !renderedWord.isEmpty
+        guard documentStateMayHaveChanged || mustValidateActiveComposition else { return }
+        documentStateMayHaveChanged = false
+        guard CompositionHygiene.documentContextInvalidatedComposition(
+            renderedWord: renderedWord,
+            documentContextBeforeInput: textDocumentProxy.documentContextBeforeInput,
+            contextIsExpected: hasFullAccess
+        ) else { return }
+        cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
     }
 
     @objc private func handleDeleteLongPress(_ recognizer: UILongPressGestureRecognizer) {
@@ -4921,6 +5014,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         true
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let swipe = gestureRecognizer as? UISwipeGestureRecognizer,
+              let button = swipe.view as? NativeKeyButton,
+              button.keyName == "space" else { return true }
+        // Enter is swipe-up only; exit also accepts swipe-down.
+        if swipe.direction == .down {
+            return temporaryLatinWordActive
+        }
+        return swipe.direction == .up
     }
 
     /// Direct Wijesekara alternates that do not fit on a phone's primary
@@ -5089,7 +5193,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         visibleEntries.removeAll()
         visibleSources.removeAll()
         updatePredictions(for: "")
-        insertIntoDocument(formattedSuffix)
+        insertIntoDocument(formattedSuffix, applyingSmartSpacing: true)
     }
 
     /// Direct Wijesekara insert. Kombuwa and independent vowels are written
@@ -5097,6 +5201,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// syllable (`ෙ` + `ක` → `කෙ`, `අ` + `ා` → `ආ`).
     private func insertLive(_ source: String) {
         noteInput()
+        if temporaryLatinWordActive {
+            insertIntoDocument(source, applyingSmartSpacing: true)
+            return
+        }
         if mode != .sls {
             phoneticBuffer += source
             updatePhoneticComposition()
@@ -5162,11 +5270,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // delete only until the original host context is restored. This avoids
         // both leftover viramas and deletion of the preceding space.
         if lastPhoneticRendered.isEmpty {
-            phoneticCompositionAnchor = textDocumentProxy.documentContextBeforeInput
+            let spacing = smartSpacingAdjustment(for: rendered)
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            phoneticCompositionAnchor = spacing.deletePrecedingCount > 0
+                ? String(before.dropLast(spacing.deletePrecedingCount))
+                : before
+            insertIntoDocument(spacing)
         } else {
             removeActivePhoneticRendering()
+            insertIntoDocument(rendered)
         }
-        insertIntoDocument(rendered)
 
         lastPhoneticRendered = rendered
         schedulePredictions(for: rendered)
@@ -5174,7 +5287,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func commitPhoneticComposition(suffix: String = "") {
         guard !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty else { return }
-        insertIntoDocument(suffix)
+        insertIntoDocument(suffix, applyingSmartSpacing: !suffix.isEmpty)
         phoneticBuffer = ""
         lastPhoneticRendered = ""
         phoneticCompositionAnchor = nil
@@ -5313,8 +5426,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func writePendingClusterToDocument(_ rendered: String, source: String) {
-        pendingHostAnchor = textDocumentProxy.documentContextBeforeInput
-        insertIntoDocument(rendered)
+        let spacing = smartSpacingAdjustment(for: rendered)
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        pendingHostAnchor = spacing.deletePrecedingCount > 0
+            ? String(before.dropLast(spacing.deletePrecedingCount))
+            : before
+        insertIntoDocument(spacing)
         pendingHostRendered = rendered
         rawBuffer += source
         visibleEntries.append(rendered)
@@ -5402,7 +5519,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         rawBuffer += source
         visibleEntries.append(rendered)
         visibleSources.append(source)
-        insertIntoDocument(rendered)
+        insertIntoDocument(rendered, applyingSmartSpacing: true)
         schedulePredictions(for: visibleEntries.joined())
     }
 
@@ -5431,9 +5548,53 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         DispatchQueue.main.async(execute: work)
     }
 
-    private func insertIntoDocument(_ text: String) {
-        guard !text.isEmpty else { return }
-        performDocumentEdit { textDocumentProxy.insertText(text) }
+    private var smartPunctuationFieldKind: SmartPunctuationSpacing.FieldKind {
+        switch textDocumentProxy.keyboardType {
+        case .URL, .emailAddress, .webSearch, .decimalPad, .numberPad, .phonePad, .asciiCapableNumberPad:
+            return .suppressesSentenceSpacing
+        default:
+            return .standard
+        }
+    }
+
+    private func smartSpacingAdjustment(for text: String) -> SmartPunctuationSpacing.Adjustment {
+        guard KeyboardPreferences.hotPath.smartPunctuationSpacingEnabled,
+              !text.isEmpty, text != " ", !text.hasPrefix("\n") else {
+            return .unchanged(text)
+        }
+        if collapseSpaceAfterOpeningPunctuation,
+           SmartPunctuationSpacing.shouldCollapseSpaceAfterOpening(inserting: text) {
+            collapseSpaceAfterOpeningPunctuation = false
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            if SmartPunctuationSpacing.canCollapseOpeningSpace(before: before) {
+                return SmartPunctuationSpacing.Adjustment(deletePrecedingCount: 1, text: text)
+            }
+            return .unchanged(text)
+        }
+        guard SmartPunctuationSpacing.needsContextRead(inserting: text) else {
+            return .unchanged(text)
+        }
+        return SmartPunctuationSpacing.adjustment(
+            inserting: text,
+            before: textDocumentProxy.documentContextBeforeInput ?? "",
+            field: smartPunctuationFieldKind
+        )
+    }
+
+    private func insertIntoDocument(_ text: String, applyingSmartSpacing: Bool = false) {
+        insertIntoDocument(applyingSmartSpacing ? smartSpacingAdjustment(for: text) : .unchanged(text))
+    }
+
+    private func insertIntoDocument(_ change: SmartPunctuationSpacing.Adjustment) {
+        guard change.deletePrecedingCount > 0 || !change.text.isEmpty else { return }
+        performDocumentEdit {
+            for _ in 0..<change.deletePrecedingCount {
+                self.textDocumentProxy.deleteBackward()
+            }
+            if !change.text.isEmpty {
+                self.textDocumentProxy.insertText(change.text)
+            }
+        }
     }
 
     private func deleteBackwardFromDocument(times: Int) {
@@ -5540,12 +5701,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// Matches the standard iOS double-space shortcut: the second tap turns
     /// the prior space into a period followed by one ready for the next word.
     private func insertSpace() {
+        if temporaryLatinWordActive {
+            endTemporaryLatinWordMode()
+        }
         let now = CACurrentMediaTime()
         let wasIdle = isIdleComposition
         // The second tap follows the first committed space. Only replace that
         // space when it follows a word; never manufacture punctuation at the
         // start of a field or after an existing sentence terminator.
-        let characterBeforeSpace = textDocumentProxy.documentContextBeforeInput?.dropLast().last
+        let beforeInput = textDocumentProxy.documentContextBeforeInput ?? ""
+        let characterBeforeSpace = beforeInput.dropLast().last
         let followsWord = characterBeforeSpace.map { $0.isLetter || $0.isNumber } ?? false
         let isDoubleSpace = KeyboardPreferences.hotPath.doubleSpacePeriodEnabled
             && rawBuffer.isEmpty && followsWord
@@ -5556,12 +5721,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self.textDocumentProxy.insertText(". ")
             }
             lastSpaceTimestamp = nil
+            collapseSpaceAfterOpeningPunctuation = false
             invalidatePrecedingWordsCache()
             noteIdleSpaceSignatureTap(wasIdle: wasIdle, at: now)
             return
         }
 
+        let followsOpening = beforeInput.last.map(SmartPunctuationSpacing.isOpening) ?? false
         commit(suffix: " ")
+        collapseSpaceAfterOpeningPunctuation =
+            KeyboardPreferences.hotPath.smartPunctuationSpacingEnabled && followsOpening
         noteIdleSpaceSignatureTap(wasIdle: wasIdle, at: now)
         lastSpaceTimestamp = now
         invalidatePrecedingWordsCache()
@@ -5578,6 +5747,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// Seven idle Space taps, no slower than a second apart, wink the caption.
     /// Each tap still inserts normally, so a run of spaces is never eaten.
     private func noteIdleSpaceSignatureTap(wasIdle: Bool, at now: TimeInterval) {
+        guard !temporaryLatinWordActive else {
+            resetSpaceSignatureTaps()
+            return
+        }
         guard wasIdle else {
             resetSpaceSignatureTaps()
             return
@@ -5613,6 +5786,43 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         spaceSignatureRestoreWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.05, execute: work)
+    }
+
+    private func beginTemporaryLatinWordMode() {
+        commitActiveComposition()
+        temporaryLatinWordActive = true
+        // Clear any leftover Space suppress flag from the enter swipe.
+        _ = spaceKeyButton()?.consumeLongPressHandled()
+        updatePredictions(for: "")
+        refreshLetterHints(animated: true)
+        guard let button = spaceKeyButton() else { return }
+        spaceSignatureRestoreWork?.cancel()
+        button.presentSpaceSignature(Self.oneWordEnglishSpaceTitle)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self, weak button] in
+            guard let self, let button, self.temporaryLatinWordActive else { return }
+            button.restoreCollapsedSpaceTitle(Self.oneWordEnglishSpaceTitle)
+        }
+    }
+
+    private func endTemporaryLatinWordMode() {
+        guard temporaryLatinWordActive else { return }
+        temporaryLatinWordActive = false
+        _ = spaceKeyButton()?.consumeLongPressHandled()
+        refreshLetterHints(animated: true)
+        spaceKeyButton()?.restoreCollapsedSpaceTitle(title(for: "space") ?? "අක්ෂර")
+    }
+
+    private func refreshLetterHints(animated: Bool) {
+        guard layer == .letters else { return }
+        for case let row as UIStackView in keyboardStack.arrangedSubviews {
+            for case let button as NativeKeyButton in row.arrangedSubviews {
+                let key = button.keyName
+                guard key.count == 1 || key == "rakaranshaya" || key == "yansaya" || key == "kundaliya" else {
+                    continue
+                }
+                button.setHint(hint(for: key), animated: animated)
+            }
+        }
     }
 
 }

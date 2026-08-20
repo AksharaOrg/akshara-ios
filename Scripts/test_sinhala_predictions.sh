@@ -10,6 +10,7 @@ swiftc \
   "$root/Shared/SinhalaEngine.swift" \
   "$root/Shared/KeyboardPreferences.swift" \
   "$root/Shared/SinhalaPrediction.swift" \
+  "$root/Shared/KeyboardCompositionSession.swift" \
   "$temporary_directory/main.swift" \
   -o "$temporary_directory/TestSinhalaPrediction"
 

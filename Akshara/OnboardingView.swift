@@ -95,6 +95,8 @@ private struct KeyboardSettingsView: View {
     @State private var topRow = KeyboardPreferences.topRow()
     @State private var longPressPunctuationEnabled = KeyboardPreferences.longPressPunctuationEnabled()
     @State private var smartQuotesEnabled = KeyboardPreferences.smartQuotesEnabled()
+    @State private var smartPunctuationSpacingEnabled = KeyboardPreferences.smartPunctuationSpacingEnabled()
+    @State private var englishForOneWordEnabled = KeyboardPreferences.englishForOneWordEnabled()
     @State private var characterPreviewEnabled = KeyboardPreferences.characterPreviewEnabled()
     @State private var keySpacing = KeyboardPreferences.keySpacing()
     @State private var oneHandedPosition = KeyboardPreferences.oneHandedPosition()
@@ -143,6 +145,22 @@ private struct KeyboardSettingsView: View {
                 Toggle("Double-space period", isOn: $doubleSpacePeriodEnabled)
                 Toggle("Long-press punctuation", isOn: $longPressPunctuationEnabled)
                 Toggle("Smart quotes", isOn: $smartQuotesEnabled)
+                Toggle(isOn: $smartPunctuationSpacingEnabled) {
+                    SettingLabel(
+                        title: "Smart punctuation",
+                        detail: "Trims extra spaces around marks and adds a space after . ? !",
+                        icon: "textformat.abc",
+                        color: .pink
+                    )
+                }
+                Toggle(isOn: $englishForOneWordEnabled) {
+                    SettingLabel(
+                        title: "English for one word",
+                        detail: "Swipe up on Space in Smart Phonetic to type one Latin word.",
+                        icon: "character.bubble",
+                        color: .cyan
+                    )
+                }
                 Picker(selection: $deleteRepeatSpeed) {
                     ForEach(KeyboardPreferences.DeleteRepeatSpeed.allCases) { value in
                         Text(value.title).tag(value)
@@ -200,6 +218,8 @@ private struct KeyboardSettingsView: View {
         .onChange(of: topRow) { KeyboardPreferences.setTopRow($0) }
         .onChange(of: longPressPunctuationEnabled) { KeyboardPreferences.setLongPressPunctuationEnabled($0) }
         .onChange(of: smartQuotesEnabled) { KeyboardPreferences.setSmartQuotesEnabled($0) }
+        .onChange(of: smartPunctuationSpacingEnabled) { KeyboardPreferences.setSmartPunctuationSpacingEnabled($0) }
+        .onChange(of: englishForOneWordEnabled) { KeyboardPreferences.setEnglishForOneWordEnabled($0) }
         .onChange(of: characterPreviewEnabled) { KeyboardPreferences.setCharacterPreviewEnabled($0) }
         .onChange(of: keySpacing) { KeyboardPreferences.setKeySpacing($0) }
         .onChange(of: oneHandedPosition) { KeyboardPreferences.setOneHandedPosition($0) }

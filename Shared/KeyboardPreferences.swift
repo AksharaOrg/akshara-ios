@@ -116,6 +116,8 @@ enum KeyboardPreferences {
     static let topRowKey = "keyboardTopRow"
     static let longPressPunctuationKey = "longPressPunctuationEnabled"
     static let smartQuotesKey = "smartQuotesEnabled"
+    static let smartPunctuationSpacingKey = "smartPunctuationSpacingEnabled"
+    static let englishForOneWordKey = "englishForOneWordEnabled"
     static let characterPreviewKey = "characterPreviewEnabled"
     static let keySpacingKey = "keyboardKeySpacing"
     static let oneHandedPositionKey = "keyboardOneHandedPosition"
@@ -142,6 +144,7 @@ enum KeyboardPreferences {
         var characterPreviewEnabled = false
         var doubleSpacePeriodEnabled = true
         var smartQuotesEnabled = true
+        var smartPunctuationSpacingEnabled = true
         var deleteRepeatInterval = 0.08
         var highContrastEnabled = false
         var showTouchAreas = false
@@ -178,6 +181,7 @@ enum KeyboardPreferences {
             characterPreviewEnabled: characterPreviewEnabled(),
             doubleSpacePeriodEnabled: doubleSpacePeriodEnabled(),
             smartQuotesEnabled: smartQuotesEnabled(),
+            smartPunctuationSpacingEnabled: smartPunctuationSpacingEnabled(),
             deleteRepeatInterval: deleteRepeatSpeed().interval,
             highContrastEnabled: highContrastEnabled(),
             showTouchAreas: showTouchAreas(),
@@ -302,6 +306,22 @@ enum KeyboardPreferences {
 
     static func setSmartQuotesEnabled(_ enabled: Bool) {
         persist(enabled, forKey: smartQuotesKey)
+    }
+
+    static func smartPunctuationSpacingEnabled() -> Bool {
+        defaults.object(forKey: smartPunctuationSpacingKey) as? Bool ?? true
+    }
+
+    static func setSmartPunctuationSpacingEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: smartPunctuationSpacingKey)
+    }
+
+    static func englishForOneWordEnabled() -> Bool {
+        defaults.object(forKey: englishForOneWordKey) as? Bool ?? false
+    }
+
+    static func setEnglishForOneWordEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: englishForOneWordKey)
     }
 
     /// Apple calls this "Character Preview". The system preference isn't

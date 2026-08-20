@@ -23,6 +23,8 @@
 		A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */; };
 		A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */; };
 		A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */; };
+		A10000000000000000000017 /* KeyboardCompositionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* KeyboardCompositionSession.swift */; };
+		A10000000000000000000018 /* KeyboardCompositionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* KeyboardCompositionSession.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,6 +70,7 @@
 		A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaNextWordModel.tsv; sourceTree = "<group>"; };
 		A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaTrigramModel.tsv; sourceTree = "<group>"; };
 		A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaSentenceStartModel.tsv; sourceTree = "<group>"; };
+		A20000000000000000000019 /* KeyboardCompositionSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardCompositionSession.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -131,6 +134,7 @@
 				A20000000000000000000003 /* SinhalaEngine.swift */,
 				A20000000000000000000009 /* KeyboardPreferences.swift */,
 				A20000000000000000000014 /* SinhalaPrediction.swift */,
+				A20000000000000000000019 /* KeyboardCompositionSession.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -253,6 +257,7 @@
 				A10000000000000000000003 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
 				A10000000000000000000011 /* SinhalaPrediction.swift in Sources */,
+				A10000000000000000000017 /* KeyboardCompositionSession.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -264,6 +269,7 @@
 				A10000000000000000000005 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000008 /* KeyboardPreferences.swift in Sources */,
 				A10000000000000000000012 /* SinhalaPrediction.swift in Sources */,
+				A10000000000000000000018 /* KeyboardCompositionSession.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

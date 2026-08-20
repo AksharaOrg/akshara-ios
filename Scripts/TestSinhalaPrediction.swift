@@ -288,3 +288,236 @@ expectTouch((smartSWeights["h"] ?? 0) > 0, label: "smart phonetic s → h")
 
 guard touchWeightPassed else { exit(1) }
 print("Phonetic next-key touch weights passed (akSha r=\(akShaWeights["r"] ?? 0) s→h=\(sWeights["h"] ?? 0))")
+
+var hygienePassed = true
+func expectHygiene(_ condition: Bool, label: String) {
+    guard condition else {
+        fputs("FAIL composition hygiene \(label)\n", stderr)
+        hygienePassed = false
+        return
+    }
+}
+
+for event in CompositionHygieneEvent.allCases {
+    expectHygiene(
+        CompositionHygiene.shouldCancelWithoutCommit(for: event),
+        label: "\(event.rawValue) cancels"
+    )
+    expectHygiene(
+        !CompositionHygiene.shouldCommitLeftoverBuffer(for: event),
+        label: "\(event.rawValue) does not commit leftover buffer"
+    )
+}
+
+let fieldA = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+let fieldB = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+expectHygiene(
+    !CompositionHygiene.documentIdentifierChanged(previous: nil, current: fieldA),
+    label: "first document identity is recorded, not a switch"
+)
+expectHygiene(
+    !CompositionHygiene.documentIdentifierChanged(previous: fieldA, current: fieldA),
+    label: "same document keeps composition"
+)
+expectHygiene(
+    CompositionHygiene.documentIdentifierChanged(previous: fieldA, current: fieldB),
+    label: "new documentIdentifier is a field switch"
+)
+
+let amma = SinhalaEngine.transliterate("amma", mode: .smartPhonetic)
+expectHygiene(
+    !CompositionHygiene.documentContextInvalidatedComposition(
+        renderedWord: amma,
+        documentContextBeforeInput: nil
+    ),
+    label: "nil context is inconclusive without an identifier change"
+)
+expectHygiene(
+    CompositionHygiene.documentContextInvalidatedComposition(
+        renderedWord: amma,
+        documentContextBeforeInput: nil,
+        contextIsExpected: true
+    ),
+    label: "missing context invalidates composition when Full Access is enabled"
+)
+expectHygiene(
+    CompositionHygiene.documentContextInvalidatedComposition(
+        renderedWord: amma,
+        documentContextBeforeInput: ""
+    ),
+    label: "empty field invalidates leftover composition"
+)
+expectHygiene(
+    !CompositionHygiene.documentContextInvalidatedComposition(
+        renderedWord: amma,
+        documentContextBeforeInput: "hello " + amma
+    ),
+    label: "matching caret suffix keeps composition"
+)
+expectHygiene(
+    CompositionHygiene.documentContextInvalidatedComposition(
+        renderedWord: amma,
+        documentContextBeforeInput: "other"
+    ),
+    label: "unrelated context invalidates leftover composition"
+)
+expectHygiene(
+    !CompositionHygiene.documentContextInvalidatedComposition(
+        renderedWord: "",
+        documentContextBeforeInput: ""
+    ),
+    label: "idle session is not invalidated by an empty field"
+)
+
+var session = KeyboardCompositionSession()
+session.phoneticBuffer = "amma"
+session.lastPhoneticRendered = amma
+session.phoneticCompositionAnchor = "previous field"
+session.committedPhoneticSegments = [.init(source: "am", rendered: SinhalaEngine.transliterate("am", mode: .smartPhonetic))]
+session.rawBuffer = "amma"
+session.visibleEntries = [amma]
+session.visibleSources = ["amma"]
+session.pendingSource = "ෙ"
+session.pendingKind = .prebase
+session.pendingHostRendered = "ෙ"
+session.pendingHostAnchor = "anchor"
+session.pendingAnchorKey = "f"
+session.predictionPrefix = amma
+let leaked = session.phoneticPreviewIfTyping("a", mode: .smartPhonetic)
+expectHygiene(
+    leaked != SinhalaEngine.transliterate("a", mode: .smartPhonetic),
+    label: "unhygienic session would replay the previous word"
+)
+
+session.apply(.documentIdentifierChanged)
+expectHygiene(!session.hasLocalComposition, label: "identifier change clears every local buffer")
+expectHygiene(session.droppedPredictionDebounceCount == 1, label: "identifier change drops prediction debounce")
+expectHygiene(session.predictionGeneration == 1, label: "identifier change invalidates in-flight ranking")
+expectHygiene(
+    session.phoneticPreviewIfTyping("a", mode: .smartPhonetic)
+        == SinhalaEngine.transliterate("a", mode: .smartPhonetic),
+    label: "next Smart Phonetic letter does not include the previous word"
+)
+expectHygiene(
+    !CompositionHygiene.shouldCommitLeftoverBuffer(for: .documentIdentifierChanged),
+    label: "identifier change must not insert leftover marked text"
+)
+
+func seedSmartPhoneticSession() -> KeyboardCompositionSession {
+    var seeded = KeyboardCompositionSession()
+    seeded.phoneticBuffer = "amma"
+    seeded.lastPhoneticRendered = amma
+    seeded.rawBuffer = "amma"
+    seeded.predictionPrefix = amma
+    return seeded
+}
+
+for event in [
+    CompositionHygieneEvent.returnOrSend,
+    .keyboardWillDisappear,
+    .inputModeChanged,
+    .documentContextChangedUnexpectedly
+] {
+    var seeded = seedSmartPhoneticSession()
+    seeded.apply(event)
+    expectHygiene(!seeded.hasLocalComposition, label: "\(event.rawValue) clears local composition")
+    expectHygiene(
+        seeded.phoneticPreviewIfTyping("k", mode: .smartPhonetic)
+            == SinhalaEngine.transliterate("k", mode: .smartPhonetic),
+        label: "\(event.rawValue) does not replay leftover Smart Phonetic text"
+    )
+}
+
+guard hygienePassed else { exit(1) }
+print("Composition field-switch hygiene passed")
+
+var spacingPassed = true
+func expectSpacing(_ actual: String, _ expected: String, label: String) {
+    if actual != expected {
+        fputs("FAIL spacing \(label): expected \(expected), got \(actual)\n", stderr)
+        spacingPassed = false
+    }
+}
+
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "hello "),
+    "hello. ",
+    label: "space before period collapses and a sentence space follows"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "hello"),
+    "hello. ",
+    label: "period after a word inserts a following space"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: "?", before: "hello"),
+    "hello? ",
+    label: "question mark inserts a following space"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: "!", before: "hello"),
+    "hello! ",
+    label: "exclamation mark inserts a following space"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ")", before: "hello "),
+    "hello)",
+    label: "space before a closing paren collapses"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ",", before: "hello "),
+    "hello,",
+    label: "space before a comma collapses without adding another"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: "h", before: "\" "),
+    "\"h",
+    label: "space after an opening quote collapses"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: "h", before: "( "),
+    "(h",
+    label: "space after an opening paren collapses"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "3"),
+    "3.",
+    label: "decimal point does not insert a sentence space"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "www", field: .suppressesSentenceSpacing),
+    "www.",
+    label: "URL fields do not auto-space after a period"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "hello\n"),
+    "hello\n.",
+    label: "a newline before a period is not eaten"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "ක "),
+    "ක. ",
+    label: "Sinhala letters collapse space before a period"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: "෴", before: "ක"),
+    "ක෴ ",
+    label: "kundaliya inserts a following space"
+)
+expectSpacing(
+    SmartPunctuationSpacing.applied(inserting: ".", before: "hello. "),
+    "hello..",
+    label: "a second period eats the auto-space instead of stacking spaces"
+)
+
+if !SmartPunctuationSpacing.hasTrailingSentenceSpace("hello. ") {
+    fputs("FAIL spacing trailing sentence space not detected\n", stderr)
+    spacingPassed = false
+}
+if SmartPunctuationSpacing.hasTrailingSentenceSpace("hello ") {
+    fputs("FAIL spacing ordinary space is not a sentence space\n", stderr)
+    spacingPassed = false
+}
+
+guard spacingPassed else { exit(1) }
+print("Smart punctuation spacing passed")
