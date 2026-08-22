@@ -521,3 +521,69 @@ if SmartPunctuationSpacing.hasTrailingSentenceSpace("hello ") {
 
 guard spacingPassed else { exit(1) }
 print("Smart punctuation spacing passed")
+
+let emojiIndexURL = root.appendingPathComponent("AksharaKeyboard/Resources/SinhalaEmojiIndex.json")
+guard let emojiIndex = SinhalaEmojiSuggestions.loadIndex(from: emojiIndexURL) else {
+    fputs("FAIL emoji index: could not load \(emojiIndexURL.path)\n", stderr)
+    exit(1)
+}
+
+var emojiPassed = true
+func expectEmoji(
+    composing: String,
+    bestWord: String? = nil,
+    contains expected: String,
+    label: String
+) {
+    let actual = SinhalaEmojiSuggestions.emoji(
+        forComposing: composing,
+        bestWord: bestWord,
+        index: emojiIndex
+    )
+    guard actual.contains(expected) else {
+        fputs("FAIL emoji \(label): expected \(expected) in \(actual) for composing=\(composing) best=\(bestWord ?? "nil")\n", stderr)
+        emojiPassed = false
+        return
+    }
+    guard actual.count <= 2 else {
+        fputs("FAIL emoji \(label): expected at most 2 results, got \(actual)\n", stderr)
+        emojiPassed = false
+        return
+    }
+}
+
+func expectNoEmoji(composing: String, bestWord: String? = nil, label: String) {
+    let actual = SinhalaEmojiSuggestions.emoji(
+        forComposing: composing,
+        bestWord: bestWord,
+        index: emojiIndex
+    )
+    guard actual.isEmpty else {
+        fputs("FAIL emoji \(label): expected [], got \(actual)\n", stderr)
+        emojiPassed = false
+        return
+    }
+}
+
+expectEmoji(composing: "හරි", contains: "👍", label: "හරි → thumbs up")
+expectEmoji(composing: "හිනා", contains: "😊", label: "හිනා overlay smile")
+expectEmoji(composing: "ආදරෙයි", contains: "❤️", label: "ආදරෙයි overlay heart")
+expectEmoji(composing: "ආදරය", contains: "❤️", label: "ආදරය heart")
+expectEmoji(composing: "හර", bestWord: "හරි", contains: "👍", label: "prefix of best word")
+expectNoEmoji(composing: "", label: "empty prefix")
+expectNoEmoji(composing: "ක්ෂ්ම්ප්ට්", label: "unknown word")
+
+let uniqueEmoji = SinhalaEmojiSuggestions.uniqueEmojiCount(index: emojiIndex)
+if uniqueEmoji < 200 {
+    fputs("FAIL emoji unique count: expected >= 200, got \(uniqueEmoji)\n", stderr)
+    emojiPassed = false
+}
+
+let hari = SinhalaEmojiSuggestions.emoji(forComposing: "හරි", bestWord: nil, index: emojiIndex)
+if hari.count != 2 {
+    fputs("FAIL emoji හරි should return two chips, got \(hari)\n", stderr)
+    emojiPassed = false
+}
+
+guard emojiPassed else { exit(1) }
+print("Sinhala emoji suggestions passed (\(uniqueEmoji) unique emoji)")

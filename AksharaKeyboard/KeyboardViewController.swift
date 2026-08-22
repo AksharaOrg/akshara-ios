@@ -833,7 +833,7 @@ private enum EmojiCatalog {
     /// alternatives through a long press. Akshara mirrors that first choice
     /// with its own shared setting while keeping actual selections intact in
     /// Recents.
-    private static func applyingPreferredSkinTone(to emoji: [String]) -> [String] {
+    static func applyingPreferredSkinTone(to emoji: [String]) -> [String] {
         let tone = KeyboardPreferences.emojiSkinTone()
         var variants: [String: [String]] = [:]
         for value in emoji {
@@ -850,6 +850,52 @@ private enum EmojiCatalog {
             }
             return choices.first(where: { !containsSkinTone($0) }) ?? choices[0]
         }
+    }
+
+    /// Apply the shared default skin tone to a single suggestion emoji. ZWJ
+    /// sequences are left alone; simple gesture/people bases get the modifier.
+    static func withPreferredSkinTone(_ emoji: String) -> String {
+        guard let modifier = KeyboardPreferences.emojiSkinTone().modifierScalar else {
+            return emoji
+        }
+        guard !containsSkinTone(emoji) else { return emoji }
+        guard !emoji.unicodeScalars.contains(where: { $0.value == 0x200D }) else {
+            return emoji
+        }
+        guard let base = emoji.unicodeScalars.first(where: { $0.properties.isEmoji && !isSkinTone($0) }),
+              supportsFitzpatrickModifier(base.value) else {
+            return emoji
+        }
+        var scalars = String.UnicodeScalarView()
+        var inserted = false
+        for scalar in emoji.unicodeScalars {
+            if scalar.value == 0xFE0F {
+                if !inserted {
+                    scalars.append(base)
+                    scalars.append(modifier)
+                    inserted = true
+                }
+                continue
+            }
+            if !inserted && scalar == base {
+                scalars.append(scalar)
+                scalars.append(modifier)
+                inserted = true
+            } else {
+                scalars.append(scalar)
+            }
+        }
+        return String(scalars)
+    }
+
+    private static func supportsFitzpatrickModifier(_ value: UInt32) -> Bool {
+        (0x1F385...0x1F3CC).contains(value)
+            || (0x1F442...0x1F4AA).contains(value)
+            || (0x1F574...0x1F596).contains(value)
+            || (0x1F645...0x1F64F).contains(value)
+            || (0x1F6A3...0x1F6CC).contains(value)
+            || (0x1F90C...0x1F9FF).contains(value)
+            || (0x1FAC0...0x1FAFF).contains(value)
     }
 
     private static func skinToneFreeKey(for emoji: String) -> String {
@@ -1779,20 +1825,17 @@ private final class CandidateRailView: UIView {
     }
 
     func suggestionButton(at point: CGPoint) -> CandidateButton? {
-        let selectable = candidateButtons.filter { $0.displayedText != nil }
+        let selectable = candidateButtons.filter { $0.displayedText != nil && !$0.isHidden }
         guard !selectable.isEmpty else { return nil }
-        let hit = expandedHitBounds
-        let widthPerCandidate = hit.width / CGFloat(max(candidateButtons.count, 1))
-        let index = min(
-            candidateButtons.count - 1,
-            max(0, Int((point.x - hit.minX) / max(widthPerCandidate, 1)))
-        )
-        if candidateButtons.indices.contains(index),
-           candidateButtons[index].displayedText != nil {
-            return candidateButtons[index]
+        for button in selectable {
+            let frame = button.convert(button.bounds, to: self)
+            if frame.contains(point) {
+                return button
+            }
         }
         return selectable.min { lhs, rhs in
-            abs(lhs.center.x - point.x) < abs(rhs.center.x - point.x)
+            abs(lhs.convert(CGPoint(x: lhs.bounds.midX, y: lhs.bounds.midY), to: self).x - point.x)
+                < abs(rhs.convert(CGPoint(x: rhs.bounds.midX, y: rhs.bounds.midY), to: self).x - point.x)
         }
     }
 
@@ -1804,7 +1847,7 @@ private final class CandidateRailView: UIView {
         // Overlay matches `expandedHitBounds` 1:1 so the fill is the real
         // hit map, including the strip down to the first key row.
         touchOverlay.frame = expandedHitBounds
-        touchOverlay.sliceCount = max(candidateButtons.count, 1)
+        touchOverlay.sliceCount = 3
         touchOverlay.setNeedsDisplay()
     }
 
@@ -2750,7 +2793,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var metricMargins: [(UIStackView, () -> UIEdgeInsets)] = []
     private var metricCapInsets: [(NativeKeyButton, () -> UIEdgeInsets)] = []
     private var candidateButtons: [CandidateButton] = []
+    /// Up to two emoji chips that share the right third of the suggestion rail.
+    private var emojiCandidateButtons: [CandidateButton] = []
+    private var emojiCandidateStack: UIStackView?
     private var candidates: [String?] = [nil, nil, nil]
+    private var emojiCandidates: [String?] = [nil, nil]
     private var predictionPrefix = ""
     /// Empty-context openers stay off the rail until the user types. Next-word
     /// and completions can run after that.
@@ -3607,37 +3654,88 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             segments.bottomAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.bottomAnchor)
         ])
         for index in 0..<3 {
-            let button = CandidateButton()
-            button.candidateFont = .systemFont(ofSize: 18, weight: index == 1 ? .medium : .regular)
-            button.contentVerticalAlignment = .center
-            button.tag = index
-            button.isUserInteractionEnabled = false
-            button.onActivate = { [weak self, weak button] in
-                guard let button else { return }
-                self?.selectPrediction(button)
+            if index < 2 {
+                let button = CandidateButton()
+                button.candidateFont = .systemFont(ofSize: 18, weight: index == 1 ? .medium : .regular)
+                button.contentVerticalAlignment = .center
+                button.tag = index
+                button.isUserInteractionEnabled = false
+                button.onActivate = { [weak self, weak button] in
+                    guard let button else { return }
+                    self?.selectPrediction(button)
+                }
+                segments.addArrangedSubview(button)
+                candidateButtons.append(button)
+                let separator = UIView()
+                separator.translatesAutoresizingMaskIntoConstraints = false
+                separator.isUserInteractionEnabled = false
+                separator.backgroundColor = UIColor { traits in
+                    traits.userInterfaceStyle == .dark
+                        ? UIColor(white: 0.36, alpha: 0.7)
+                        : UIColor(red: 0.77, green: 0.79, blue: 0.83, alpha: 0.75)
+                }
+                button.addSubview(separator)
+                NSLayoutConstraint.activate([
+                    separator.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+                    separator.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                    separator.heightAnchor.constraint(equalToConstant: 20),
+                    separator.widthAnchor.constraint(equalToConstant: 1)
+                ])
+                continue
             }
-            // The arranged view is the control itself: its hit target is the
-            // complete third of the rail, not merely the title's bounds.
-            segments.addArrangedSubview(button)
-            candidateButtons.append(button)
-            guard index < 2 else { continue }
-            let separator = UIView()
-            separator.translatesAutoresizingMaskIntoConstraints = false
-            separator.isUserInteractionEnabled = false
-            separator.backgroundColor = UIColor { traits in
-                traits.userInterfaceStyle == .dark
-                    ? UIColor(white: 0.36, alpha: 0.7)
-                    : UIColor(red: 0.77, green: 0.79, blue: 0.83, alpha: 0.75)
+
+            // Right third: either the 3rd word chip or up to two emoji chips.
+            let thirdColumn = UIView()
+            thirdColumn.translatesAutoresizingMaskIntoConstraints = false
+            segments.addArrangedSubview(thirdColumn)
+
+            let wordButton = CandidateButton()
+            wordButton.candidateFont = .systemFont(ofSize: 18, weight: .regular)
+            wordButton.contentVerticalAlignment = .center
+            wordButton.tag = 2
+            wordButton.isUserInteractionEnabled = false
+            wordButton.translatesAutoresizingMaskIntoConstraints = false
+            wordButton.onActivate = { [weak self, weak wordButton] in
+                guard let wordButton else { return }
+                self?.selectPrediction(wordButton)
             }
-            button.addSubview(separator)
+            thirdColumn.addSubview(wordButton)
+            candidateButtons.append(wordButton)
+
+            let emojiStack = UIStackView()
+            emojiStack.axis = .horizontal
+            emojiStack.distribution = .fillEqually
+            emojiStack.translatesAutoresizingMaskIntoConstraints = false
+            emojiStack.isHidden = true
+            thirdColumn.addSubview(emojiStack)
+            emojiCandidateStack = emojiStack
+
+            for emojiIndex in 0..<2 {
+                let button = CandidateButton()
+                button.candidateFont = .systemFont(ofSize: 22, weight: .regular)
+                button.contentVerticalAlignment = .center
+                button.tag = 100 + emojiIndex
+                button.isUserInteractionEnabled = false
+                button.onActivate = { [weak self, weak button] in
+                    guard let button else { return }
+                    self?.selectPrediction(button)
+                }
+                emojiStack.addArrangedSubview(button)
+                emojiCandidateButtons.append(button)
+            }
+
             NSLayoutConstraint.activate([
-                separator.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-                separator.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                separator.heightAnchor.constraint(equalToConstant: 20),
-                separator.widthAnchor.constraint(equalToConstant: 1)
+                wordButton.leadingAnchor.constraint(equalTo: thirdColumn.leadingAnchor),
+                wordButton.trailingAnchor.constraint(equalTo: thirdColumn.trailingAnchor),
+                wordButton.topAnchor.constraint(equalTo: thirdColumn.topAnchor),
+                wordButton.bottomAnchor.constraint(equalTo: thirdColumn.bottomAnchor),
+                emojiStack.leadingAnchor.constraint(equalTo: thirdColumn.leadingAnchor),
+                emojiStack.trailingAnchor.constraint(equalTo: thirdColumn.trailingAnchor),
+                emojiStack.topAnchor.constraint(equalTo: thirdColumn.topAnchor),
+                emojiStack.bottomAnchor.constraint(equalTo: thirdColumn.bottomAnchor)
             ])
         }
-        candidateBar.candidateButtons = candidateButtons
+        candidateBar.candidateButtons = candidateButtons + emojiCandidateButtons
         candidateBarHeight = candidateBar.heightAnchor.constraint(equalToConstant: candidateBarOccupiedHeight)
         candidateBarTopInset = candidateBar.topAnchor.constraint(
             equalTo: keyboardContentContainer.topAnchor,
@@ -3842,6 +3940,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         metricCapInsets.forEach { button, value in button.applyCharacterEdgeInsets(value()) }
         candidateButtons.enumerated().forEach { index, button in
             button.candidateFont = .systemFont(ofSize: usesPadLayout ? 20 : 18, weight: index == 1 ? .medium : .regular)
+        }
+        let emojiSize: CGFloat = usesPadLayout ? 24 : 22
+        emojiCandidateButtons.forEach {
+            $0.candidateFont = .systemFont(ofSize: emojiSize, weight: .regular)
         }
         keyboardStack.setNeedsLayout()
         candidateBar.setNeedsLayout()
@@ -4642,8 +4744,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let generation = predictionGeneration
         guard showsCandidateBar else {
             predictionPrefix = ""
-            candidates = [nil, nil, nil]
-            candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
+            clearCandidateRailDisplay()
             applyKeyTouchWeights([:])
             return
         }
@@ -4662,8 +4763,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // Empty-context openers on appear made the keyboard look busy.
         if prefix.isEmpty && !hasEnteredTextThisAppearance {
             predictionPrefix = ""
-            candidates = [nil, nil, nil]
-            candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
+            clearCandidateRailDisplay()
             applyKeyTouchWeights([:])
             return
         }
@@ -4694,6 +4794,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 && !self.phoneticBuffer.isEmpty
             queue.async {
                 let ranked = provider.candidates(for: request)
+                let emojiHits: [String]
+                if KeyboardPreferences.emojiSuggestionsEnabled(), !prefix.isEmpty {
+                    emojiHits = SinhalaEmojiSuggestions.emoji(
+                        forComposing: prefix,
+                        bestWord: ranked.first?.text
+                    ).map(EmojiCatalog.withPreferredSkinTone)
+                } else {
+                    emojiHits = []
+                }
                 let weights = stillInflating
                     ? provider.nextKeyWeights(
                         latinBuffer: latinBuffer,
@@ -4706,6 +4815,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 DispatchQueue.main.async { [weak self] in
                     self?.applyPredictions(
                         ranked.prefix(3).map(\.text),
+                        emoji: emojiHits,
                         weights: weights,
                         for: prefix,
                         generation: generation
@@ -4719,6 +4829,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func applyPredictions(
         _ ranked: [String],
+        emoji: [String] = [],
         weights: [String: Double] = [:],
         for prefix: String,
         generation: Int
@@ -4727,6 +4838,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         pendingPredictionUpdate = nil
         predictionPrefix = prefix
         let previousCandidates = candidates
+        let previousEmoji = emojiCandidates
         var ranked = ranked
         if AksharaEasterEgg.isCompleteTrueName(rendered: prefix, phoneticSource: activePhoneticSource) {
             ranked.removeAll { $0 == AksharaEasterEgg.trueNameDisplay }
@@ -4741,16 +4853,61 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         case 1: candidates = [nil, ranked[0], nil]
         default: candidates = [nil, nil, nil]
         }
+
+        let showEmoji = !emoji.isEmpty
+        if showEmoji {
+            // Emoji replace the whole right column — never mix with the 3rd word.
+            candidates[2] = nil
+            emojiCandidates = [
+                emoji.first,
+                emoji.count > 1 ? emoji[1] : nil
+            ]
+        } else {
+            emojiCandidates = [nil, nil]
+        }
+
+        let animated = CACurrentMediaTime() - lastInputTimestamp > 0.12
         for (index, button) in candidateButtons.enumerated() {
+            // The third word button is only visible when emoji are off.
+            if index == 2 {
+                button.isHidden = showEmoji
+                if showEmoji {
+                    if previousCandidates[2] != nil {
+                        button.setCandidate(nil, animated: false)
+                    }
+                    continue
+                }
+            }
             guard previousCandidates[index] != candidates[index] else { continue }
-            // Shared letters stay put; changed letters fade while new ones
-            // scale in left to right. Glyph transforms never relayout the keys.
-            button.setCandidate(candidates[index], animated: CACurrentMediaTime() - lastInputTimestamp > 0.12)
+            button.setCandidate(candidates[index], animated: animated)
+        }
+
+        emojiCandidateStack?.isHidden = !showEmoji
+        for (index, button) in emojiCandidateButtons.enumerated() {
+            let value = index < emojiCandidates.count ? emojiCandidates[index] : nil
+            button.isHidden = value == nil
+            let previous = index < previousEmoji.count ? previousEmoji[index] : nil
+            guard previous != value else { continue }
+            button.setCandidate(value, animated: animated)
         }
         applyKeyTouchWeights(weights)
         Self.layoutLogger.debug(
-            "predictions updated count=\(ranked.count, privacy: .public) railHidden=\(self.candidateBar.isHidden, privacy: .public) railHeight=\(Int(self.candidateBar.bounds.height), privacy: .public)"
+            "predictions updated count=\(ranked.count, privacy: .public) emoji=\(emoji.count, privacy: .public) railHidden=\(self.candidateBar.isHidden, privacy: .public) railHeight=\(Int(self.candidateBar.bounds.height), privacy: .public)"
         )
+    }
+
+    private func clearCandidateRailDisplay() {
+        candidates = [nil, nil, nil]
+        emojiCandidates = [nil, nil]
+        candidateButtons.forEach {
+            $0.isHidden = false
+            $0.setCandidate(nil, animated: false)
+        }
+        emojiCandidateButtons.forEach {
+            $0.isHidden = true
+            $0.setCandidate(nil, animated: false)
+        }
+        emojiCandidateStack?.isHidden = true
     }
 
     private func applyKeyTouchWeights(_ weights: [String: Double]) {
@@ -4783,6 +4940,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         predictionGeneration += 1
 
         let isTrueName = candidate == AksharaEasterEgg.trueNameDisplay
+        let isEmojiSuggestion = emojiCandidateButtons.contains(where: { $0 === sender })
+            || (candidate.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.isEmoji }
+                && !candidate.unicodeScalars.contains { (0x0D80...0x0DFF).contains($0.value) }
+                && candidate != AksharaEasterEgg.trueNameDisplay)
         let precedingWord = predictionContext(for: predictionPrefix).last
         let replacingPhonetic = !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty
         let wordToReplace = activeRenderedWord()
@@ -4804,10 +4965,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // keystroke begins the following word rather than appending to it.
         let inserted = isTrueName ? AksharaEasterEgg.trueNameInsert : candidate
         insertIntoDocument(inserted + " ", applyingSmartSpacing: true)
-        // Learn only a deliberate dictionary selection. The true-name flourish
-        // is a one-shot insert and must not enter the personal model.
+        // Learn only a deliberate dictionary selection. True-name and emoji
+        // chips must not enter the personal Sinhala model.
         if isTrueName {
             keyFeedback?.signatureWink()
+        } else if isEmojiSuggestion {
+            EmojiCatalog.record(candidate)
         } else {
             SinhalaPredictionProviderRegistry.shared.activeProvider.recordSelection(candidate, after: precedingWord)
         }
@@ -4819,7 +4982,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         visibleEntries.removeAll()
         visibleSources.removeAll()
         predictionPrefix = ""
-        if isTrueName {
+        if isTrueName || isEmojiSuggestion {
             invalidatePrecedingWordsCache()
         } else {
             // The host proxy often lags one insert behind, so next-word
@@ -5030,8 +5193,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         lastSpaceTimestamp = nil
         collapseSpaceAfterOpeningPunctuation = false
         invalidatePrecedingWordsCache()
-        candidates = [nil, nil, nil]
-        candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
+        clearCandidateRailDisplay()
         applyKeyTouchWeights([:])
         endTemporaryLatinWordMode()
         if refreshingPredictions {

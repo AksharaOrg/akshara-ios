@@ -25,6 +25,9 @@
 		A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */; };
 		A10000000000000000000017 /* KeyboardCompositionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* KeyboardCompositionSession.swift */; };
 		A10000000000000000000018 /* KeyboardCompositionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* KeyboardCompositionSession.swift */; };
+		A10000000000000000000019 /* SinhalaEmojiSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */; };
+		A1000000000000000000001A /* SinhalaEmojiSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */; };
+		A1000000000000000000001B /* Resources/SinhalaEmojiIndex.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* Resources/SinhalaEmojiIndex.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +74,8 @@
 		A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaTrigramModel.tsv; sourceTree = "<group>"; };
 		A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/SinhalaSentenceStartModel.tsv; sourceTree = "<group>"; };
 		A20000000000000000000019 /* KeyboardCompositionSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardCompositionSession.swift; sourceTree = "<group>"; };
+		A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaEmojiSuggestions.swift; sourceTree = "<group>"; };
+		A20000000000000000000021 /* Resources/SinhalaEmojiIndex.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Resources/SinhalaEmojiIndex.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -122,6 +127,7 @@
 				A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */,
 				A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */,
 				A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */,
+				A20000000000000000000021 /* Resources/SinhalaEmojiIndex.json */,
 				A20000000000000000000011 /* AksharaKeyboard.entitlements */,
 				A20000000000000000000008 /* Info.plist */,
 			);
@@ -135,6 +141,7 @@
 				A20000000000000000000009 /* KeyboardPreferences.swift */,
 				A20000000000000000000014 /* SinhalaPrediction.swift */,
 				A20000000000000000000019 /* KeyboardCompositionSession.swift */,
+				A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -242,6 +249,7 @@
 				A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */,
 				A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */,
 				A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */,
+				A1000000000000000000001B /* Resources/SinhalaEmojiIndex.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -258,6 +266,7 @@
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
 				A10000000000000000000011 /* SinhalaPrediction.swift in Sources */,
 				A10000000000000000000017 /* KeyboardCompositionSession.swift in Sources */,
+				A10000000000000000000019 /* SinhalaEmojiSuggestions.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -270,6 +279,7 @@
 				A10000000000000000000008 /* KeyboardPreferences.swift in Sources */,
 				A10000000000000000000012 /* SinhalaPrediction.swift in Sources */,
 				A10000000000000000000018 /* KeyboardCompositionSession.swift in Sources */,
+				A1000000000000000000001A /* SinhalaEmojiSuggestions.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

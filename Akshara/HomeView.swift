@@ -414,6 +414,7 @@ private struct KeyboardSettingsView: View {
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
     @State private var emojiSkinTone = KeyboardPreferences.emojiSkinTone()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
+    @State private var emojiSuggestionsEnabled = KeyboardPreferences.emojiSuggestionsEnabled()
     @State private var doubleSpacePeriodEnabled = KeyboardPreferences.doubleSpacePeriodEnabled()
     @State private var topRow = KeyboardPreferences.topRow()
     @State private var longPressPunctuationEnabled = KeyboardPreferences.longPressPunctuationEnabled()
@@ -445,6 +446,7 @@ private struct KeyboardSettingsView: View {
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
         .onChange(of: emojiSkinTone) { KeyboardPreferences.setEmojiSkinTone($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
+        .onChange(of: emojiSuggestionsEnabled) { KeyboardPreferences.setEmojiSuggestionsEnabled($0) }
         .onChange(of: doubleSpacePeriodEnabled) { KeyboardPreferences.setDoubleSpacePeriodEnabled($0) }
         .onChange(of: topRow) { KeyboardPreferences.setTopRow($0) }
         .onChange(of: longPressPunctuationEnabled) { KeyboardPreferences.setLongPressPunctuationEnabled($0) }
@@ -491,6 +493,16 @@ private struct KeyboardSettingsView: View {
             }
             Toggle(isOn: $suggestionsEnabled) {
                 SettingLabel(title: "Suggestions", detail: "Shows word completions", icon: "text.badge.plus", color: .systemIndigo)
+            }
+            if suggestionsEnabled {
+                Toggle(isOn: $emojiSuggestionsEnabled) {
+                    SettingLabel(
+                        title: "Emoji Suggestions",
+                        detail: "Shows matching emoji in the third suggestion",
+                        icon: "face.smiling",
+                        color: .systemOrange
+                    )
+                }
             }
             NavigationLink {
                 HapticsSettingsView()

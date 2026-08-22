@@ -11,6 +11,7 @@ swiftc \
   "$root/Shared/KeyboardPreferences.swift" \
   "$root/Shared/SinhalaPrediction.swift" \
   "$root/Shared/KeyboardCompositionSession.swift" \
+  "$root/Shared/SinhalaEmojiSuggestions.swift" \
   "$temporary_directory/main.swift" \
   -o "$temporary_directory/TestSinhalaPrediction"
 

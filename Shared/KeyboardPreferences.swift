@@ -110,6 +110,7 @@ enum KeyboardPreferences {
     static let hapticsKey = "keyboardHapticsEnabled"
     static let fullAccessKey = "keyboardFullAccessConfirmed"
     static let suggestionsKey = "keyboardSuggestionsEnabled"
+    static let emojiSuggestionsKey = "keyboardEmojiSuggestionsEnabled"
     static let predictionProviderKey = "selectedPredictionProvider"
     static let doubleSpacePeriodKey = "doubleSpacePeriodEnabled"
     static let numberRowKey = "numberRowEnabled"
@@ -255,6 +256,16 @@ enum KeyboardPreferences {
         persist(enabled, forKey: suggestionsKey)
     }
 
+    /// When on, matching Sinhala CLDR emoji fill the right suggestion column
+    /// (up to two chips). Off by default; requires the word suggestion rail.
+    static func emojiSuggestionsEnabled() -> Bool {
+        defaults.object(forKey: emojiSuggestionsKey) as? Bool ?? false
+    }
+
+    static func setEmojiSuggestionsEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: emojiSuggestionsKey)
+    }
+
     static func selectedPredictionProvider() -> String {
         defaults.string(forKey: predictionProviderKey) ?? "uom-frequency-list-v1"
     }
@@ -367,12 +378,13 @@ enum KeyboardPreferences {
     static func resetToDefaults() {
         let store = defaults
         let keys = [
-            layoutKey, emojiKey, hapticsKey, suggestionsKey, predictionProviderKey,
-            doubleSpacePeriodKey, numberRowKey, topRowKey, longPressPunctuationKey,
-            smartQuotesKey, smartPunctuationSpacingKey, englishForOneWordKey,
-            characterPreviewKey, keySpacingKey, oneHandedPositionKey, hapticStrengthKey,
-            keyClicksKey, deleteRepeatSpeedKey, appearanceKey, highContrastKey,
-            emojiSkinToneKey, showTouchAreasKey, predictiveTouchAreasKey
+            layoutKey, emojiKey, hapticsKey, suggestionsKey, emojiSuggestionsKey,
+            predictionProviderKey, doubleSpacePeriodKey, numberRowKey, topRowKey,
+            longPressPunctuationKey, smartQuotesKey, smartPunctuationSpacingKey,
+            englishForOneWordKey, characterPreviewKey, keySpacingKey,
+            oneHandedPositionKey, hapticStrengthKey, keyClicksKey, deleteRepeatSpeedKey,
+            appearanceKey, highContrastKey, emojiSkinToneKey, showTouchAreasKey,
+            predictiveTouchAreasKey
         ]
         for key in keys {
             store.removeObject(forKey: key)
