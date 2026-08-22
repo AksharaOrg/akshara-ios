@@ -3,9 +3,9 @@ import OSLog
 
 /// KeyboardKit keys glass styling off the OS (`isLiquidGlassEnabled` when
 /// the major version is > 18) and leaves `KeyboardViewStyle.background` nil
-/// so the system surface shows through. Host sniffing is not used: iMessage
-/// and other glass apps do not expose `glass` / `UIKB` class names, so a
-/// "no signals → opaque canvas" fallback paints a grey card on Liquid Glass.
+/// so the system surface shows through. It also skips `UIInputView.keyboard`,
+/// which tints a second backdrop and blocks Spotlight-style translucency.
+/// Glass itself is not sniffed from the host.
 private enum KeyboardChromeAppearance {
     static var usesLiquidGlassSurfaces: Bool = {
         if #available(iOS 26.0, *) { return true }
@@ -176,6 +176,14 @@ private final class NativeKeyButton: UIButton {
     var highlightChanged: ((NativeKeyButton, Bool) -> Void)?
     /// Fired at touch-down, which is when keyboard feedback needs to occur.
     var touchDown: (() -> Void)?
+    /// Authoritative lift. Keyboard hosts often omit `touchUpInside` after a
+    /// `deleteBackward` round-trip, so Delete repeat cannot rely on UIControl
+    /// events alone.
+    var touchEnded: (() -> Void)?
+    /// Finger may still be down: a host text change commonly cancels the
+    /// original touch. Delete repeat treats this as a possible glitch, not
+    /// a lift, until a short grace window expires.
+    var touchCancelled: (() -> Void)?
     /// A long press owns the visual feedback after it begins. Keeping this on
     /// the control avoids UIKit highlight transitions resurrecting the normal
     /// character preview behind an alternate picker.
@@ -217,9 +225,18 @@ private final class NativeKeyButton: UIButton {
                         : (highContrast ? 0.30 : 0.18)
                     return UIColor(red: 0.90, green: 0.96, blue: 0.96, alpha: opacity)
                 }
+                // KeyboardKit / Grammarly: white at 0.3 (letters) and 0.1
+                // (utility) so dark mode, dark appearance, and translucent
+                // hosts share one surface. Opaque grey keys still read as a
+                // solid card in Spotlight.
+                if highContrast {
+                    return greyUtility
+                        ? UIColor(white: 1, alpha: 0.18)
+                        : UIColor(white: 1, alpha: 0.42)
+                }
                 return greyUtility
-                    ? UIColor(white: highContrast ? 0.40 : 0.34, alpha: 1)
-                    : UIColor(white: highContrast ? 0.55 : 0.46, alpha: 1)
+                    ? UIColor(white: 1, alpha: 0.10)
+                    : UIColor(white: 1, alpha: 0.30)
             }
             if #unavailable(iOS 17.0) {
                 return greyUtility
@@ -273,6 +290,8 @@ private final class NativeKeyButton: UIButton {
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOffset = CGSize(width: 0, height: 1)
         layer.shadowRadius = 0
+        showsTouchWhenHighlighted = false
+        adjustsImageWhenHighlighted = false
         applyKeycapChrome(isPad: false)
         addTarget(self, action: #selector(pressBegan), for: .touchDown)
     }
@@ -312,6 +331,7 @@ private final class NativeKeyButton: UIButton {
         super.traitCollectionDidChange(previousTraitCollection)
         guard traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) else { return }
         refreshDynamicColors()
+        applyKeycapChrome(isPad: traitCollection.userInterfaceIdiom == .pad)
     }
 
     /// UIButton can keep a resolved cap colour across appearance changes.
@@ -367,6 +387,16 @@ private final class NativeKeyButton: UIButton {
             )
         }
         super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        touchEnded?()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        touchCancelled?()
     }
 
     @objc private func pressBegan() {
@@ -469,7 +499,10 @@ private final class NativeKeyButton: UIButton {
             return
         }
         target.cornerRadius = isPad ? (isUtility ? 10 : 8) : (isUtility ? 8 : 7)
-        target.shadowOpacity = usesIOS16KeyboardAppearance ? 0.18 : 0.23
+        // Transparent dark caps cannot use the raised key shadow: it draws
+        // under the key and muddies the host material. Light mode keeps it.
+        let dark = traitCollection.userInterfaceStyle == .dark
+        target.shadowOpacity = dark ? 0 : (usesIOS16KeyboardAppearance ? 0.18 : 0.23)
         if capInsets != .zero { layer.shadowOpacity = 0 }
     }
 
@@ -503,7 +536,16 @@ private final class NativeKeyButton: UIButton {
     /// Painted cap in the button's own bounds. A/L/Z/M leftover is outside this.
     var paintedCapBounds: CGRect { bounds.inset(by: capInsets) }
 
-    var calloutFillColor: UIColor { keycapFill }
+    /// System callouts stay solid even when keycaps are glass. Using the
+    /// translucent cap colour lets the host show through the balloon.
+    var calloutFillColor: UIColor {
+        UIColor { traits in
+            if traits.userInterfaceStyle == .dark {
+                return UIColor(white: 0.46, alpha: 1)
+            }
+            return .white
+        }
+    }
 
     var keycapCornerRadius: CGFloat {
         if usesIOS26KeyboardAppearance { return 9 }
@@ -511,8 +553,11 @@ private final class NativeKeyButton: UIButton {
         return isUtility ? 8 : 7
     }
 
+    /// Character popups are for typed glyphs. The system keyboard never
+    /// shows one on Return/Search/Go — those are controls, even when they
+    /// carry a label and the prominent blue fill.
     var supportsCharacterPreview: Bool {
-        !isUtility && currentTitle != nil && currentTitle != " "
+        keyName != "return" && !isUtility && currentTitle != nil && currentTitle != " "
     }
 
     /// In Space-trackpad mode iOS keeps the key surfaces but removes their
@@ -1849,6 +1894,9 @@ private final class KeyboardGridView: UIStackView {
         didSet { touchOverlay.setNeedsDisplay() }
     }
 
+    /// Near-invisible fill behind the keys so iOS 26 delivers gutter taps.
+    /// Kept off the keycaps; the debug overlay is a separate front view.
+    private let hitFillView = UIView()
     private let touchOverlay = KeyTouchOverlayView()
 
     override init(frame: CGRect) {
@@ -1867,8 +1915,22 @@ private final class KeyboardGridView: UIStackView {
 
     private func configureTouchOverlay() {
         clipsToBounds = false
+        hitFillView.isUserInteractionEnabled = false
+        hitFillView.isOpaque = false
+        hitFillView.backgroundColor = UIColor(white: 0.5, alpha: 0.02)
+        insertSubview(hitFillView, at: 0)
         touchOverlay.isUserInteractionEnabled = false
+        touchOverlay.clearsContextBeforeDrawing = true
         addSubview(touchOverlay)
+    }
+
+    /// Drop any cached overlay bitmap before the key rows are replaced.
+    /// iOS 26 otherwise composites the previous leftover rails onto the new layer.
+    func prepareForKeyRebuild() {
+        touchOverlay.slots = []
+        touchOverlay.layer.contents = nil
+        touchOverlay.isHidden = true
+        touchOverlay.setNeedsDisplay()
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
@@ -1952,10 +2014,20 @@ private final class KeyboardGridView: UIStackView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        bringSubviewToFront(touchOverlay)
-        touchOverlay.showsDebugTouchAreas = KeyboardPreferences.hotPath.showTouchAreas
-        touchOverlay.isHidden = false
+        sendSubviewToBack(hitFillView)
+        hitFillView.frame = expandedHitBounds
+        let debug = KeyboardPreferences.hotPath.showTouchAreas
+        touchOverlay.showsDebugTouchAreas = debug
         touchOverlay.frame = expandedHitBounds
+        guard debug else {
+            touchOverlay.slots = []
+            touchOverlay.layer.contents = nil
+            touchOverlay.isHidden = true
+            logLeftoverGeometryIfNeeded()
+            return
+        }
+        touchOverlay.isHidden = false
+        bringSubviewToFront(touchOverlay)
         let origin = expandedHitBounds.origin
         touchOverlay.slots = hitSlots().map { slot in
             KeyTouchOverlayView.Slot(
@@ -2195,8 +2267,7 @@ private final class KeyTouchOverlayView: UIView {
     }
 
     var slots: [Slot] = []
-    /// Debug paint for "Show touch areas". When false, leftover is still
-    /// filled at ~2% alpha so iOS 26 delivers taps in otherwise empty pixels.
+    /// Debug paint for "Show touch areas". Gutter taps use `hitFillView` instead.
     var showsDebugTouchAreas = false
 
     override init(frame: CGRect) {
@@ -2217,40 +2288,18 @@ private final class KeyTouchOverlayView: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
-        if showsDebugTouchAreas {
-            for slot in slots {
-                context.setFillColor(UIColor.systemBlue.withAlphaComponent(0.12).cgColor)
-                context.fill(slot.tiled)
-                if slot.weight > 0, slot.isLetter {
-                    context.setFillColor(UIColor.systemOrange.withAlphaComponent(0.12 + 0.35 * slot.weight).cgColor)
-                    context.fill(slot.inflated)
-                }
-                context.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.85).cgColor)
-                context.setLineWidth(1)
-                context.stroke(slot.cap.insetBy(dx: 0.5, dy: 0.5))
-            }
-            return
-        }
-
-        context.setFillColor(UIColor(white: 0.5, alpha: 0.02).cgColor)
+        guard showsDebugTouchAreas else { return }
         for slot in slots {
-            fill(slot.tiled, subtracting: slot.cap, in: context)
+            context.setFillColor(UIColor.systemBlue.withAlphaComponent(0.12).cgColor)
+            context.fill(slot.tiled)
             if slot.weight > 0, slot.isLetter {
-                fill(slot.inflated, subtracting: slot.tiled, in: context)
+                context.setFillColor(UIColor.systemOrange.withAlphaComponent(0.12 + 0.35 * slot.weight).cgColor)
+                context.fill(slot.inflated)
             }
+            context.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.85).cgColor)
+            context.setLineWidth(1)
+            context.stroke(slot.cap.insetBy(dx: 0.5, dy: 0.5))
         }
-    }
-
-    private func fill(_ outer: CGRect, subtracting inner: CGRect, in context: CGContext) {
-        guard !outer.isNull, !outer.isEmpty else { return }
-        let hole = inner.intersection(outer)
-        if hole.isNull || hole.isEmpty {
-            context.fill(outer)
-            return
-        }
-        context.addRect(outer)
-        context.addRect(hole)
-        context.fillPath(using: .evenOdd)
     }
 }
 
@@ -2311,7 +2360,7 @@ private final class KeyPreviewView: UIView {
     private var stemHeight: CGFloat = 42
     private var bubbleHeight: CGFloat = 55
     private var stemCornerRadius: CGFloat = 7
-    private var fillColor: UIColor = .systemBackground
+    private var fillColor: UIColor = .white
 
     static let bubbleCornerRadius: CGFloat = 12
     static let neckHeight: CGFloat = 20
@@ -2320,8 +2369,10 @@ private final class KeyPreviewView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
+        isOpaque = false
+        backgroundColor = .clear
         layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.12
+        layer.shadowOpacity = 0.22
         layer.shadowOffset = CGSize(width: 0, height: 1)
         layer.shadowRadius = 4
         glyphLabel.textAlignment = .center
@@ -2375,7 +2426,17 @@ private final class KeyPreviewView: UIView {
     }
 
     private func applyFill() {
-        shapeLayer.fillColor = fillColor.resolvedColor(with: traitCollection).cgColor
+        let resolved = fillColor.resolvedColor(with: traitCollection)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        if resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            shapeLayer.fillColor = UIColor(red: red, green: green, blue: blue, alpha: 1).cgColor
+        } else {
+            shapeLayer.fillColor = UIColor.white.cgColor
+        }
+        shapeLayer.opacity = 1
     }
 
     func display(_ title: String) { glyphLabel.text = title }
@@ -2665,8 +2726,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// bottom-anchored, fixed-height container so it is usable immediately
     /// without allowing equal-height rows to stretch into that transient frame.
     private let keyboardContentContainer = OverflowHitView()
-    /// Pre-iOS 26 keyboard colour. Left clear on iOS 26 so the system Liquid
-    /// Glass surface is the only backdrop — KeyboardKit's standard style.
+    /// Pre-iOS 26 keyboard colour. Left clear so the host material — including
+    /// Spotlight translucency — is the only backdrop. Same on iOS 26.
     private let keyboardChrome = UIView()
     private let keyboardStack = KeyboardGridView()
     private let candidateBar = CandidateRailView()
@@ -2674,6 +2735,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var candidateBarTopInset: NSLayoutConstraint!
     private var keyboardStackTopInset: NSLayoutConstraint!
     private var keyboardStackBottomInset: NSLayoutConstraint!
+    private var keyboardContentBottomInset: NSLayoutConstraint!
     private var keyboardContentHeight: NSLayoutConstraint!
     /// Host height at priority 999. Created in `configureLayout` but not
     /// activated until `updateViewConstraints()` after `viewWillAppear`, so
@@ -2690,6 +2752,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var candidateButtons: [CandidateButton] = []
     private var candidates: [String?] = [nil, nil, nil]
     private var predictionPrefix = ""
+    /// Empty-context openers stay off the rail until the user types. Next-word
+    /// and completions can run after that.
+    private var hasEnteredTextThisAppearance = false
     private let predictionQueue = DispatchQueue(label: "lk.org.akshara.prediction", qos: .userInitiated)
     private var predictionGeneration = 0
     /// Set by UIKit when the host editor can have changed independently of
@@ -2725,6 +2790,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// long-press recognizer is cancelled while the finger is still down.
     private weak var deleteRepeatAnchor: UIView?
     private weak var deleteRepeatRecognizer: UILongPressGestureRecognizer?
+    /// Backup hold starter that does not depend on UILongPress surviving the
+    /// first `deleteBackward` host round-trip.
+    private var deleteHoldWork: DispatchWorkItem?
+    /// Brief tracking gaps after a host cancel must not kill an in-progress hold.
+    private var deleteRepeatLostTouchAt: TimeInterval?
     private var keyPreview: KeyPreviewView?
     private var alternatePicker: AlternateCharacterPickerView?
     private var presentedAlternateChoices: [(display: String, input: String)] = []
@@ -2750,6 +2820,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var needsKeyRebuildWhenGeometryIsStable = true
     private var appliedReturnKeyTitle: String?
     private var appliedKeyboardType: UIKeyboardType?
+    private var appliedAllowsPredictions: Bool?
     // Querying `needsInputModeSwitchKey` before the extension is connected to
     // a host produces a false answer (and a UIKit warning). Wait for both a
     // usable input-view width and the host's `textDidChange` callback.
@@ -2872,8 +2943,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     /// Space under the bottom row, matching the UK dock gap above the globe.
+    /// iOS 16 clips about a point of the bottom row; later versions already
+    /// have enough inset that this must not change.
     private var keyGridBottomInset: CGFloat {
-        usesIOS16KeyboardAppearance ? 2 : 7
+        usesIOS16KeyboardAppearance ? 3 : 7
+    }
+
+    /// Test lift so the bottom row clears the host clip. iOS 26 is already
+    /// aligned and must not move.
+    private var preLiquidGlassBottomLift: CGFloat {
+        if #available(iOS 26.0, *) { return 0 }
+        if usesIOS16KeyboardAppearance { return 1 }
+        if #available(iOS 18.0, *) { return 1 }
+        return 0
     }
 
     /// The rail view owns the toolbar band down to a sliver above the Q row.
@@ -2944,16 +3026,37 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         KeyboardPreferences.suggestionsEnabled() && inputFieldAllowsPredictions
     }
 
-    /// Structured fields are usually identifiers rather than Sinhala prose.
-    /// Hiding the rail here also skips dictionary work on every keypress.
+    /// Structured fields and search UI hide QuickType on the system keyboard.
+    /// Match that so Spotlight, in-app search, passwords, and identifier
+    /// fields do not get a Sinhala suggestion rail.
     private var inputFieldAllowsPredictions: Bool {
-        switch textDocumentProxy.keyboardType {
+        let proxy = textDocumentProxy
+        if proxy.isSecureTextEntry == true { return false }
+        if proxy.autocorrectionType == .no { return false }
+        switch proxy.keyboardType {
         case .URL, .webSearch, .emailAddress, .twitter,
              .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad:
             return false
         default:
-            return true
+            break
         }
+        switch proxy.returnKeyType {
+        case .search, .google, .yahoo:
+            return false
+        default:
+            break
+        }
+        if let contentType = proxy.textContentType {
+            switch contentType {
+            case .username, .password, .newPassword, .oneTimeCode,
+                 .emailAddress, .URL, .telephoneNumber, .creditCardNumber,
+                 .postalCode, .flightNumber, .shipmentTrackingNumber:
+                return false
+            default:
+                break
+            }
+        }
+        return true
     }
 
     private var normalKeyboardHeight: CGFloat {
@@ -3088,19 +3191,20 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     override func loadView() {
         // KeyboardKit does not wrap the extension in `UIInputView.keyboard`.
-        // That style tints a second backdrop; on iOS 26 it sits on the system
-        // Liquid Glass and reads as a grey rounded card. A plain view lets the
-        // host draw the only surface. Older OS versions still need the keyboard
-        // style so there is a native grey canvas behind the keys.
+        // That style tints a second backdrop and reads as a solid card in
+        // translucent hosts (Spotlight, Safari). A plain view lets the host
+        // draw the only surface. iOS 26 already uses this path for Liquid Glass.
         if #available(iOS 26.0, *) {
             let root = UIView(frame: .zero)
             root.backgroundColor = .clear
             root.clipsToBounds = false
             view = root
         } else {
-            let keyboardView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
-            keyboardView.allowsSelfSizing = false
-            inputView = keyboardView
+            let root = UIView(frame: .zero)
+            root.backgroundColor = .clear
+            root.isOpaque = false
+            root.clipsToBounds = false
+            view = root
         }
     }
 
@@ -3121,15 +3225,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         isPreparingToAppear = true
+        hasEnteredTextThisAppearance = false
         applyHostHeightConstraint(reason: "viewWillAppear")
         view.setNeedsUpdateConstraints()
         logKeyboardLayout("viewWillAppear")
         KeyboardPreferences.reload()
         documentStateMayHaveChanged = true
         precedingWordsCacheValid = false
-        if hasFullAccess {
-            KeyboardPreferences.setFullAccessConfirmed(true)
-        }
+        KeyboardPreferences.setFullAccessConfirmed(hasFullAccess)
         let selectedMode = KeyboardPreferences.selectedMode()
         var needsRebuild = keyboardStack.arrangedSubviews.isEmpty
         if selectedMode != mode {
@@ -3147,12 +3250,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyFeedback?.prepare()
         let title = returnKeyTitle
         let keyboardType = textDocumentProxy.keyboardType
+        let allowsPredictions = inputFieldAllowsPredictions
         if appliedKeyboardType != nil, keyboardType != appliedKeyboardType {
             cancelLocalCompositionWithoutCommit()
         }
-        if title != appliedReturnKeyTitle || keyboardType != appliedKeyboardType {
+        if title != appliedReturnKeyTitle
+            || keyboardType != appliedKeyboardType
+            || appliedAllowsPredictions != allowsPredictions {
             appliedReturnKeyTitle = title
             appliedKeyboardType = keyboardType
+            appliedAllowsPredictions = allowsPredictions
             needsRebuild = true
         }
         if needsRebuild {
@@ -3184,9 +3291,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         if showsCandidateBar {
             SinhalaPredictionProviderRegistry.shared.prepareBundledModelsInBackground()
-            if candidates.allSatisfy({ $0 == nil }) {
-                updatePredictions(for: "")
-            }
         }
     }
 
@@ -3309,13 +3413,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         updateKeyboardAppearance()
         let title = returnKeyTitle
         let keyboardType = textDocumentProxy.keyboardType
+        let allowsPredictions = inputFieldAllowsPredictions
         let keyboardTypeChanged = appliedKeyboardType != nil && keyboardType != appliedKeyboardType
-        guard title != appliedReturnKeyTitle || keyboardType != appliedKeyboardType else { return }
+        guard title != appliedReturnKeyTitle
+            || keyboardType != appliedKeyboardType
+            || appliedAllowsPredictions != allowsPredictions else { return }
         if keyboardTypeChanged {
             cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
         }
         appliedReturnKeyTitle = title
         appliedKeyboardType = keyboardType
+        appliedAllowsPredictions = allowsPredictions
         rebuildKeys()
     }
 
@@ -3376,10 +3484,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
-    /// KeyboardKit leaves `KeyboardViewStyle.background` nil on glass. iOS 26
-    /// always uses that path: walking the host for glass class names misses
-    /// iMessage, and treating a missing match as non-glass paints a grey card
-    /// over the system material. The opaque KeyboardKit canvas is pre-iOS 26 only.
+    /// KeyboardKit leaves `KeyboardViewStyle.background` nil so the system
+    /// surface shows through. Pre-iOS 26 and iOS 26 both use that clear canvas.
     private func refreshKeyboardChrome(rebuildIfStyleChanged: Bool) {
         let previous = KeyboardChromeAppearance.usesLiquidGlassSurfaces
         let glass = detectLiquidGlassKeyboardChrome()
@@ -3389,6 +3495,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         applySuggestionRailMargins()
         applyCandidateBarLayout()
         keyboardStackBottomInset?.constant = -keyGridBottomInset
+        keyboardContentBottomInset?.constant = -preLiquidGlassBottomLift
         if emojiPicker == nil {
             applyHostHeightConstraint(reason: "chrome-refresh")
         }
@@ -3398,23 +3505,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
+    /// KeyboardKit leaves `KeyboardViewStyle.background` nil so the system
+    /// surface shows through. Pre-iOS 26 uses that same clear canvas; a tinted
+    /// fill still read as a card in Spotlight. iOS 26 stays clear.
     private func applyKeyboardChromeSurface() {
         view.backgroundColor = .clear
         keyboardChrome.isUserInteractionEnabled = false
         keyboardChrome.layer.cornerRadius = 0
-        if usesLiquidGlassKeyboardChrome {
-            keyboardChrome.backgroundColor = .clear
-            return
-        }
-        keyboardChrome.backgroundColor = UIColor { [usesIOS16KeyboardAppearance] traits in
-            if traits.userInterfaceStyle == .dark {
-                return UIColor(red: 0.173, green: 0.173, blue: 0.173, alpha: 1)
-            }
-            if usesIOS16KeyboardAppearance {
-                return UIColor(red: 209 / 255, green: 210 / 255, blue: 216 / 255, alpha: 1)
-            }
-            return UIColor(red: 0.835, green: 0.839, blue: 0.867, alpha: 1)
-        }
+        keyboardChrome.isOpaque = false
+        keyboardChrome.backgroundColor = .clear
+        guard !usesLiquidGlassKeyboardChrome else { return }
+        view.isOpaque = false
+        keyboardContentContainer.isOpaque = false
     }
 
     /// Glass is an OS capability, not a host-tree property. iMessage's wrappers
@@ -3469,11 +3571,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let hostHeight = view.heightAnchor.constraint(equalToConstant: normalKeyboardHeight)
         hostHeight.priority = UILayoutPriority(999)
         keyboardHostHeight = hostHeight
+        keyboardContentBottomInset = keyboardContentContainer.bottomAnchor.constraint(
+            equalTo: view.bottomAnchor,
+            constant: -preLiquidGlassBottomLift
+        )
         NSLayoutConstraint.activate([
             keyboardContentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             keyboardContentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             keyboardContentContainer.topAnchor.constraint(greaterThanOrEqualTo: view.topAnchor),
-            keyboardContentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            keyboardContentBottomInset,
             keyboardContentHeight
         ])
         applyHostHeightConstraint(reason: "configureLayout")
@@ -3608,10 +3714,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         logKeyboardLayout("rebuild keys")
         spaceSignatureRestoreWork?.cancel()
         spaceSignatureRestoreWork = nil
+        hideKeyPreview(animated: false)
+        hideAlternatePicker()
+        hidePendingCompositionChrome()
+        keyboardStack.prepareForKeyRebuild()
         metricConstraints.removeAll()
         metricMargins.removeAll()
         metricCapInsets.removeAll()
-        keyboardStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        // Drop highlight before teardown. iOS 26 Liquid Glass keeps a press
+        // overlay on the input session when a highlighted key is destroyed
+        // mid-touch; switching IME is what used to clear it.
+        UIView.performWithoutAnimation {
+            let rows = keyboardStack.arrangedSubviews
+            for case let row as UIStackView in rows {
+                for case let button as NativeKeyButton in row.arrangedSubviews {
+                    button.highlightChanged = nil
+                    button.isHighlighted = false
+                }
+                row.removeFromSuperview()
+            }
+        }
         // Match the native English fourth row: the emoji affordance sits
         // between the number key and Space. A keyboard extension can ask iOS
         // to advance input modes, but cannot select Emoji directly.
@@ -3665,9 +3787,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if layer != .letters || mode == .sls {
             applyKeyTouchWeights([:])
         }
-        if showsCandidateBar, candidates.allSatisfy({ $0 == nil }) {
-            updatePredictions(for: "")
-        }
     }
 
     private func applyKeyboardMetrics() {
@@ -3703,6 +3822,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         applySuggestionRailMargins()
         applyCandidateBarLayout()
         keyboardStackBottomInset?.constant = -keyGridBottomInset
+        keyboardContentBottomInset?.constant = -preLiquidGlassBottomLift
         keyboardStack.transform = usesStandardPhoneGeometry
             ? CGAffineTransform(translationX: 0, y: keyGridVerticalNudge)
             : .identity
@@ -3872,7 +3992,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         button.touchDown = { [weak self] in
             // If iOS failed to deliver an old Delete touch-up (for example
             // after a host-app cursor move), any new contact is authoritative.
-            self?.stopDeleteRepeat()
+            if key != "delete" {
+                self?.stopDeleteRepeat()
+            }
             // Haptic first — before click, preview, or composition work.
             self?.keyFeedback?.keyPressed()
         }
@@ -3897,7 +4019,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             button.accessibilityLabel = "Zero Width Joiner"
         }
         button.highlightChanged = { [weak self] button, highlighted in
-            guard key != "space", button.supportsCharacterPreview else { return }
+            guard key != "space", key != "return", button.supportsCharacterPreview else { return }
             guard !button.suppressesCharacterPreview else {
                 self?.hideKeyPreview(animated: false)
                 return
@@ -3930,13 +4052,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             // changes lines, causing unexpected deletion after the finger has
             // already lifted.
             button.isExclusiveTouch = true
-            button.trackingHitOutset = 28
+            button.trackingHitOutset = 44
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
             longPress.minimumPressDuration = 0.42
             longPress.allowableMovement = 80
             longPress.cancelsTouchesInView = false
             longPress.delegate = self
             button.addGestureRecognizer(longPress)
+            button.touchEnded = { [weak self] in self?.stopDeleteRepeat() }
+            button.touchCancelled = { [weak self] in self?.handleDeleteTouchCancellation() }
             button.addAction(UIAction { [weak self] _ in
                 self?.stopDeleteRepeat()
             }, for: [.touchUpInside, .touchUpOutside])
@@ -3975,11 +4099,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     /// The system keyboard visibly commits normal taps as the finger lands.
-    /// Space stays on touch-up because a hold enters cursor control. Keys
-    /// with long-press alternates also stay on touch-up so the picker can
+    /// Space stays on touch-up because a hold enters cursor control. Return
+    /// stays on touch-up so Search/Go/Send can be cancelled by sliding off,
+    /// matching the system control. Layer switches rebuild the whole grid, so
+    /// 123 / ABC / #+= wait for lift — tearing those keys down on touch-down
+    /// leaves iOS 26's glass press overlay until the input session is replaced.
+    /// Keys with long-press alternates also stay on touch-up so the picker can
     /// choose a value before anything is inserted into the host.
     private func shouldCommitOnTouchDown(_ key: String) -> Bool {
-        guard key != "space" else { return false }
+        guard key != "space", key != "return" else { return false }
+        if key == "123" || key == "ABC" || key == "#+=" { return false }
         return !(layer == .letters && mode == .sls && wijesekaraAlternates(for: key) != nil)
             && !(KeyboardPreferences.hotPath.longPressPunctuationEnabled && punctuationAlternates(for: key) != nil)
     }
@@ -4181,10 +4310,25 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func hideKeyPreview(animated: Bool = true) {
         guard let preview = keyPreview, preview.superview != nil else { return }
         let changes = { preview.alpha = 0; preview.transform = .identity }
+        let remove = { [weak self, weak preview] in
+            guard let preview, preview.alpha == 0 else { return }
+            preview.removeFromSuperview()
+            if self?.keyPreview === preview {
+                self?.keyPreview = nil
+            }
+        }
         if animated {
-            UIView.animate(withDuration: 0.08, delay: 0, options: [.beginFromCurrentState, .curveEaseIn], animations: changes)
+            UIView.animate(
+                withDuration: 0.08,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseIn],
+                animations: changes,
+                completion: { _ in remove() }
+            )
         } else {
             changes()
+            preview.removeFromSuperview()
+            keyPreview = nil
         }
     }
 
@@ -4277,8 +4421,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         switch key {
         case "delete":
+            deleteRepeatAnchor = keyButton(named: "delete")
             deleteRepeatBeganAt = CACurrentMediaTime()
-            deleteOnce()
+            startDeleteHoldCountdown()
+            // Mutating the host in the same turn as touch-down often cancels
+            // the original touch, which then kills hold-to-delete. Finish
+            // establishing the touch first.
+            DispatchQueue.main.async { [weak self] in
+                self?.deleteOnce()
+            }
         case "space":
             insertSpace()
             // Match the system keyboard: Space on Numbers/Symbols returns to
@@ -4288,12 +4439,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 rebuildKeys()
             }
         case "return":
-            if temporaryLatinWordActive {
-                endTemporaryLatinWordMode()
-            }
-            commit(suffix: "\n")
-            cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
-            invalidatePrecedingWordsCache()
+            performReturnKey()
         case "emoji": showEmojiPicker()
         case "globe": break // Routed through handleInputModeList(_:with:).
         case "dismiss":
@@ -4408,6 +4554,25 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         keyboardStack.isHidden = false
     }
 
+    /// Finish the in-progress word, then insert a bare newline. Custom
+    /// keyboards have no Return-key event; `insertText("\n")` is how UIKit
+    /// delivers Search, Go, Send, Done, and a plain newline to the host.
+    /// Search bars typically resign first responder after that — which is
+    /// how the system keyboard disappears. We never call `dismissKeyboard()`.
+    private func performReturnKey() {
+        if temporaryLatinWordActive {
+            endTemporaryLatinWordMode()
+        }
+        flushPendingComposition()
+        learnActiveWord()
+        commitActiveComposition()
+        // Keep `\n` in its own insert. Appending it to the word in one
+        // `insertText` makes some hosts treat the whole string as typed
+        // text instead of a Return press.
+        insertIntoDocument("\n")
+        cancelLocalCompositionWithoutCommit(refreshingPredictions: true)
+    }
+
     /// `UITextDocumentProxy` changes as focus moves between host controls.
     /// Use its return trait so the key matches the action users expect.
     private var returnKeyTitle: String? {
@@ -4489,6 +4654,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if emojiPicker == nil {
             applyCandidateBarLayout()
             candidateBar.isHidden = false
+        }
+        if !prefix.isEmpty {
+            hasEnteredTextThisAppearance = true
+        }
+        // Keep the rail, but leave it blank until the user actually types.
+        // Empty-context openers on appear made the keyboard look busy.
+        if prefix.isEmpty && !hasEnteredTextThisAppearance {
+            predictionPrefix = ""
+            candidates = [nil, nil, nil]
+            candidateButtons.forEach { $0.setCandidate(nil, animated: false) }
+            applyKeyTouchWeights([:])
+            return
         }
         predictionPrefix = prefix
         // Keep the previous rail visible while the next ranking runs. Blanking
@@ -4870,6 +5047,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             current: current
         )
         lastDocumentIdentifier = current
+        if changed {
+            hasEnteredTextThisAppearance = false
+        }
         return changed
     }
 
@@ -4920,23 +5100,45 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             deleteRepeatAnchor = recognizer.view
             deleteRepeatRecognizer = recognizer
             beginDeleteRepeat()
-        case .ended, .failed:
+        case .ended:
             stopDeleteRepeat()
-        case .cancelled:
+        case .cancelled, .failed:
             // On device, a competing keyboard-window gesture or a host
             // round-trip stall often cancels the recognizer while the finger
-            // is still on Delete. Keep repeating until the control itself
-            // stops tracking.
-            if deleteRepeatTouchStillHeld { return }
-            stopDeleteRepeat()
+            // is still on Delete. Keep repeating until a real lift arrives.
+            handleDeleteTouchCancellation()
         default:
             break
         }
     }
 
+    /// Host `deleteBackward` often cancels the original touch. Once repeat
+    /// has started, treat that as a tracking glitch rather than a lift.
+    private func handleDeleteTouchCancellation() {
+        guard isDeleteRepeatActive else { return }
+        deleteRepeatLostTouchAt = deleteRepeatLostTouchAt ?? CACurrentMediaTime()
+    }
+
+    private func startDeleteHoldCountdown() {
+        deleteHoldWork?.cancel()
+        deleteRepeatLostTouchAt = nil
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deleteHoldWork = nil
+            guard self.deleteRepeatTouchStillHeld else { return }
+            self.beginDeleteRepeat()
+        }
+        deleteHoldWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42, execute: work)
+    }
+
     /// The system keyboard keeps deleting characters, then switches to words
     /// after a sustained hold. Touch-down already removed the first unit.
     private func beginDeleteRepeat() {
+        deleteHoldWork?.cancel()
+        deleteHoldWork = nil
+        deleteRepeatLostTouchAt = nil
+        guard !isDeleteRepeatActive else { return }
         isDeleteRepeatActive = true
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
@@ -4962,7 +5164,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func handleDeleteRepeatTick() {
-        if !deleteRepeatTouchStillHeld {
+        if deleteRepeatTouchStillHeld {
+            deleteRepeatLostTouchAt = nil
+        } else {
+            let lostAt = deleteRepeatLostTouchAt ?? CACurrentMediaTime()
+            deleteRepeatLostTouchAt = lostAt
+            if CACurrentMediaTime() - lostAt < 0.18 {
+                return
+            }
             stopDeleteRepeat()
             return
         }
@@ -4993,6 +5202,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     @objc private func stopDeleteRepeat() {
+        deleteHoldWork?.cancel()
+        deleteHoldWork = nil
+        deleteRepeatLostTouchAt = nil
         let wasRepeating = isDeleteRepeatActive
         deleteRepeater?.invalidate()
         deleteRepeater = nil
@@ -5525,6 +5737,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func noteInput() {
         lastInputTimestamp = CACurrentMediaTime()
+        hasEnteredTextThisAppearance = true
     }
 
     /// Own proxy mutations notify `textDidChange` in some hosts. Suppress

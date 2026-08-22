@@ -8,7 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* AksharaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AksharaApp.swift */; };
-		A10000000000000000000002 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* OnboardingView.swift */; };
+		A10000000000000000000002 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* HomeView.swift */; };
 		A10000000000000000000003 /* SinhalaEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SinhalaEngine.swift */; };
 		A10000000000000000000004 /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* KeyboardViewController.swift */; };
 		A10000000000000000000005 /* SinhalaEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SinhalaEngine.swift */; };
@@ -53,7 +53,7 @@
 
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* AksharaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AksharaApp.swift; sourceTree = "<group>"; };
-		A20000000000000000000002 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* SinhalaEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaEngine.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* KeyboardViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardViewController.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* Akshara.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Akshara.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -105,7 +105,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* AksharaApp.swift */,
-				A20000000000000000000002 /* OnboardingView.swift */,
+				A20000000000000000000002 /* HomeView.swift */,
 				A20000000000000000000010 /* Akshara.entitlements */,
 				A20000000000000000000012 /* Assets.xcassets */,
 				A20000000000000000000007 /* Info.plist */,
@@ -253,7 +253,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* AksharaApp.swift in Sources */,
-				A10000000000000000000002 /* OnboardingView.swift in Sources */,
+				A10000000000000000000002 /* HomeView.swift in Sources */,
 				A10000000000000000000003 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
 				A10000000000000000000011 /* SinhalaPrediction.swift in Sources */,

@@ -2,5 +2,5 @@ import SwiftUI
 
 @main
 struct AksharaApp: App {
-    var body: some Scene { WindowGroup { OnboardingView() } }
+    var body: some Scene { WindowGroup { HomeView() } }
 }

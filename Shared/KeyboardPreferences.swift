@@ -362,6 +362,25 @@ enum KeyboardPreferences {
     static func predictiveTouchAreas() -> Bool { defaults.object(forKey: predictiveTouchAreasKey) as? Bool ?? false }
     static func setPredictiveTouchAreas(_ enabled: Bool) { persist(enabled, forKey: predictiveTouchAreasKey) }
 
+    /// Clears user-facing keyboard preferences while leaving Full Access
+    /// confirmation alone (that bit is written by the extension).
+    static func resetToDefaults() {
+        let store = defaults
+        let keys = [
+            layoutKey, emojiKey, hapticsKey, suggestionsKey, predictionProviderKey,
+            doubleSpacePeriodKey, numberRowKey, topRowKey, longPressPunctuationKey,
+            smartQuotesKey, smartPunctuationSpacingKey, englishForOneWordKey,
+            characterPreviewKey, keySpacingKey, oneHandedPositionKey, hapticStrengthKey,
+            keyClicksKey, deleteRepeatSpeedKey, appearanceKey, highContrastKey,
+            emojiSkinToneKey, showTouchAreasKey, predictiveTouchAreasKey
+        ]
+        for key in keys {
+            store.removeObject(forKey: key)
+        }
+        store.synchronize()
+        refreshHotPathCache()
+    }
+
     private static func enumValue<Value: RawRepresentable>(forKey key: String, default defaultValue: Value) -> Value where Value.RawValue == String {
         defaults.string(forKey: key).flatMap(Value.init(rawValue:)) ?? defaultValue
     }

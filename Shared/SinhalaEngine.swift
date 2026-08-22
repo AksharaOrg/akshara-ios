@@ -8,6 +8,17 @@ enum SinhalaEngine {
         case smartPhonetic = "Smart Phonetic"
 
         var id: String { rawValue }
+
+        var detail: String {
+            switch self {
+            case .sls:
+                return "Direct Wijesekara / SLS keys."
+            case .phonetic:
+                return "Latin converts to Sinhala as you type."
+            case .smartPhonetic:
+                return "Looser phonetic spelling with suggestions."
+            }
+        }
     }
 
     private static let consonants: [(String, String)] = [
