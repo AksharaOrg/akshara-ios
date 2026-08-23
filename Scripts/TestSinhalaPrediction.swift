@@ -587,3 +587,62 @@ if hari.count != 2 {
 
 guard emojiPassed else { exit(1) }
 print("Sinhala emoji suggestions passed (\(uniqueEmoji) unique emoji)")
+
+func expectSkinTone(
+    _ emoji: String,
+    tone: KeyboardPreferences.EmojiSkinTone,
+    expected: String,
+    label: String
+) {
+    let actual = EmojiSkinToneApplicator.withPreferredSkinTone(emoji, tone: tone)
+    guard actual == expected else {
+        fputs("FAIL skin tone \(label): expected \(expected) scalars=\(expected.unicodeScalars.map { String($0.value, radix: 16) }), got \(actual) scalars=\(actual.unicodeScalars.map { String($0.value, radix: 16) })\n", stderr)
+        exit(1)
+    }
+}
+
+expectSkinTone("👍", tone: .standard, expected: "👍", label: "thumbs up default")
+expectSkinTone("👍", tone: .light, expected: "👍🏻", label: "thumbs up light")
+expectSkinTone("👍", tone: .dark, expected: "👍🏿", label: "thumbs up dark")
+expectSkinTone("👍🏻", tone: .dark, expected: "👍🏿", label: "existing light becomes dark")
+expectSkinTone("😀", tone: .dark, expected: "😀", label: "smiley has no modifier")
+expectSkinTone("👩‍💻", tone: .light, expected: "👩🏻‍💻", label: "technologist light")
+
+let mixed = EmojiSkinToneApplicator.applyingPreferredSkinTone(
+    to: ["👍", "👍🏻", "😀", "👏"],
+    tone: .dark
+)
+guard mixed == ["👍🏿", "😀", "👏🏿"] else {
+    fputs("FAIL skin tone catalog: expected [👍🏿, 😀, 👏🏿], got \(mixed)\n", stderr)
+    exit(1)
+}
+print("Emoji skin tone application passed")
+
+let blockedURL = root.appendingPathComponent("Scripts/SinhalaBlockedWords.txt")
+let blockedSource = try String(contentsOf: blockedURL, encoding: .utf8)
+let blockedWords = Set(
+    blockedSource.split(whereSeparator: \.isNewline)
+        .map(String.init)
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+)
+func modelContainsBlockedToken(at url: URL, wordFields: Int) throws -> [String] {
+    let text = try String(contentsOf: url, encoding: .utf8)
+    var hits: [String] = []
+    for line in text.split(whereSeparator: \.isNewline) {
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard fields.count > wordFields else { continue }
+        for word in fields.prefix(wordFields) where blockedWords.contains(word) {
+            hits.append(word)
+        }
+    }
+    return hits
+}
+let frequencyHits = try modelContainsBlockedToken(at: frequencyURL, wordFields: 1)
+let nextWordHits = try modelContainsBlockedToken(at: nextWordURL, wordFields: 2)
+let trigramHits = try modelContainsBlockedToken(at: trigramURL, wordFields: 3)
+let sentenceHits = try modelContainsBlockedToken(at: sentenceStartURL, wordFields: 1)
+if !frequencyHits.isEmpty || !nextWordHits.isEmpty || !trigramHits.isEmpty || !sentenceHits.isEmpty {
+    fputs("FAIL blocked tokens still present in models: frequency=\(frequencyHits) next=\(nextWordHits) trigram=\(trigramHits) sentence=\(sentenceHits)\n", stderr)
+    exit(1)
+}
+print("Blocked suggestion tokens absent from models (\(blockedWords.count) exact tokens)")

@@ -1,11 +1,30 @@
 import UIKit
 import OSLog
 
-/// KeyboardKit keys glass styling off the OS (`isLiquidGlassEnabled` when
-/// the major version is > 18) and leaves `KeyboardViewStyle.background` nil
-/// so the system surface shows through. It also skips `UIInputView.keyboard`,
-/// which tints a second backdrop and blocks Spotlight-style translucency.
-/// Glass itself is not sniffed from the host.
+/// Keyboard chrome follows KeyboardKit and the system keyboard's split of
+/// responsibility — not host sniffing.
+///
+/// The system keyboard is UIKit chrome in the *host* process. It automatically
+/// matches that app's `UIDesignRequiresCompatibility` (glass in Messages,
+/// classic in un-updated apps). A third-party extension is a different
+/// process. Apple has no public API for the host's design mode; WebKit has to
+/// IPC `isLiquidGlassEnabled` from the UI process into WebContent for the
+/// same reason. `Bundle.main`'s Info.plist is the extension, not the host.
+/// Host bundle-ID SPIs broke in iOS 26.4. Geometry ("no glass lip") misfires
+/// on iMessage, which is glass without extra height or glass class names.
+///
+/// SwiftKey / Gboard stay visually consistent across apps. Reviews recommend
+/// them *because* the system keyboard changes per host. They keep a clear
+/// canvas so the host-drawn tray (glass capsule or classic card) shows
+/// through, and style keys from the OS version.
+///
+/// KeyboardKit does the same: `isLiquidGlassEnabled` is OS major > 18,
+/// `KeyboardViewStyle.background` is nil, and `UIInputView.keyboard` is
+/// skipped (it tints a second backdrop and reads as a card in Spotlight).
+/// Do not infer classic from a matching height: iMessage's glass lip is the
+/// host capsule, and this view is pinned to the key strip so extra ≈ 0 there
+/// too. Classic Host still draws its own tray; use Keyboard Chrome → Classic
+/// to force Akshara’s pre-glass keys.
 private enum KeyboardChromeAppearance {
     static var usesLiquidGlassSurfaces: Bool = {
         if #available(iOS 26.0, *) { return true }
@@ -70,6 +89,17 @@ private enum LiquidGlassCornerStyle {
         if clipOverlay {
             view.clipsToBounds = true
         }
+    }
+
+    static func reset(to view: UIView) {
+        let square = UICornerRadius.fixed(0)
+        view.cornerConfiguration = .corners(
+            topLeftRadius: square,
+            topRightRadius: square,
+            bottomLeftRadius: square,
+            bottomRightRadius: square
+        )
+        view.clipsToBounds = false
     }
 }
 
@@ -475,11 +505,13 @@ private final class NativeKeyButton: UIButton {
         }
     }
 
-    /// KeyboardKit 10.5 uses a weight slightly heavier than `.regular` for
-    /// letters and SF Symbols so iOS 26 caps match the native UK keyboard.
+    /// Latin UK caps on iOS 26 run a touch heavier than `.regular`. Sinhala
+    /// letterforms (Wijesekara and both phonetic layouts) fill in at `.medium`
+    /// and look bolder than Apple's Sinhala keyboard, so letters stay
+    /// `.regular`. Symbols can still follow the native iOS 26 weight.
     private var glyphFontWeight: UIFont.Weight {
-        if usesIOS26KeyboardAppearance { return .medium }
-        return isUtility ? .medium : .regular
+        if isUtility { return .medium }
+        return .regular
     }
 
     private var glyphSymbolWeight: UIImage.SymbolWeight {
@@ -706,7 +738,7 @@ private enum EmojiCategory: CaseIterable, Hashable {
 /// update, rendered by Apple's own color emoji font.
 private enum EmojiCatalog {
     private static let recentKey = "AksharaRecentEmoji"
-    private static let catalogCachePrefix = "AksharaEmojiCatalog.v4"
+    private static let catalogCachePrefix = "AksharaEmojiCatalog.v5"
     private static let groupPrefix = "akshara-emoji-group:"
     private static let orderPrefix = "akshara-emoji-order:"
     private static let topRowFallback = ["😀", "😂", "🥹", "❤️", "👍", "🙏", "🔥", "🎉", "😍", "👏"]
@@ -757,6 +789,11 @@ private enum EmojiCatalog {
         // system's unsupported joined emoji.
         let sequences = searchIndex.keys.filter { emoji in
             guard !baseSet.contains(emoji), emoji.unicodeScalars.contains(where: { $0.properties.isEmoji }) else {
+                return false
+            }
+            // Skin-tone variants are generated at display time from the
+            // shared setting, so the catalog only stores the base form.
+            guard !emoji.unicodeScalars.contains(where: { $0.properties.isEmojiModifier }) else {
                 return false
             }
             return emoji.unicodeScalars.allSatisfy { scalar in
@@ -834,80 +871,12 @@ private enum EmojiCatalog {
     /// with its own shared setting while keeping actual selections intact in
     /// Recents.
     static func applyingPreferredSkinTone(to emoji: [String]) -> [String] {
-        let tone = KeyboardPreferences.emojiSkinTone()
-        var variants: [String: [String]] = [:]
-        for value in emoji {
-            variants[skinToneFreeKey(for: value), default: []].append(value)
-        }
-
-        var seen = Set<String>()
-        return emoji.compactMap { value in
-            let key = skinToneFreeKey(for: value)
-            guard seen.insert(key).inserted, let choices = variants[key] else { return nil }
-            if let modifier = tone.modifierScalar,
-               let preferred = choices.first(where: { $0.unicodeScalars.contains(modifier) }) {
-                return preferred
-            }
-            return choices.first(where: { !containsSkinTone($0) }) ?? choices[0]
-        }
+        EmojiSkinToneApplicator.applyingPreferredSkinTone(to: emoji)
     }
 
-    /// Apply the shared default skin tone to a single suggestion emoji. ZWJ
-    /// sequences are left alone; simple gesture/people bases get the modifier.
+    /// Apply the shared default skin tone to a single suggestion emoji.
     static func withPreferredSkinTone(_ emoji: String) -> String {
-        guard let modifier = KeyboardPreferences.emojiSkinTone().modifierScalar else {
-            return emoji
-        }
-        guard !containsSkinTone(emoji) else { return emoji }
-        guard !emoji.unicodeScalars.contains(where: { $0.value == 0x200D }) else {
-            return emoji
-        }
-        guard let base = emoji.unicodeScalars.first(where: { $0.properties.isEmoji && !isSkinTone($0) }),
-              supportsFitzpatrickModifier(base.value) else {
-            return emoji
-        }
-        var scalars = String.UnicodeScalarView()
-        var inserted = false
-        for scalar in emoji.unicodeScalars {
-            if scalar.value == 0xFE0F {
-                if !inserted {
-                    scalars.append(base)
-                    scalars.append(modifier)
-                    inserted = true
-                }
-                continue
-            }
-            if !inserted && scalar == base {
-                scalars.append(scalar)
-                scalars.append(modifier)
-                inserted = true
-            } else {
-                scalars.append(scalar)
-            }
-        }
-        return String(scalars)
-    }
-
-    private static func supportsFitzpatrickModifier(_ value: UInt32) -> Bool {
-        (0x1F385...0x1F3CC).contains(value)
-            || (0x1F442...0x1F4AA).contains(value)
-            || (0x1F574...0x1F596).contains(value)
-            || (0x1F645...0x1F64F).contains(value)
-            || (0x1F6A3...0x1F6CC).contains(value)
-            || (0x1F90C...0x1F9FF).contains(value)
-            || (0x1FAC0...0x1FAFF).contains(value)
-    }
-
-    private static func skinToneFreeKey(for emoji: String) -> String {
-        String(String.UnicodeScalarView(emoji.unicodeScalars.filter { !isSkinTone($0) }))
-    }
-
-    private static func containsSkinTone(_ emoji: String) -> Bool {
-        emoji.unicodeScalars.contains(where: isSkinTone)
-    }
-
-    private static func isSkinTone(_ scalar: UnicodeScalar) -> Bool {
-        (0x1F3FB...0x1F3FF).contains(scalar.value)
+        EmojiSkinToneApplicator.withPreferredSkinTone(emoji)
     }
 
     static func record(_ emoji: String) {
@@ -922,7 +891,8 @@ private enum EmojiCatalog {
 
     static func topRow() -> [String] {
         let recentEmoji = recent()
-        return Array((recentEmoji + topRowFallback.filter { !recentEmoji.contains($0) }).prefix(10))
+        let fallback = applyingPreferredSkinTone(to: topRowFallback.filter { !recentEmoji.contains($0) })
+        return Array((recentEmoji + fallback).prefix(10))
     }
 
     /// Official Unicode CLDR annotations provide the names and keywords used
@@ -971,9 +941,9 @@ private enum EmojiCatalog {
             }
             return (entry.emoji, score)
         }
-        return matches.sorted { lhs, rhs in
+        return Array(applyingPreferredSkinTone(to: matches.sorted { lhs, rhs in
             lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1
-        }.prefix(8).map(\.0)
+        }.map(\.0)).prefix(8))
     }
 }
 
@@ -1002,41 +972,25 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     private let titleLabel = UILabel()
     private let searchField = UISearchTextField()
     private let emojiSuggestionRow = UIStackView()
-    private let searchKeyboard = UIStackView()
+    private let searchKeyboard = KeyboardGridView()
     private var searchQuery = ""
     private var emojiSuggestionButtons: [UIButton] = []
     private enum SearchLayer { case letters, numbers, symbols }
     private var searchLayer: SearchLayer = .letters
     private var searchShift = false
-    private var searchButtons: [UIButton] = []
+    private var searchKeyMetricConstraints: [(NSLayoutConstraint, () -> CGFloat)] = []
+    private var searchKeyCapInsets: [(NativeKeyButton, () -> UIEdgeInsets)] = []
+    private var searchKeyboardLeading: NSLayoutConstraint?
+    private var searchKeyboardTrailing: NSLayoutConstraint?
+    private weak var categoryDeleteButton: UIControl?
+    private var searchDeleteRepeater: Timer?
+    var documentDeleteControl: UIView? { categoryDeleteButton }
 
-    /// iOS 16's Emoji search keyboard has a cooler chrome, softer utility
-    /// keys, and a deliberately indented, equal-width A–L row. Keep this
-    /// compatibility treatment isolated so later iOS releases retain the
-    /// current keyboard appearance.
+    /// iOS 16's Emoji search field uses a cooler chrome. Letter keys now use
+    /// the same phonetic English keycaps as the main keyboard.
     private var usesIOS16EmojiSearchAppearance: Bool {
         if #available(iOS 17.0, *) { return false }
         return true
-    }
-
-    private var searchKeySurfaceColor: UIColor {
-        guard usesIOS16EmojiSearchAppearance else { return .systemBackground }
-        return UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.40, alpha: 1) : .white }
-    }
-
-    private var searchUtilitySurfaceColor: UIColor {
-        UIColor { [usesIOS16EmojiSearchAppearance] traits in
-            if usesIOS16EmojiSearchAppearance {
-                return traits.userInterfaceStyle == .dark
-                    ? UIColor(white: 0.32, alpha: 1)
-                    : UIColor(red: 190 / 255, green: 193 / 255, blue: 202 / 255, alpha: 1)
-            }
-            let highContrast = KeyboardPreferences.hotPath.highContrastEnabled
-            if #available(iOS 26.0, *), !highContrast {
-                return UIColor.systemBackground.resolvedColor(with: traits)
-            }
-            return UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
-        }
     }
 
     override init(frame: CGRect) {
@@ -1081,6 +1035,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         letters.setTitle("ABC", for: .normal)
         letters.titleLabel?.font = .systemFont(ofSize: 15, weight: .regular)
         letters.setTitleColor(.label, for: .normal)
+        letters.backgroundColor = Self.transparentHitFill
         letters.addTarget(self, action: #selector(dismissPicker), for: .touchUpInside)
         categoryBar.addArrangedSubview(letters)
         letters.widthAnchor.constraint(equalToConstant: 51).isActive = true
@@ -1113,6 +1068,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             button.setImage(UIImage(systemName: item.symbolName), for: .normal)
             button.tintColor = .secondaryLabel
             button.setPreferredSymbolConfiguration(.init(pointSize: 19, weight: .regular), forImageIn: .normal)
+            button.backgroundColor = Self.transparentHitFill
             button.tag = EmojiCategory.allCases.firstIndex(of: item) ?? 0
             button.addTarget(self, action: #selector(selectCategory(_:)), for: .touchUpInside)
             categoryButtons[item] = button
@@ -1132,14 +1088,19 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         delete.setImage(UIImage(systemName: "delete.left"), for: .normal)
         delete.tintColor = .label
         delete.setPreferredSymbolConfiguration(.init(pointSize: 21, weight: .regular), forImageIn: .normal)
+        delete.backgroundColor = Self.transparentHitFill
+        delete.accessibilityLabel = "Delete"
+        delete.isExclusiveTouch = true
         delete.addTarget(self, action: #selector(deleteEmojiInput), for: .touchDown)
+        delete.addTarget(self, action: #selector(stopEmojiDeleteHold), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         let deleteHold = UILongPressGestureRecognizer(target: self, action: #selector(handleEmojiDeleteHold(_:)))
-        deleteHold.minimumPressDuration = 0.4
+        deleteHold.minimumPressDuration = 0.42
         deleteHold.allowableMovement = 80
         deleteHold.cancelsTouchesInView = false
         delete.addGestureRecognizer(deleteHold)
         categoryBar.addArrangedSubview(delete)
         delete.widthAnchor.constraint(equalToConstant: 51).isActive = true
+        categoryDeleteButton = delete
 
         collectionView.backgroundColor = .clear
         collectionView.alwaysBounceHorizontal = true
@@ -1162,6 +1123,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             button.titleLabel?.font = .systemFont(ofSize: 27)
             // The title is replaced as the query changes. Read it at tap time
             // rather than capturing the original default-row emoji.
+            button.backgroundColor = Self.transparentHitFill
             button.addAction(UIAction { [weak self, weak button] _ in
                 guard let emoji = button?.currentTitle, !emoji.isEmpty else { return }
                 self?.onSelect?(emoji)
@@ -1171,63 +1133,13 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         }
 
         searchKeyboard.axis = .vertical
-        searchKeyboard.spacing = 6
+        searchKeyboard.spacing = 11
         searchKeyboard.distribution = .fillEqually
         searchKeyboard.translatesAutoresizingMaskIntoConstraints = false
         searchKeyboard.isHidden = true
+        searchKeyboard.expandsToRowEdges = true
         addSubview(searchKeyboard)
-        for (rowIndex, row) in [["q","w","e","r","t","y","u","i","o","p"], ["a","s","d","f","g","h","j","k","l"], ["⇧","z","x","c","v","b","n","m","⌫"], ["123","emoji","space","Search"]].enumerated() {
-            let stack = UIStackView()
-            stack.axis = .horizontal
-            stack.spacing = 6
-            stack.distribution = (rowIndex == 0 || (usesIOS16EmojiSearchAppearance && rowIndex == 1)) ? .fillEqually : .fill
-            if rowIndex == 1 {
-                stack.layoutMargins = UIEdgeInsets(top: 0, left: 21, bottom: 0, right: 21)
-                stack.isLayoutMarginsRelativeArrangement = true
-            }
-            var letterButtons: [UIButton] = []
-            for key in row {
-                let button = UIButton(type: .system)
-                button.setTitle(["space", "emoji", "Search"].contains(key) ? nil : key, for: .normal)
-                button.setTitleColor(key == "Search" ? .white : .label, for: .normal)
-                let glass = KeyboardChromeAppearance.usesLiquidGlassSurfaces
-                button.titleLabel?.font = .systemFont(ofSize: 20, weight: glass ? .medium : .regular)
-                // `face.smiling` is the native-style, open-mouth emoji key.
-                // Never give this button a title as well: UIKit otherwise
-                // renders the legacy text glyph beside the SF Symbol.
-                if key == "emoji" {
-                    button.setImage(UIImage(systemName: "face.smiling"), for: .normal)
-                    button.tintColor = .label
-                    button.setPreferredSymbolConfiguration(.init(pointSize: 20, weight: glass ? .medium : .regular), forImageIn: .normal)
-                }
-                if key == "Search" {
-                    button.setTitle(nil, for: .normal)
-                    button.setImage(UIImage(systemName: "checkmark"), for: .normal)
-                    button.tintColor = .white
-                    button.setPreferredSymbolConfiguration(.init(pointSize: 20, weight: glass ? .medium : .regular), forImageIn: .normal)
-                }
-                button.backgroundColor = key == "Search" ? .systemBlue : (key == "⇧" || key == "⌫" || key == "123" ? searchUtilitySurfaceColor : searchKeySurfaceColor)
-                button.layer.cornerRadius = glass ? 9 : 7
-                button.accessibilityIdentifier = key
-                button.addAction(UIAction { [weak self, weak button] _ in
-                    guard let key = button?.accessibilityIdentifier else { return }
-                    self?.pressSearchKey(key)
-                }, for: .touchUpInside)
-                searchButtons.append(button)
-                stack.addArrangedSubview(button)
-                if rowIndex == 2, key != "⇧", key != "⌫" { letterButtons.append(button) }
-                if rowIndex == 2, key == "⇧" || key == "⌫" { button.widthAnchor.constraint(equalToConstant: 42).isActive = true }
-                if rowIndex == 3 {
-                    switch key {
-                    case "123", "emoji": button.widthAnchor.constraint(equalToConstant: 42).isActive = true
-                    case "Search": button.widthAnchor.constraint(equalToConstant: 92).isActive = true
-                    default: break
-                    }
-                }
-            }
-            for button in letterButtons.dropFirst() { button.widthAnchor.constraint(equalTo: letterButtons[0].widthAnchor).isActive = true }
-            searchKeyboard.addArrangedSubview(stack)
-        }
+        rebuildSearchKeyboard()
         NSLayoutConstraint.activate([
             searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
@@ -1247,19 +1159,29 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             emojiSuggestionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             emojiSuggestionRow.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 4),
             emojiSuggestionRow.heightAnchor.constraint(equalToConstant: 38),
-            // Native search layouts leave a slightly wider outer gutter than
-            // the main custom keyboard, keeping letter keys compact.
-            searchKeyboard.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 15),
-            searchKeyboard.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -15),
             searchKeyboard.topAnchor.constraint(equalTo: emojiSuggestionRow.bottomAnchor, constant: 5),
             searchKeyboard.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
         ])
+        searchKeyboardLeading = searchKeyboard.leadingAnchor.constraint(equalTo: leadingAnchor, constant: searchHorizontalInset)
+        searchKeyboardTrailing = searchKeyboard.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -searchHorizontalInset)
+        searchKeyboardLeading?.isActive = true
+        searchKeyboardTrailing?.isActive = true
         updateCategorySelection()
         loadEmojiCatalogInBackground()
     }
 
     required init?(coder: NSCoder) { nil }
-    deinit { onDeleteHoldEnded?() }
+    deinit {
+        searchDeleteRepeater?.invalidate()
+        onDeleteHoldEnded?()
+    }
+
+    private static let transparentHitFill = UIColor(white: 0.5, alpha: 0.02)
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        applySearchKeyboardMetrics()
+    }
 
     private func loadEmojiCatalogInBackground() {
         emojiCatalogLoadGeneration += 1
@@ -1286,18 +1208,22 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     }
     @objc private func dismissPicker() { onDismiss?() }
     @objc private func deleteEmojiInput() { onDelete?() }
+    @objc private func stopEmojiDeleteHold() {
+        stopSearchDeleteRepeat()
+        onDeleteHoldEnded?()
+    }
 
     @objc private func handleEmojiDeleteHold(_ gesture: UILongPressGestureRecognizer) {
         switch gesture.state {
         case .began:
             onDeleteHoldBegan?()
         case .ended, .failed:
-            onDeleteHoldEnded?()
+            stopEmojiDeleteHold()
         case .cancelled:
             if let button = gesture.view as? UIControl, button.isTracking || button.isHighlighted {
                 return
             }
-            onDeleteHoldEnded?()
+            stopEmojiDeleteHold()
         default:
             break
         }
@@ -1309,27 +1235,71 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         categoryBar.isHidden = true
         emojiSuggestionRow.isHidden = false
         searchKeyboard.isHidden = false
+        rebuildSearchKeyboard()
         updateEmojiSearchResults()
         return false
     }
 
     private func pressSearchKey(_ key: String) {
         switch key {
-        case "⌫": if !searchQuery.isEmpty { searchQuery.removeLast() }
+        case "delete":
+            deleteSearchInputOnce()
+            return
         case "space": searchQuery += " "
-        case "⇧": searchShift.toggle(); refreshSearchKeys(); return
-        case "123": searchLayer = .numbers; refreshSearchKeys(); return
-        case "#+=": searchLayer = .symbols; refreshSearchKeys(); return
-        case "ABC": searchLayer = .letters; refreshSearchKeys(); return
-        case "emoji": endEmojiSearch(); return
-        case "Search":
-            endEmojiSearch(); return
+        case "shift":
+            searchShift.toggle()
+            refreshSearchKeyAppearance()
+            return
+        case "123":
+            searchLayer = .numbers
+            rebuildSearchKeyboard()
+            return
+        case "#+=":
+            searchLayer = .symbols
+            rebuildSearchKeyboard()
+            return
+        case "ABC":
+            searchLayer = .letters
+            rebuildSearchKeyboard()
+            return
+        case "emoji", "Search":
+            endEmojiSearch()
+            return
         default:
-            searchQuery += key
-            if searchShift { searchShift = false; refreshSearchKeys() }
+            if searchShift, key.count == 1, key.first?.isLetter == true {
+                searchQuery += key.uppercased()
+                searchShift = false
+                refreshSearchKeyAppearance()
+            } else {
+                searchQuery += key
+            }
         }
         searchField.text = searchQuery
         updateEmojiSearchResults()
+    }
+
+    private func deleteSearchInputOnce() {
+        if !searchQuery.isEmpty {
+            searchQuery.removeLast()
+            searchField.text = searchQuery
+            updateEmojiSearchResults()
+            return
+        }
+        onDelete?()
+    }
+
+    private func beginSearchDeleteRepeat() {
+        searchDeleteRepeater?.invalidate()
+        let repeater = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            self?.deleteSearchInputOnce()
+        }
+        RunLoop.main.add(repeater, forMode: .common)
+        searchDeleteRepeater = repeater
+    }
+
+    private func stopSearchDeleteRepeat() {
+        searchDeleteRepeater?.invalidate()
+        searchDeleteRepeater = nil
     }
 
     private func updateEmojiSearchResults() {
@@ -1341,6 +1311,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     }
 
     private func endEmojiSearch() {
+        stopSearchDeleteRepeat()
         searchQuery = ""
         searchField.text = nil
         searchLayer = .letters
@@ -1352,33 +1323,247 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         searchKeyboard.isHidden = true
     }
 
-    private func refreshSearchKeys() {
-        let rows: [[String]]
+    private func searchKeyRows() -> [[String]] {
         switch searchLayer {
         case .letters:
             let letter: (String) -> String = { self.searchShift ? $0.uppercased() : $0 }
-            rows = [["q","w","e","r","t","y","u","i","o","p"].map(letter), ["a","s","d","f","g","h","j","k","l"].map(letter), ["⇧","z","x","c","v","b","n","m","⌫"].map { $0.count == 1 ? letter($0) : $0 }, ["123","emoji","space","Search"]]
+            return [
+                ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"].map(letter),
+                ["a", "s", "d", "f", "g", "h", "j", "k", "l"].map(letter),
+                ["shift"] + ["z", "x", "c", "v", "b", "n", "m"].map(letter) + ["delete"],
+                ["123", "emoji", "space", "Search"]
+            ]
         case .numbers:
-            rows = [["1","2","3","4","5","6","7","8","9","0"], ["-","/",":",";","(",")","$","&","@"], ["#+=",".",",","?","!","'","(",")","⌫"], ["ABC","emoji","space","Search"]]
+            return [
+                ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+                ["-", "/", ":", ";", "(", ")", "$", "&", "@"],
+                ["#+=", ".", ",", "?", "!", "'", "delete"],
+                ["ABC", "emoji", "space", "Search"]
+            ]
         case .symbols:
-            rows = [["[","]","{","}","#","%","^","*","+","="], ["_","\\","|","~","<",">","€","£","¥"], ["123",".",",","?","!","'","(",")","⌫"], ["ABC","emoji","space","Search"]]
+            return [
+                ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="],
+                ["_", "\\", "|", "~", "<", ">", "€", "£", "¥"],
+                ["123", ".", ",", "?", "!", "'", "delete"],
+                ["ABC", "emoji", "space", "Search"]
+            ]
         }
-        let keys = rows.flatMap { $0 }
-        for (button, key) in zip(searchButtons, keys) {
-            button.accessibilityIdentifier = key
-            button.setImage(nil, for: .normal)
-            button.setTitle(["space", "emoji", "Search"].contains(key) ? nil : key, for: .normal)
-            button.setTitleColor(key == "Search" ? .white : .label, for: .normal)
-            button.tintColor = key == "Search" ? .white : .label
-            if key == "emoji" { button.setImage(UIImage(systemName: "face.smiling"), for: .normal) }
-            if key == "Search" { button.setTitle(nil, for: .normal); button.setImage(UIImage(systemName: "checkmark"), for: .normal) }
-            button.backgroundColor = key == "Search" ? .systemBlue : (["⇧", "⌫", "123", "ABC", "#+="].contains(key) ? searchUtilitySurfaceColor : searchKeySurfaceColor)
+    }
+
+    private var searchHorizontalInset: CGFloat {
+        if usesIOS16EmojiSearchAppearance || bounds.width < 380 { return 5 }
+        return KeyboardPreferences.hotPath.keySpacing == .standard ? 20 / 3 : 7
+    }
+
+    private var searchGap: CGFloat {
+        CGFloat(KeyboardPreferences.hotPath.keySpacingHorizontalGap)
+    }
+
+    private var searchGridWidth: CGFloat {
+        let width = searchKeyboard.bounds.width
+        if width > 1 { return width }
+        return max(0, bounds.width - searchHorizontalInset * 2)
+    }
+
+    private var searchTenKeyWidth: CGFloat {
+        max(0, (searchGridWidth - searchGap * 9) / 10)
+    }
+
+    private var searchSecondRowInset: CGFloat {
+        max(0, (searchGridWidth - (searchTenKeyWidth * 9 + searchGap * 8)) / 2)
+    }
+
+    private var searchUtilityWidth: CGFloat {
+        max(0, (searchGridWidth - (searchTenKeyWidth * 7 + searchGap * 8)) / 2)
+    }
+
+    private var searchThirdRowInnerGap: CGFloat {
+        max(
+            searchGap,
+            (searchGridWidth - (searchUtilityWidth * 2 + searchTenKeyWidth * 7 + searchGap * 6)) / 2
+        )
+    }
+
+    private var searchBottomSmallWidth: CGFloat { searchTenKeyWidth * 1.30 }
+    private var searchReturnWidth: CGFloat { searchTenKeyWidth * 2.80 }
+
+    private func rebuildSearchKeyboard() {
+        searchKeyboard.prepareForKeyRebuild()
+        searchKeyMetricConstraints.removeAll()
+        searchKeyCapInsets.removeAll()
+        UIView.performWithoutAnimation {
+            searchKeyboard.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        }
+        searchKeyboard.horizontalGap = searchGap
+        searchKeyboard.spacing = 11
+        searchKeyboard.expandsToRowEdges = searchLayer == .letters
+        for (index, keys) in searchKeyRows().enumerated() {
+            searchKeyboard.addArrangedSubview(makeSearchRow(keys, index: index))
+        }
+        applySearchKeyboardMetrics()
+    }
+
+    private func makeSearchRow(_ keys: [String], index: Int) -> UIStackView {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.spacing = searchGap
+        row.alignment = .fill
+        let isLetters = searchLayer == .letters
+        let isBottom = keys.contains("space")
+        let isControl = keys.contains("shift") || (index == 2 && keys.contains("delete"))
+        let isNineKey = isLetters && keys.contains("a") && keys.last == "l"
+        row.distribution = (isBottom || (isControl && isLetters) || isNineKey) ? .fill : .fillEqually
+        for keyName in keys {
+            let button = makeSearchKey(keyName)
+            row.addArrangedSubview(button)
+            if isNineKey, keyName.lowercased() == "a" {
+                addSearchWidth(to: button) { self.searchTenKeyWidth + self.searchSecondRowInset }
+                let insets = { UIEdgeInsets(top: 0, left: self.searchSecondRowInset, bottom: 0, right: 0) }
+                button.applyCharacterEdgeInsets(insets())
+                searchKeyCapInsets.append((button, insets))
+            } else if isNineKey, keyName.lowercased() == "l" {
+                addSearchWidth(to: button) { self.searchTenKeyWidth + self.searchSecondRowInset }
+                let insets = { UIEdgeInsets(top: 0, left: 0, bottom: 0, right: self.searchSecondRowInset) }
+                button.applyCharacterEdgeInsets(insets())
+                searchKeyCapInsets.append((button, insets))
+            } else if isBottom {
+                switch keyName {
+                case "123", "ABC", "emoji":
+                    addSearchWidth(to: button) { self.searchBottomSmallWidth }
+                case "Search":
+                    addSearchWidth(to: button) { self.searchReturnWidth }
+                default:
+                    break
+                }
+            } else if isControl, isLetters, keyName == "shift" || keyName == "delete" {
+                addSearchWidth(to: button) { self.searchUtilityWidth }
+            } else if isControl, isLetters, keyName.lowercased() == "z" {
+                addSearchWidth(to: button) { self.searchTenKeyWidth + self.searchThirdRowInnerGap }
+                let insets = { UIEdgeInsets(top: 0, left: self.searchThirdRowInnerGap, bottom: 0, right: 0) }
+                button.applyCharacterEdgeInsets(insets())
+                searchKeyCapInsets.append((button, insets))
+            } else if isControl, isLetters, keyName.lowercased() == "m" {
+                addSearchWidth(to: button) { self.searchTenKeyWidth + self.searchThirdRowInnerGap }
+                let insets = { UIEdgeInsets(top: 0, left: 0, bottom: 0, right: self.searchThirdRowInnerGap) }
+                button.applyCharacterEdgeInsets(insets())
+                searchKeyCapInsets.append((button, insets))
+            }
+        }
+        return row
+    }
+
+    private func makeSearchKey(_ key: String) -> NativeKeyButton {
+        let utility = ["shift", "delete", "123", "ABC", "#+=", "emoji"].contains(key)
+        let title: String?
+        let symbol: String?
+        switch key {
+        case "shift":
+            title = nil
+            symbol = "shift"
+        case "delete":
+            title = nil
+            symbol = "delete.left"
+        case "emoji":
+            title = nil
+            symbol = "face.smiling"
+        case "Search":
+            title = nil
+            symbol = "checkmark"
+        case "space":
+            title = nil
+            symbol = nil
+        default:
+            title = key
+            symbol = nil
+        }
+        let button = NativeKeyButton(keyName: key, title: title, symbol: symbol, utility: utility)
+        button.applyLayoutMetrics(isPad: traitCollection.userInterfaceIdiom == .pad)
+        button.accessibilityLabel = key == "space" ? "space" : (key == "Search" ? "Search" : title ?? key)
+        if key == "Search" {
+            button.backgroundColor = .systemBlue
+            button.tintColor = .white
+            button.setTitleColor(.white, for: .normal)
+        }
+        let liftEvent: UIControl.Event = ["space", "Search", "123", "ABC", "#+=", "emoji", "shift"].contains(key)
+            ? .touchUpInside
+            : .touchDown
+        button.addAction(UIAction { [weak self, weak button] _ in
+            guard let key = button?.keyName else { return }
+            self?.pressSearchKey(key)
+        }, for: liftEvent)
+        if key == "delete" {
+            button.isExclusiveTouch = true
+            button.trackingHitOutset = 44
+            button.touchEnded = { [weak self] in self?.stopSearchDeleteRepeat(); self?.onDeleteHoldEnded?() }
+            button.touchCancelled = { [weak self] in
+                guard let self else { return }
+                if self.searchQuery.isEmpty {
+                    self.onDeleteHoldEnded?()
+                }
+            }
+            let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleSearchDeleteHold(_:)))
+            hold.minimumPressDuration = 0.42
+            hold.allowableMovement = 80
+            hold.cancelsTouchesInView = false
+            button.addGestureRecognizer(hold)
+        }
+        return button
+    }
+
+    @objc private func handleSearchDeleteHold(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            if searchQuery.isEmpty {
+                onDeleteHoldBegan?()
+            } else {
+                beginSearchDeleteRepeat()
+            }
+        case .ended, .failed:
+            stopSearchDeleteRepeat()
+            onDeleteHoldEnded?()
+        case .cancelled:
+            if let button = gesture.view as? UIControl, button.isTracking || button.isHighlighted {
+                return
+            }
+            stopSearchDeleteRepeat()
+            onDeleteHoldEnded?()
+        default:
+            break
+        }
+    }
+
+    private func addSearchWidth(to button: UIView, value: @escaping () -> CGFloat) {
+        let constraint = button.widthAnchor.constraint(equalToConstant: value())
+        constraint.isActive = true
+        searchKeyMetricConstraints.append((constraint, value))
+    }
+
+    private func applySearchKeyboardMetrics() {
+        searchKeyboardLeading?.constant = searchHorizontalInset
+        searchKeyboardTrailing?.constant = -searchHorizontalInset
+        searchKeyboard.horizontalGap = searchGap
+        for case let row as UIStackView in searchKeyboard.arrangedSubviews {
+            row.spacing = searchGap
+        }
+        searchKeyMetricConstraints.forEach { constraint, value in constraint.constant = value() }
+        searchKeyCapInsets.forEach { button, value in button.applyCharacterEdgeInsets(value()) }
+        searchKeyboard.setNeedsLayout()
+    }
+
+    private func refreshSearchKeyAppearance() {
+        let letter: (String) -> String = { self.searchShift ? $0.uppercased() : $0 }
+        for case let row as UIStackView in searchKeyboard.arrangedSubviews {
+            for case let button as NativeKeyButton in row.arrangedSubviews {
+                let key = button.keyName
+                guard key.count == 1, key.first?.isLetter == true else { continue }
+                button.setTitle(letter(key.lowercased()), for: .normal)
+            }
         }
     }
 
     /// Re-resolve keycaps after a light/dark toggle while this picker is up.
     func refreshDynamicSurfaces() {
-        refreshSearchKeys()
+        rebuildSearchKeyboard()
         updateCategorySelection()
         searchField.textColor = .label
         searchField.tintColor = .systemBlue
@@ -1390,7 +1575,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
             let selected = item == category
             button.alpha = selected ? 1 : 0.48
             button.tintColor = selected ? .label : .secondaryLabel
-            button.backgroundColor = .clear
+            button.backgroundColor = Self.transparentHitFill
             categorySelectionIndicators[item]?.isHidden = !selected
         }
     }
@@ -1496,8 +1681,11 @@ private final class CandidateMorphLabel: UIView {
     var font: UIFont = .systemFont(ofSize: 18) {
         didSet {
             guard oldValue != font else { return }
-            glyphViews.forEach { $0.font = font }
-            applyFrames(to: glyphViews, characters: Array(text), animated: false)
+            if bounds.width > 1, !text.isEmpty {
+                rebuild(text)
+            } else {
+                glyphViews.forEach { $0.font = font }
+            }
         }
     }
 
@@ -1505,6 +1693,8 @@ private final class CandidateMorphLabel: UIView {
     private var glyphViews: [UILabel] = []
     private var retiringViews: [UILabel] = []
     private var lastLayoutSize: CGSize = .zero
+    private static let ellipsis: Character = "…"
+    private static let horizontalInset: CGFloat = 4
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1527,7 +1717,13 @@ private final class CandidateMorphLabel: UIView {
             return
         }
         if sizeChanged {
-            applyFrames(to: glyphViews, characters: Array(text), animated: false)
+            let run = displayedRun(for: text)
+            let current = glyphViews.compactMap(\.text).joined()
+            if String(run.characters) != current {
+                rebuild(text)
+            } else if !run.characters.isEmpty {
+                applyFrames(to: glyphViews, characters: run.characters, truncated: run.truncated, animated: false)
+            }
         }
     }
 
@@ -1557,7 +1753,8 @@ private final class CandidateMorphLabel: UIView {
             view.transform = .identity
             view.alpha = 1
         }
-        applyFrames(to: glyphViews, characters: Array(text), animated: false)
+        let current = displayedRun(for: text)
+        applyFrames(to: glyphViews, characters: current.characters, truncated: current.truncated, animated: false)
     }
 
     private func rebuild(_ incoming: String) {
@@ -1565,9 +1762,9 @@ private final class CandidateMorphLabel: UIView {
         glyphViews.removeAll()
         text = incoming
         guard !incoming.isEmpty, bounds.width > 1 else { return }
-        let characters = Array(incoming)
-        let frames = glyphFrames(for: characters)
-        glyphViews = zip(characters, frames).map { character, frame in
+        let run = displayedRun(for: incoming)
+        let frames = glyphFrames(for: run.characters, truncated: run.truncated)
+        glyphViews = zip(run.characters, frames).map { character, frame in
             let label = makeGlyph(character)
             label.frame = frame
             addSubview(label)
@@ -1576,14 +1773,20 @@ private final class CandidateMorphLabel: UIView {
     }
 
     private func morph(to incoming: String) {
-        let oldCharacters = Array(text)
-        let newCharacters = Array(incoming)
+        let oldRun = displayedRun(for: text)
+        let newRun = displayedRun(for: incoming)
+        let oldCharacters = oldRun.characters
+        let newCharacters = newRun.characters
         guard glyphViews.count == oldCharacters.count else {
             rebuild(incoming)
             return
         }
-        let oldFrames = glyphFrames(for: oldCharacters)
-        let newFrames = glyphFrames(for: newCharacters)
+        if oldCharacters.elementsEqual(newCharacters) {
+            text = incoming
+            return
+        }
+        let oldFrames = glyphFrames(for: oldCharacters, truncated: oldRun.truncated)
+        let newFrames = glyphFrames(for: newCharacters, truncated: newRun.truncated)
         let overlap = min(oldCharacters.count, newCharacters.count)
 
         var nextViews = [UILabel?](repeating: nil, count: newCharacters.count)
@@ -1668,9 +1871,9 @@ private final class CandidateMorphLabel: UIView {
         return label
     }
 
-    private func applyFrames(to views: [UILabel], characters: [Character], animated: Bool) {
+    private func applyFrames(to views: [UILabel], characters: [Character], truncated: Bool, animated: Bool) {
         guard views.count == characters.count else { return }
-        let frames = glyphFrames(for: characters)
+        let frames = glyphFrames(for: characters, truncated: truncated)
         let changes = {
             for (view, frame) in zip(views, frames) {
                 view.frame = frame
@@ -1688,7 +1891,47 @@ private final class CandidateMorphLabel: UIView {
         )
     }
 
-    private func glyphFrames(for characters: [Character]) -> [CGRect] {
+    private struct DisplayedRun {
+        let characters: [Character]
+        let truncated: Bool
+    }
+
+    /// Keep as many leading grapheme clusters as fit, then a trailing
+    /// ellipsis. Measuring clusters (not UTF-16) avoids splitting Sinhala
+    /// conjuncts while still clipping the rail the way QuickType does.
+    private func displayedRun(for string: String) -> DisplayedRun {
+        let characters = Array(string)
+        guard !characters.isEmpty else { return DisplayedRun(characters: [], truncated: false) }
+        let available = bounds.width - Self.horizontalInset * 2
+        guard available > 1 else { return DisplayedRun(characters: characters, truncated: false) }
+
+        let sizes = characters.map { String($0).size(withAttributes: [.font: font]).width }
+        let totalWidth = sizes.reduce(CGFloat.zero, +)
+        if totalWidth <= available {
+            return DisplayedRun(characters: characters, truncated: false)
+        }
+
+        let ellipsisWidth = String(Self.ellipsis).size(withAttributes: [.font: font]).width
+        var used = ellipsisWidth
+        var count = 0
+        for width in sizes {
+            if used + width > available { break }
+            used += width
+            count += 1
+        }
+        if count == 0 {
+            return DisplayedRun(
+                characters: ellipsisWidth <= available ? [Self.ellipsis] : [],
+                truncated: true
+            )
+        }
+        return DisplayedRun(
+            characters: Array(characters.prefix(count)) + [Self.ellipsis],
+            truncated: true
+        )
+    }
+
+    private func glyphFrames(for characters: [Character], truncated: Bool) -> [CGRect] {
         guard !characters.isEmpty else { return [] }
         let sizes = characters.map { String($0).size(withAttributes: [.font: font]) }
         let totalWidth = sizes.reduce(CGFloat.zero) { $0 + $1.width }
@@ -1696,11 +1939,10 @@ private final class CandidateMorphLabel: UIView {
         // typographic mid-line; `lineHeight` includes leftover leading that
         // dropped Sinhala (and even Latin) a few points in this short rail.
         let inkHeight = font.ascender - font.descender
-        let y = ((bounds.height - inkHeight) / 2) - 1
-        var x = (bounds.width - totalWidth) / 2
-        if totalWidth > bounds.width - 8 {
-            x = 4
-        }
+        let y = (bounds.height - inkHeight) / 2
+        var x = truncated
+            ? Self.horizontalInset
+            : (bounds.width - totalWidth) / 2
         return sizes.map { size in
             let frame = CGRect(x: x, y: y, width: size.width, height: max(font.lineHeight, inkHeight))
             x += size.width
@@ -1718,6 +1960,7 @@ private final class CandidateButton: UIButton {
         super.init(frame: .zero)
         adjustsImageWhenHighlighted = false
         isEnabled = true
+        clipsToBounds = true
         morphLabel.isUserInteractionEnabled = false
         insertSubview(morphLabel, at: 0)
         isAccessibilityElement = false
@@ -1759,6 +2002,375 @@ private final class CandidateButton: UIButton {
         isAccessibilityElement = text != nil
         accessibilityLabel = text
         morphLabel.setText(text, animated: animated)
+    }
+}
+
+/// Full-bleed clipboard row. Label is display-only; the control owns the whole
+/// width so short text still receives taps and horizontal swipe-to-delete.
+private final class ClipboardHistoryRowControl: UIControl {
+    var onActivate: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    private let label = UILabel()
+    private let deleteButton = UIButton(type: .system)
+    private let content = UIView()
+    private var contentLeading: NSLayoutConstraint!
+    private var panStartX: CGFloat = 0
+    private let deleteRevealWidth: CGFloat = 72
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        backgroundColor = .clear
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+
+        content.translatesAutoresizingMaskIntoConstraints = false
+        content.isUserInteractionEnabled = false
+        content.backgroundColor = .clear
+        addSubview(content)
+
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 16)
+        label.textColor = .label
+        label.numberOfLines = 2
+        label.lineBreakMode = .byTruncatingTail
+        label.isUserInteractionEnabled = false
+        content.addSubview(label)
+
+        deleteButton.translatesAutoresizingMaskIntoConstraints = false
+        deleteButton.backgroundColor = .systemRed
+        deleteButton.setImage(UIImage(systemName: "trash.fill"), for: .normal)
+        deleteButton.tintColor = .white
+        deleteButton.accessibilityLabel = "Delete"
+        deleteButton.addTarget(self, action: #selector(deleteTapped), for: .touchUpInside)
+        insertSubview(deleteButton, at: 0)
+
+        contentLeading = content.leadingAnchor.constraint(equalTo: leadingAnchor)
+        NSLayoutConstraint.activate([
+            deleteButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            deleteButton.topAnchor.constraint(equalTo: topAnchor),
+            deleteButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+            deleteButton.widthAnchor.constraint(equalToConstant: deleteRevealWidth),
+
+            contentLeading,
+            content.topAnchor.constraint(equalTo: topAnchor),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor),
+            content.widthAnchor.constraint(equalTo: widthAnchor),
+
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            label.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)
+        ])
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.delegate = self
+        addGestureRecognizer(pan)
+        addTarget(self, action: #selector(rowTouched), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(text: String) {
+        label.text = text
+        accessibilityLabel = text
+        resetSwipe(animated: false)
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            content.backgroundColor = isHighlighted
+                ? UIColor.secondarySystemFill.withAlphaComponent(0.55)
+                : .clear
+        }
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.contains(point)
+    }
+
+    @objc private func rowTouched() {
+        if contentLeading.constant < -1 {
+            resetSwipe(animated: true)
+            return
+        }
+        onActivate?()
+    }
+
+    @objc private func deleteTapped() {
+        onDelete?()
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: self).x
+        switch gesture.state {
+        case .began:
+            panStartX = contentLeading.constant
+        case .changed:
+            let next = min(0, max(-deleteRevealWidth, panStartX + translation))
+            contentLeading.constant = next
+        case .ended, .cancelled:
+            let shouldOpen = contentLeading.constant < -(deleteRevealWidth * 0.45)
+                || gesture.velocity(in: self).x < -400
+            if shouldOpen, gesture.velocity(in: self).x < -900 {
+                onDelete?()
+                resetSwipe(animated: false)
+            } else {
+                setSwipeOpen(shouldOpen, animated: true)
+            }
+        default:
+            break
+        }
+    }
+
+    private func setSwipeOpen(_ open: Bool, animated: Bool) {
+        contentLeading.constant = open ? -deleteRevealWidth : 0
+        let changes = { self.layoutIfNeeded() }
+        if animated {
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut], animations: changes)
+        } else {
+            changes()
+        }
+    }
+
+    func resetSwipe(animated: Bool) {
+        setSwipeOpen(false, animated: animated)
+    }
+}
+
+extension ClipboardHistoryRowControl: UIGestureRecognizerDelegate {
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        false
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else {
+            return super.gestureRecognizerShouldBegin(gestureRecognizer)
+        }
+        let velocity = pan.velocity(in: self)
+        return abs(velocity.x) > abs(velocity.y)
+    }
+}
+
+private final class ClipboardHistoryView: UIView, UIScrollViewDelegate {
+    var onSelect: ((String) -> Void)?
+    var onDismiss: (() -> Void)?
+    var onClearAll: (() -> Void)?
+    var onDeleteAt: ((Int) -> Void)?
+
+    private var items: [String] = []
+    private var hasFullAccess = true
+    private let scrollView = UIScrollView()
+    private let stack = UIStackView()
+    private let emptyLabel = UILabel()
+    private let clearButton = UIButton(type: .system)
+    private let titleLabel = UILabel()
+    private var rowControls: [ClipboardHistoryRowControl] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        backgroundColor = .clear
+        isUserInteractionEnabled = true
+
+        let toolbar = UIView()
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.isUserInteractionEnabled = true
+        addSubview(toolbar)
+
+        titleLabel.text = "Clipboard"
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.textColor = .label
+        titleLabel.textAlignment = .center
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.isUserInteractionEnabled = false
+        toolbar.addSubview(titleLabel)
+
+        let backButton = UIButton(type: .system)
+        backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
+        backButton.tintColor = .label
+        backButton.setPreferredSymbolConfiguration(
+            .init(pointSize: 17, weight: .semibold),
+            forImageIn: .normal
+        )
+        backButton.accessibilityLabel = "Back"
+        backButton.addTarget(self, action: #selector(dismissPanel), for: .touchUpInside)
+        backButton.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(backButton)
+
+        let abc = UIButton(type: .system)
+        abc.setTitle("ABC", for: .normal)
+        abc.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+        abc.setTitleColor(.label, for: .normal)
+        abc.addTarget(self, action: #selector(dismissPanel), for: .touchUpInside)
+        abc.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(abc)
+
+        clearButton.setImage(UIImage(systemName: "trash.fill"), for: .normal)
+        clearButton.tintColor = .systemRed
+        clearButton.setPreferredSymbolConfiguration(
+            .init(pointSize: 17, weight: .regular),
+            forImageIn: .normal
+        )
+        clearButton.accessibilityLabel = "Clear History"
+        clearButton.addTarget(self, action: #selector(clearAll), for: .touchUpInside)
+        clearButton.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(clearButton)
+
+        toolbar.bringSubviewToFront(titleLabel)
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.alwaysBounceVertical = true
+        scrollView.showsVerticalScrollIndicator = true
+        scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
+        scrollView.delegate = self
+        scrollView.backgroundColor = .clear
+        addSubview(scrollView)
+
+        stack.axis = .vertical
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(stack)
+
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.numberOfLines = 0
+        emptyLabel.textAlignment = .center
+        emptyLabel.font = .systemFont(ofSize: 15)
+        emptyLabel.textColor = .secondaryLabel
+        emptyLabel.isHidden = true
+        emptyLabel.isUserInteractionEnabled = false
+        addSubview(emptyLabel)
+
+        NSLayoutConstraint.activate([
+            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            toolbar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            toolbar.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 4),
+            toolbar.heightAnchor.constraint(equalToConstant: 40),
+
+            titleLabel.centerXAnchor.constraint(equalTo: toolbar.centerXAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+
+            backButton.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor),
+            backButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            backButton.widthAnchor.constraint(equalToConstant: 40),
+            backButton.heightAnchor.constraint(equalTo: toolbar.heightAnchor),
+
+            abc.leadingAnchor.constraint(equalTo: backButton.trailingAnchor),
+            abc.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            abc.widthAnchor.constraint(equalToConstant: 48),
+            abc.heightAnchor.constraint(equalTo: toolbar.heightAnchor),
+
+            clearButton.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor),
+            clearButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            clearButton.widthAnchor.constraint(equalToConstant: 44),
+            clearButton.heightAnchor.constraint(equalTo: toolbar.heightAnchor),
+
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 4),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+
+            emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            emptyLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(items: [String], hasFullAccess: Bool) {
+        self.items = items
+        self.hasFullAccess = hasFullAccess
+        rebuildRows()
+        updateToolbarButtons()
+        updateEmptyState()
+    }
+
+    private func updateToolbarButtons() {
+        clearButton.isEnabled = hasFullAccess && !items.isEmpty
+        clearButton.alpha = clearButton.isEnabled ? 1 : 0.4
+    }
+
+    private func updateEmptyState() {
+        if !hasFullAccess {
+            emptyLabel.text = "Allow Full Access in Settings → General → Keyboard → Keyboards → Akshara to use clipboard history."
+            emptyLabel.isHidden = false
+            scrollView.isHidden = true
+            return
+        }
+        emptyLabel.text = "Copy text while Akshara is open to save it here. Tap a row to paste."
+        emptyLabel.isHidden = !items.isEmpty
+        scrollView.isHidden = false
+    }
+
+    private func rebuildRows() {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        rowControls.removeAll()
+        guard hasFullAccess else { return }
+
+        for (index, text) in items.enumerated() {
+            let row = ClipboardHistoryRowControl()
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.configure(text: text)
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
+            row.onActivate = { [weak self] in
+                self?.onSelect?(text)
+            }
+            row.onDelete = { [weak self] in
+                self?.deleteItem(at: index)
+            }
+            stack.addArrangedSubview(row)
+            rowControls.append(row)
+
+            if index < items.count - 1 {
+                let separator = UIView()
+                separator.translatesAutoresizingMaskIntoConstraints = false
+                separator.backgroundColor = UIColor.separator.withAlphaComponent(0.55)
+                separator.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale).isActive = true
+                let inset = UIView()
+                inset.translatesAutoresizingMaskIntoConstraints = false
+                inset.addSubview(separator)
+                NSLayoutConstraint.activate([
+                    separator.leadingAnchor.constraint(equalTo: inset.leadingAnchor, constant: 16),
+                    separator.trailingAnchor.constraint(equalTo: inset.trailingAnchor),
+                    separator.topAnchor.constraint(equalTo: inset.topAnchor),
+                    separator.bottomAnchor.constraint(equalTo: inset.bottomAnchor)
+                ])
+                stack.addArrangedSubview(inset)
+            }
+        }
+    }
+
+    @objc private func dismissPanel() { onDismiss?() }
+
+    @objc private func clearAll() { onClearAll?() }
+
+    private func deleteItem(at index: Int) {
+        guard items.indices.contains(index) else { return }
+        items.remove(at: index)
+        onDeleteAt?(index)
+        rebuildRows()
+        updateToolbarButtons()
+        updateEmptyState()
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        rowControls.forEach { $0.resetSwipe(animated: true) }
     }
 }
 
@@ -1875,6 +2487,12 @@ private final class CandidateRailView: UIView {
         guard #available(iOS 26.0, *) else { return }
         LiquidGlassCornerStyle.applyTopCapsule(to: self)
         LiquidGlassCornerStyle.applyTopCapsule(to: touchOverlay, clipOverlay: true)
+    }
+
+    func resetLiquidGlassTopCurveIfAvailable() {
+        guard #available(iOS 26.0, *) else { return }
+        LiquidGlassCornerStyle.reset(to: self)
+        LiquidGlassCornerStyle.reset(to: touchOverlay)
     }
 }
 
@@ -2525,7 +3143,7 @@ private final class PendingCompositionChip: UIView {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.textAlignment = .center
         label.textColor = .label
-        label.font = .systemFont(ofSize: 22, weight: .medium)
+        label.font = .systemFont(ofSize: 22, weight: .regular)
         addSubview(label)
         NSLayoutConstraint.activate([
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -2632,6 +3250,9 @@ private final class AlternateCharacterPickerView: UIView {
 
 final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedback, UIGestureRecognizerDelegate {
     private static let topEmojiKeyPrefix = "topEmoji:"
+    /// Bottom-row URL/email/twitter punctuation. Distinct from letter-row
+    /// keys so Wijesekara's `.` → ග mapping does not steal the period.
+    private static let contextualKeyPrefix = "context:"
     private static let oneWordEnglishSpaceTitle = "English · one word"
     private static let layoutLogger = Logger(
         subsystem: "lk.org.akshara.keyboard",
@@ -2824,6 +3445,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var lastPredictionInsertAt: TimeInterval = 0
     private var lastInsertedPrediction: String?
     private var emojiPicker: EmojiPickerView?
+    private var clipboardHistoryPanel: ClipboardHistoryView?
+    private let clipboardButton = UIButton(type: .system)
+    private var candidateSegmentsLeading: NSLayoutConstraint!
+    private var pasteboardObserver: NSObjectProtocol?
+    private let clipboardButtonWidth: CGFloat = 36
     private let trackpadSurface = UIView()
     private var deleteRepeater: Timer?
     /// True for the whole hold, including the brief gap where the character
@@ -2863,7 +3489,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var temporaryLatinWordActive = false
     private var appliedLayoutProfile: LayoutProfile?
     private var appliedLayoutWidth: CGFloat = 0
+    private var appliedLayoutHeight: CGFloat = 0
+    private var appliedInputViewHeight: CGFloat = 0
+    private var appliedSuperviewHeight: CGFloat = 0
     private var lastLoggedLayoutBounds: CGSize = .zero
+    /// When the host tray resizes without a disappear/appear cycle, bounce the
+    /// height constraint through `updateViewConstraints` the same way switching
+    /// keyboards does. Deduped by `lastHostHeightReassertSignature`.
+    private var needsHostHeightReassert = false
+    private var lastHostHeightReassertSignature = ""
     private var needsKeyRebuildWhenGeometryIsStable = true
     private var appliedReturnKeyTitle: String?
     private var appliedKeyboardType: UIKeyboardType?
@@ -2930,21 +3564,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         switch layoutProfile {
         case .padPortrait, .padLandscape: return 44
         case .phoneLandscape: return 28
-        // Match the compact UK rail. Extra toolbar height made the extension
-        // taller than the system keyboard.
+        // Liquid Glass matches the compact UK rail. Classic trays keep a
+        // real QuickType band; 26 pt left Sinhala and emoji clipped in
+        // Classic Host.
         case .phonePortrait:
-            if #available(iOS 26.0, *) { return 26 }
-            return 30
-        case .compactPad: return 25.5
+            if usesLiquidGlassKeyboardChrome { return 26 }
+            return 36
+        case .compactPad:
+            return usesLiquidGlassKeyboardChrome ? 25.5 : 32
         }
     }
 
-    /// Clearance below rounded chrome on pre-glass keyboards. iOS 26 uses
-    /// `liquidGlassTopLip` instead: the host already clips to the capsule,
+    /// Clearance below rounded chrome on pre-glass keyboards. Liquid Glass
+    /// uses `liquidGlassTopLip` instead: the host already clips to the capsule,
     /// and a second layout inset just leaves a dead strip under the curve.
     private var contentTopInset: CGFloat {
-        if #available(iOS 26.0, *) { return 0 }
+        if usesLiquidGlassKeyboardChrome { return 0 }
         guard layoutProfile == .phonePortrait || layoutProfile == .compactPad else { return 0 }
+        // iOS 26 compatibility trays still round the top of the keyboard
+        // card. 4 pt was enough before glass; 8 pt keeps chips under the clip.
+        if #available(iOS 26.0, *) { return 8 }
         return 4
     }
 
@@ -2953,11 +3592,36 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// unused above the rail. Attach frames are hundreds of points and are
     /// ignored. KeyboardKit cannot change that system frame either; it only
     /// matches the capsule with a top corner radius.
+    ///
+    /// Take the largest in-range extra from view / input view / superview.
+    /// Our height constraint pins `view`, so that frame alone hides the lip.
     private var liquidGlassTopLip: CGFloat {
         guard usesLiquidGlassKeyboardChrome, showsCandidateBar else { return 0 }
-        let extra = view.bounds.height - normalKeyboardHeight
-        guard extra > 0.5, extra < 36 else { return 0 }
+        let extra = glassLipExtra
+        guard extra > 0.5 else { return 0 }
         return extra
+    }
+
+    /// Positive extra height on a settled keyboard tray. Fullscreen attach
+    /// frames are ignored so they cannot look like a lip or like Classic Host.
+    private var glassLipExtra: CGFloat {
+        let preferred = normalKeyboardHeight
+        let frames = [
+            view.bounds.height,
+            inputView?.bounds.height ?? 0,
+            view.superview?.bounds.height ?? 0
+        ]
+        return frames
+            .filter { $0 > 160 && $0 < 400 }
+            .map { $0 - preferred }
+            .filter { $0 > 0 && $0 < 36 }
+            .max() ?? 0
+    }
+
+    /// The input view / superview is the tray the user sees. `view` is often
+    /// shorter because we pin it to the calibrated key strip.
+    private var hostTrayHeight: CGFloat {
+        max(inputView?.bounds.height ?? 0, view.superview?.bounds.height ?? 0, view.bounds.height)
     }
 
     /// Gap between the candidate rail and the first key row. Keep iOS 17+ at
@@ -3018,11 +3682,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func applyCandidateBarLayout() {
         let showing = showsCandidateBar
-        let lip = showing ? liquidGlassTopLip : 0
-        // Negative top inset reaches the host's glass lip above the
-        // calibrated strip. The container stays at `normalKeyboardHeight`
-        // so letter rows do not stretch.
-        candidateBarTopInset?.constant = showing ? -lip : contentTopInset
+        // The content container already includes the lip in its height, so
+        // the rail sits at the top of that strip. A second negative inset
+        // would park the chips in the curve and clip the well colour.
+        candidateBarTopInset?.constant = showing ? 0 : contentTopInset
         candidateBarHeight?.constant = showing ? candidateBarOccupiedHeight : 0
         keyboardStackTopInset?.constant = showing ? suggestionRailReleasedToKeys : keyGridTopInset
         candidateBar.setNeedsLayout()
@@ -3110,17 +3773,37 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         self.normalKeyboardBaseHeight + (showsCandidateBar ? candidateHeight : 0)
     }
 
+    /// Reported host height plus any Liquid Glass lip the host already added.
+    /// The content strip stays bottom-anchored at `normalKeyboardHeight` for
+    /// key geometry; this extra height only fills the capsule above the rail
+    /// so the well colour is not cut off inside the curve.
+    private var keyboardContentOccupiedHeight: CGFloat {
+        normalKeyboardHeight + liquidGlassTopLip
+    }
+
     private var lastLoggedHostHeightReport: CGFloat?
+
+    private var isKeyboardOverlayPresented: Bool {
+        emojiPicker != nil || clipboardHistoryPanel != nil
+    }
 
     private func applyHostHeightConstraint(reason: String) {
         let height = normalKeyboardHeight
+        let contentHeight = keyboardContentOccupiedHeight
+        let constantChanged = abs((keyboardHostHeight?.constant ?? 0) - height) > 0.5
         keyboardHostHeight?.constant = height
-        if emojiPicker == nil {
-            keyboardContentHeight?.constant = height
+        preferredContentSize = CGSize(width: max(view.bounds.width, 1), height: height)
+        if !isKeyboardOverlayPresented {
+            keyboardContentHeight?.constant = contentHeight
             applyCandidateBarLayout()
         }
         if isPreparingToAppear, keyboardHostHeight?.isActive == false {
             view.setNeedsUpdateConstraints()
+        } else if constantChanged, keyboardHostHeight?.isActive == true {
+            // Preferred height changed while visible (suggestions on/off,
+            // rotation). The host often keeps the old tray until this
+            // constraint is requested again through `updateViewConstraints`.
+            requestHostHeightReassert(reason: reason, force: true)
         }
         if lastLoggedHostHeightReport != height {
             lastLoggedHostHeightReport = height
@@ -3141,6 +3824,51 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// UIKit's temporary full-height attachment frame without stretching.
     private var hasUsableKeyboardWidth: Bool {
         view.bounds.width > 0
+    }
+
+    /// Host chrome (glass lip, classic tray, accessory / call bar) can resize
+    /// the input view or our superview without changing this controller's
+    /// requested height. Those frames are what users see as "layout height
+    /// that is not ours."
+    private func hostTrayHeightChanged() -> Bool {
+        let inputH = inputView?.bounds.height ?? 0
+        let superH = view.superview?.bounds.height ?? 0
+        if appliedInputViewHeight == 0, appliedSuperviewHeight == 0 {
+            return false
+        }
+        return abs(inputH - appliedInputViewHeight) > 0.5
+            || abs(superH - appliedSuperviewHeight) > 0.5
+    }
+
+    private func rememberHostTrayHeight() {
+        appliedInputViewHeight = inputView?.bounds.height ?? 0
+        appliedSuperviewHeight = view.superview?.bounds.height ?? 0
+    }
+
+    /// Ask the host to re-read our height request without a keyboard switch.
+    /// Skips UIKit's provisional full-screen attach frame, and dedupes so a
+    /// settled glass lip does not bounce every layout pass.
+    private func requestHostHeightReassert(reason: String, force: Bool) {
+        guard isPreparingToAppear, emojiPicker == nil else { return }
+        guard keyboardHostHeight?.isActive == true else { return }
+        guard hasUsableKeyboardWidth else { return }
+        let preferred = normalKeyboardHeight
+        let actual = view.bounds.height
+        let extra = actual - preferred
+        // Fullscreen attach (often ~874 pt) must not bounce the constraint.
+        if extra >= 80 { return }
+        // Classic hosts often ignore an 8 pt shortfall and clip the rail.
+        // Reassert as soon as the tray is actually shorter than requested.
+        let tooShort = extra < (usesLiquidGlassKeyboardChrome ? -8 : -1)
+        guard force || tooShort else { return }
+        let inputH = inputView?.bounds.height ?? actual
+        let superH = view.superview?.bounds.height ?? actual
+        let signature = "\(Int(preferred))|\(Int(actual))|\(Int(inputH))|\(Int(superH))"
+        guard signature != lastHostHeightReassertSignature else { return }
+        lastHostHeightReassertSignature = signature
+        needsHostHeightReassert = true
+        view.setNeedsUpdateConstraints()
+        logKeyboardLayout("host-height reassert \(reason)")
     }
 
     private func logKeyboardLayout(_ event: String) {
@@ -3274,6 +4002,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         isPreparingToAppear = true
         hasEnteredTextThisAppearance = false
         applyHostHeightConstraint(reason: "viewWillAppear")
+        // Compatibility hosts on iOS 26 sometimes skip `updateViewConstraints`
+        // for the first presentation. Activate here so the tray is not stuck
+        // at a stub height that clips the rail and the first key row.
+        if let constraint = keyboardHostHeight, !constraint.isActive {
+            constraint.constant = normalKeyboardHeight
+            constraint.isActive = true
+        }
         view.setNeedsUpdateConstraints()
         logKeyboardLayout("viewWillAppear")
         KeyboardPreferences.reload()
@@ -3313,12 +4048,21 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             rebuildKeys()
         } else {
             applyKeyboardMetrics()
+            updateClipboardButtonVisibility()
         }
+        startClipboardCaptureIfNeeded()
     }
 
     override func updateViewConstraints() {
         if isPreparingToAppear, let constraint = keyboardHostHeight {
             constraint.constant = normalKeyboardHeight
+            if needsHostHeightReassert, constraint.isActive {
+                // Drop and re-add so the host re-reads the request. Switching
+                // keyboards does the same via disappear → appear.
+                constraint.isActive = false
+                needsHostHeightReassert = false
+                logKeyboardLayout("updateViewConstraints bouncing host height")
+            }
             if !constraint.isActive {
                 logKeyboardLayout("updateViewConstraints activating host height")
                 constraint.isActive = true
@@ -3367,20 +4111,41 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             needsKeyRebuildWhenGeometryIsStable = true
             keyboardStack.isHidden = true
             candidateBar.isHidden = true
+            updateClipboardButtonVisibility()
             logKeyboardLayout("deferred zero-width geometry")
             return
         }
         let profile = layoutProfile
         let widthChanged = abs(view.bounds.width - appliedLayoutWidth) > 0.5
+        let heightChanged = abs(view.bounds.height - appliedLayoutHeight) > 0.5
+        let hostHeightChanged = hostTrayHeightChanged()
         let profileChanged = profile != appliedLayoutProfile
-        guard needsKeyRebuildWhenGeometryIsStable || profileChanged || widthChanged else { return }
+        guard needsKeyRebuildWhenGeometryIsStable
+            || profileChanged
+            || widthChanged
+            || heightChanged
+            || hostHeightChanged else { return }
         appliedLayoutProfile = profile
         appliedLayoutWidth = view.bounds.width
+        appliedLayoutHeight = view.bounds.height
+        rememberHostTrayHeight()
         applyKeyboardMetrics()
+        if hostHeightChanged {
+            requestHostHeightReassert(reason: "host-tray", force: true)
+        } else if heightChanged {
+            requestHostHeightReassert(reason: "view-height", force: false)
+        }
         refreshInputModeSwitchKeyWhenConnected()
         if needsKeyRebuildWhenGeometryIsStable || profileChanged {
             rebuildKeys()
         }
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        guard isPreparingToAppear, hasUsableKeyboardWidth, emojiPicker == nil else { return }
+        applyKeyboardMetrics()
+        requestHostHeightReassert(reason: "safe-area", force: false)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -3390,6 +4155,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         hideKeyPreview(animated: false)
         hideAlternatePicker()
         hideEmojiPicker()
+        hideClipboardHistory()
+        stopClipboardCapture()
         setTrackpadAppearance(active: false, animated: false)
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
@@ -3407,6 +4174,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // Drop the host-height request so the next presentation can wait for
         // `viewWillAppear` → `updateViewConstraints` again.
         keyboardHostHeight?.isActive = false
+        needsHostHeightReassert = false
+        lastHostHeightReassertSignature = ""
+        appliedLayoutHeight = 0
+        appliedInputViewHeight = 0
+        appliedSuperviewHeight = 0
         logKeyboardLayout("viewDidDisappear")
     }
 
@@ -3543,7 +4315,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         applyCandidateBarLayout()
         keyboardStackBottomInset?.constant = -keyGridBottomInset
         keyboardContentBottomInset?.constant = -preLiquidGlassBottomLift
-        if emojiPicker == nil {
+        if !isKeyboardOverlayPresented {
             applyHostHeightConstraint(reason: "chrome-refresh")
         }
         guard rebuildIfStyleChanged, previous != glass else { return }
@@ -3554,24 +4326,46 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     /// KeyboardKit leaves `KeyboardViewStyle.background` nil so the system
     /// surface shows through. Pre-iOS 26 uses that same clear canvas; a tinted
-    /// fill still read as a card in Spotlight. iOS 26 stays clear.
+    /// fill still read as a card in Spotlight. iOS 26 glass hosts stay clear.
+    /// The debug Classic override paints the pre-glass tray so keys are not
+    /// sitting on the host's glass surface.
     private func applyKeyboardChromeSurface() {
         view.backgroundColor = .clear
         keyboardChrome.isUserInteractionEnabled = false
         keyboardChrome.layer.cornerRadius = 0
-        keyboardChrome.isOpaque = false
-        keyboardChrome.backgroundColor = .clear
-        guard !usesLiquidGlassKeyboardChrome else { return }
         view.isOpaque = false
         keyboardContentContainer.isOpaque = false
+        if usesLiquidGlassKeyboardChrome {
+            keyboardChrome.isOpaque = false
+            keyboardChrome.backgroundColor = .clear
+            return
+        }
+        if #available(iOS 26.0, *) {
+            keyboardChrome.isOpaque = true
+            keyboardChrome.backgroundColor = UIColor { traits in
+                if traits.userInterfaceStyle == .dark {
+                    return UIColor(white: 0.17, alpha: 1)
+                }
+                return UIColor(red: 210 / 255, green: 213 / 255, blue: 219 / 255, alpha: 1)
+            }
+            return
+        }
+        keyboardChrome.isOpaque = false
+        keyboardChrome.backgroundColor = .clear
     }
 
-    /// Glass is an OS capability, not a host-tree property. iMessage's wrappers
-    /// do not advertise glass in class names, and `UIWindow.isOpaque` is true
-    /// there too — so any "opaque + no signals" fallback fires on real glass.
+    /// KeyboardKit keys glass off the OS (`isLiquidGlassEnabled` when the
+    /// major version is > 18). Automatic follows that flag. Matching our
+    /// requested height is not classic: iMessage's glass capsule is a visual
+    /// lip on the host tray, not extra bounds on this pinned view.
     private func detectLiquidGlassKeyboardChrome() -> Bool {
-        if #available(iOS 26.0, *) { return true }
-        return false
+        switch KeyboardPreferences.keyboardChromeOverride() {
+        case .classic:
+            return false
+        case .automatic, .liquidGlass:
+            if #available(iOS 26.0, *) { return true }
+            return false
+        }
     }
 
     private func applySuggestionRailMargins() {
@@ -3587,11 +4381,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// Match the system keyboard capsule. KeyboardKit's `KeyboardViewStyle`
     /// applies `backgroundCornerRadiusTop` for the same reason: the glass
     /// frame is owned by the host. Concentric corners keep the rail in the
-    /// curve instead of sitting in a rectangle inset from it.
+    /// curve instead of sitting in a rectangle inset from it. Classic chrome
+    /// resets those corners so the rail is not clipped to a missing capsule.
     private func applyLiquidGlassCornerConfiguration() {
         guard #available(iOS 26.0, *) else { return }
-        LiquidGlassCornerStyle.applyTopCapsule(to: keyboardContentContainer)
-        candidateBar.applyLiquidGlassTopCurveIfAvailable()
+        if usesLiquidGlassKeyboardChrome {
+            LiquidGlassCornerStyle.applyTopCapsule(to: keyboardContentContainer)
+            candidateBar.applyLiquidGlassTopCurveIfAvailable()
+        } else {
+            LiquidGlassCornerStyle.reset(to: keyboardContentContainer)
+            candidateBar.resetLiquidGlassTopCurveIfAvailable()
+        }
     }
 
     private func configureLayout() {
@@ -3647,11 +4447,34 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         segments.distribution = .fillEqually
         segments.translatesAutoresizingMaskIntoConstraints = false
         candidateBar.addSubview(segments)
+        candidateSegmentsLeading = segments.leadingAnchor.constraint(
+            equalTo: candidateBar.layoutMarginsGuide.leadingAnchor
+        )
         NSLayoutConstraint.activate([
-            segments.leadingAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.leadingAnchor),
+            candidateSegmentsLeading,
             segments.trailingAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.trailingAnchor),
             segments.topAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.topAnchor),
             segments.bottomAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.bottomAnchor)
+        ])
+
+        clipboardButton.translatesAutoresizingMaskIntoConstraints = false
+        clipboardButton.setImage(UIImage(systemName: "doc.on.clipboard"), for: .normal)
+        clipboardButton.tintColor = .label
+        clipboardButton.setPreferredSymbolConfiguration(
+            .init(pointSize: 15, weight: .regular),
+            forImageIn: .normal
+        )
+        clipboardButton.accessibilityLabel = "Clipboard History"
+        clipboardButton.isHidden = true
+        clipboardButton.addTarget(self, action: #selector(clipboardButtonPressed), for: .touchUpInside)
+        keyboardContentContainer.addSubview(clipboardButton)
+        NSLayoutConstraint.activate([
+            clipboardButton.leadingAnchor.constraint(
+                equalTo: candidateBar.layoutMarginsGuide.leadingAnchor
+            ),
+            clipboardButton.topAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.topAnchor),
+            clipboardButton.bottomAnchor.constraint(equalTo: candidateBar.layoutMarginsGuide.bottomAnchor),
+            clipboardButton.widthAnchor.constraint(equalToConstant: clipboardButtonWidth)
         ])
         for index in 0..<3 {
             if index < 2 {
@@ -3784,8 +4607,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // Keys sit in front of the rail in the default z-order, and their
         // expanded hit area can steal the bottom of a suggestion. Keep the
         // rail above the grid so a visible candidate is always tappable.
+        // The clipboard button must sit above the rail: CandidateRailView
+        // owns every touch inside its bounds.
         keyboardContentContainer.bringSubviewToFront(candidateBar)
+        keyboardContentContainer.bringSubviewToFront(clipboardButton)
         applyLiquidGlassCornerConfiguration()
+        updateClipboardButtonVisibility()
     }
 
     private func rebuildKeys() {
@@ -3795,20 +4622,22 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             needsKeyRebuildWhenGeometryIsStable = true
             return
         }
-        if emojiPicker == nil {
+        if !isKeyboardOverlayPresented {
             applyHostHeightConstraint(reason: "rebuildKeys")
         }
         guard hasUsableKeyboardWidth else {
             needsKeyRebuildWhenGeometryIsStable = true
             keyboardStack.isHidden = true
             candidateBar.isHidden = true
+            updateClipboardButtonVisibility()
             logKeyboardLayout("rebuild deferred")
             return
         }
         needsKeyRebuildWhenGeometryIsStable = false
         applyCandidateBarLayout()
-        candidateBar.isHidden = !showsCandidateBar
-        keyboardStack.isHidden = false
+        candidateBar.isHidden = isKeyboardOverlayPresented || !showsCandidateBar
+        keyboardStack.isHidden = isKeyboardOverlayPresented
+        updateClipboardButtonVisibility()
         logKeyboardLayout("rebuild keys")
         spaceSignatureRestoreWork?.cancel()
         spaceSignatureRestoreWork = nil
@@ -3833,14 +4662,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             }
         }
         // Match the native English fourth row: the emoji affordance sits
-        // between the number key and Space. A keyboard extension can ask iOS
-        // to advance input modes, but cannot select Emoji directly.
+        // between the number key and Space. URL/email punctuation sits to
+        // the right of Space, as on the system web keyboard. A keyboard
+        // extension can ask iOS to advance input modes, but cannot select
+        // Emoji directly.
         let emojiKey = KeyboardPreferences.emojiEnabled() ? ["emoji"] : []
         let globeKey = showsInputModeSwitchKey ? ["globe"] : []
         let contextualPunctuation = contextualPunctuationKeys
         let bottom = usesPadLayout
             ? ["123"] + emojiKey + globeKey + ["space", "123", "dismiss"]
-            : ["123"] + emojiKey + globeKey + contextualPunctuation + ["space", "return"]
+            : ["123"] + emojiKey + globeKey + ["space"] + contextualPunctuation + ["return"]
         // The native Sinhala reference uses three even 11-key rows. Preserve
         // that geometry while exposing the full direct Wijesekara layer.
         let letterRows: [[String]]
@@ -3888,7 +4719,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func applyKeyboardMetrics() {
-        if emojiPicker == nil {
+        if !isKeyboardOverlayPresented {
             applyHostHeightConstraint(reason: "applyMetrics")
         } else {
             applyCandidateBarLayout()
@@ -4019,7 +4850,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 case "123", "ABC": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(56)) }
                 case "emoji", "globe", "dismiss": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(46)) }
                 case "return": addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishReturnKeyWidth : self.keyboardMetrics.englishReturnKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(72) }
-                default: break
+                default:
+                    if keyName.hasPrefix(Self.contextualKeyPrefix) {
+                        addMetricWidth(to: button) {
+                            self.usesPadLayout
+                                ? self.keyboardMetrics.padBottomControlWidth
+                                : (isEnglishAlphabet
+                                    ? (self.usesStandardPhoneGeometry
+                                        ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth
+                                        : self.keyboardMetrics.englishBottomSmallKeyWidth)
+                                    : self.keyboardMetrics.scaledPhoneWidth(46))
+                        }
+                    }
                 }
             } else if !usesPadLayout && isControlRow && keyName == "shift" {
                 // The phonetic layout has seven letter keys here. Giving its
@@ -4072,18 +4914,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             utility: utility
         )
         button.applyLayoutMetrics(isPad: usesPadLayout)
-        if key == "return", let actionTitle = returnKeyTitle {
-            // Return actions are labels, not characters. They must not inherit
-            // the 22 pt alphabetic-key font: labels such as "Search" otherwise
-            // look oversized next to the system keyboard.
-            let fontSize: CGFloat
-            switch actionTitle.count {
-            case ...4: fontSize = usesPadLayout ? 18 : 16
-            case 5...7: fontSize = usesPadLayout ? 17 : 15
-            default: fontSize = usesPadLayout ? 15 : 13
+        if key == "return" {
+            if usesReturnKeyArrowSymbol {
+                button.accessibilityLabel = returnKeyTitle ?? "Go"
+                button.imageView?.preferredSymbolConfiguration = .init(
+                    pointSize: usesPadLayout ? 20 : 18,
+                    weight: .semibold
+                )
+            } else if let actionTitle = returnKeyTitle {
+                // Return actions are labels, not characters. They must not inherit
+                // the 22 pt alphabetic-key font: labels such as "Search" otherwise
+                // look oversized next to the system keyboard.
+                let fontSize: CGFloat
+                switch actionTitle.count {
+                case ...4: fontSize = usesPadLayout ? 18 : 16
+                case 5...7: fontSize = usesPadLayout ? 17 : 15
+                default: fontSize = usesPadLayout ? 15 : 13
+                }
+                button.titleLabel?.font = .systemFont(ofSize: fontSize, weight: .medium)
+                button.titleLabel?.minimumScaleFactor = 0.75
             }
-            button.titleLabel?.font = .systemFont(ofSize: fontSize, weight: .medium)
-            button.titleLabel?.minimumScaleFactor = 0.75
             if usesProminentReturnKey {
                 button.backgroundColor = .systemBlue
                 button.setTitleColor(.white, for: .normal)
@@ -4441,7 +5291,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         case "delete": return "delete.left"
         case "emoji": return "face.smiling"
         case "globe": return "globe"
-        case "return": return returnKeyTitle == nil ? "return" : nil
+        case "return":
+            if usesReturnKeyArrowSymbol { return "arrow.right" }
+            return returnKeyTitle == nil ? "return" : nil
         case "dismiss": return "keyboard.chevron.compact.down"
         default: return nil
         }
@@ -4451,6 +5303,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if key.hasPrefix(Self.topEmojiKeyPrefix) {
             return String(key.dropFirst(Self.topEmojiKeyPrefix.count))
         }
+        if let character = contextualCharacter(for: key) { return character }
         if key == "space" {
             if temporaryLatinWordActive {
                 return Self.oneWordEnglishSpaceTitle
@@ -4461,7 +5314,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             case .smartPhonetic: return "අක්ෂර Smart Phonetic"
             }
         }
-        if key == "return" { return returnKeyTitle }
+        if key == "return" {
+            return usesReturnKeyArrowSymbol ? nil : returnKeyTitle
+        }
         if ["shift", "delete", "emoji", "globe", "dismiss"].contains(key) { return nil }
         if key == "rakaranshaya" { return shift ? "ZWJ" : "්‍ර" }
         if key == "kundaliya" { return "෴" }
@@ -4519,6 +5374,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             let emoji = String(key.dropFirst(Self.topEmojiKeyPrefix.count))
             EmojiCatalog.record(emoji)
             commit(suffix: emoji)
+            return
+        }
+        if let character = contextualCharacter(for: key) {
+            commit(suffix: character)
             return
         }
         switch key {
@@ -4611,7 +5470,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                     continue
                 }
                 if ["delete", "emoji", "globe", "dismiss", "return", "space", "123", "ABC", "#+="].contains(key)
-                    || key.hasPrefix(Self.topEmojiKeyPrefix) {
+                    || key.hasPrefix(Self.topEmojiKeyPrefix)
+                    || key.hasPrefix(Self.contextualKeyPrefix) {
                     continue
                 }
                 if key == "rakaranshaya" { continue }
@@ -4627,25 +5487,35 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func showEmojiPicker() {
         guard emojiPicker == nil else { return }
+        hideClipboardHistory()
         commitActiveComposition()
         let picker = EmojiPickerView()
         picker.onSelect = { [weak self] emoji in self?.commit(suffix: emoji) }
         picker.onDismiss = { [weak self] in self?.hideEmojiPicker() }
-        picker.onDelete = { [weak self] in
+        picker.onDelete = { [weak self, weak picker] in
+            self?.deleteRepeatAnchor = picker?.documentDeleteControl
             self?.deleteRepeatBeganAt = CACurrentMediaTime()
-            self?.deleteOnce()
+            self?.startDeleteHoldCountdown()
+            DispatchQueue.main.async { [weak self] in
+                self?.deleteOnce()
+            }
         }
-        picker.onDeleteHoldBegan = { [weak self] in self?.beginDeleteRepeat() }
+        picker.onDeleteHoldBegan = { [weak self, weak picker] in
+            self?.deleteRepeatAnchor = picker?.documentDeleteControl
+            self?.beginDeleteRepeat()
+        }
         picker.onDeleteHoldEnded = { [weak self] in self?.stopDeleteRepeat() }
         emojiPicker = picker
         candidateBar.isHidden = true
         keyboardStack.isHidden = true
-        view.addSubview(picker)
+        updateClipboardButtonVisibility()
+        keyboardContentContainer.addSubview(picker)
+        keyboardContentContainer.bringSubviewToFront(picker)
         NSLayoutConstraint.activate([
-            picker.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            picker.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            picker.topAnchor.constraint(equalTo: view.topAnchor),
-            picker.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            picker.leadingAnchor.constraint(equalTo: keyboardContentContainer.leadingAnchor),
+            picker.trailingAnchor.constraint(equalTo: keyboardContentContainer.trailingAnchor),
+            picker.topAnchor.constraint(equalTo: keyboardContentContainer.topAnchor),
+            picker.bottomAnchor.constraint(equalTo: keyboardContentContainer.bottomAnchor)
         ])
     }
 
@@ -4654,6 +5524,103 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         emojiPicker = nil
         candidateBar.isHidden = !showsCandidateBar
         keyboardStack.isHidden = false
+        updateClipboardButtonVisibility()
+    }
+
+    private var showsClipboardButton: Bool {
+        showsCandidateBar
+            && KeyboardPreferences.clipboardHistoryEnabled()
+            && emojiPicker == nil
+            && clipboardHistoryPanel == nil
+            && hasUsableKeyboardWidth
+            && !candidateBar.isHidden
+    }
+
+    private func updateClipboardButtonVisibility() {
+        let showing = showsClipboardButton
+        clipboardButton.isHidden = !showing
+        candidateSegmentsLeading?.constant = showing ? clipboardButtonWidth : 0
+        if showing {
+            keyboardContentContainer.bringSubviewToFront(clipboardButton)
+        }
+    }
+
+    @objc private func clipboardButtonPressed() {
+        showClipboardHistory()
+    }
+
+    private func showClipboardHistory() {
+        guard clipboardHistoryPanel == nil, emojiPicker == nil else { return }
+        guard KeyboardPreferences.clipboardHistoryEnabled() else { return }
+        commitActiveComposition()
+        captureClipboardIfNeeded()
+        let panel = ClipboardHistoryView()
+        panel.onSelect = { [weak self] text in
+            self?.hideClipboardHistory()
+            self?.commit(suffix: text)
+        }
+        panel.onDismiss = { [weak self] in self?.hideClipboardHistory() }
+        panel.onClearAll = { [weak self] in
+            ClipboardHistoryStore.clear()
+            self?.clipboardHistoryPanel?.configure(items: [], hasFullAccess: self?.hasFullAccess ?? false)
+        }
+        panel.onDeleteAt = { index in
+            ClipboardHistoryStore.remove(at: index)
+        }
+        panel.configure(items: ClipboardHistoryStore.items(), hasFullAccess: hasFullAccess)
+        clipboardHistoryPanel = panel
+        candidateBar.isHidden = true
+        keyboardStack.isHidden = true
+        updateClipboardButtonVisibility()
+        view.addSubview(panel)
+        view.bringSubviewToFront(panel)
+        NSLayoutConstraint.activate([
+            panel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            panel.topAnchor.constraint(equalTo: view.topAnchor),
+            panel.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+    }
+
+    private func hideClipboardHistory() {
+        clipboardHistoryPanel?.removeFromSuperview()
+        clipboardHistoryPanel = nil
+        candidateBar.isHidden = !showsCandidateBar
+        keyboardStack.isHidden = false
+        updateClipboardButtonVisibility()
+    }
+
+    private func startClipboardCaptureIfNeeded() {
+        stopClipboardCapture()
+        guard KeyboardPreferences.clipboardHistoryEnabled() else { return }
+        captureClipboardIfNeeded()
+        pasteboardObserver = NotificationCenter.default.addObserver(
+            forName: UIPasteboard.changedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.captureClipboardIfNeeded()
+            self.clipboardHistoryPanel?.configure(
+                items: ClipboardHistoryStore.items(),
+                hasFullAccess: self.hasFullAccess
+            )
+        }
+    }
+
+    private func stopClipboardCapture() {
+        if let pasteboardObserver {
+            NotificationCenter.default.removeObserver(pasteboardObserver)
+            self.pasteboardObserver = nil
+        }
+    }
+
+    private func captureClipboardIfNeeded() {
+        let secure = textDocumentProxy.isSecureTextEntry == true
+        ClipboardHistoryStore.captureFromPasteboardIfNeeded(
+            hasFullAccess: hasFullAccess,
+            isSecureField: secure
+        )
     }
 
     /// Finish the in-progress word, then insert a bare newline. Custom
@@ -4714,11 +5681,26 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// email fields without changing the Sinhala letter rows themselves.
     private var contextualPunctuationKeys: [String] {
         switch textDocumentProxy.keyboardType {
-        case .URL, .webSearch: return [".", "/"]
-        case .emailAddress: return ["@", "."]
-        case .twitter: return ["@", "#"]
+        case .URL, .webSearch: return [contextualKey("."), contextualKey("/")]
+        case .emailAddress: return [contextualKey("@"), contextualKey(".")]
+        case .twitter: return [contextualKey("@"), contextualKey("#")]
         default: return []
         }
+    }
+
+    private func contextualKey(_ character: String) -> String {
+        Self.contextualKeyPrefix + character
+    }
+
+    private func contextualCharacter(for key: String) -> String? {
+        guard key.hasPrefix(Self.contextualKeyPrefix) else { return nil }
+        return String(key.dropFirst(Self.contextualKeyPrefix.count))
+    }
+
+    /// iOS 26's URL/web Go key is a trailing arrow rather than the word "Go".
+    private var usesReturnKeyArrowSymbol: Bool {
+        guard #available(iOS 26.0, *) else { return false }
+        return textDocumentProxy.returnKeyType == .go
     }
 
     private func schedulePredictions(for prefix: String) {
@@ -4752,9 +5734,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // has no width. A queued prediction refresh can outlive that phase, so
         // restore the visible state here rather than relying only on a key
         // rebuild to do it.
-        if emojiPicker == nil {
+        if !isKeyboardOverlayPresented {
             applyCandidateBarLayout()
             candidateBar.isHidden = false
+            updateClipboardButtonVisibility()
         }
         if !prefix.isEmpty {
             hasEnteredTextThisAppearance = true
@@ -5203,16 +6186,31 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     @discardableResult
     private func noteDocumentIdentifierChange() -> Bool {
-        let current = textDocumentProxy.documentIdentifier
-        let changed = CompositionHygiene.documentIdentifierChanged(
-            previous: lastDocumentIdentifier,
-            current: current
-        )
-        lastDocumentIdentifier = current
-        if changed {
-            hasEnteredTextThisAppearance = false
+        if let current = documentIdentifierIfAvailable() {
+            let changed = CompositionHygiene.documentIdentifierChanged(
+                previous: lastDocumentIdentifier,
+                current: current
+            )
+            lastDocumentIdentifier = current
+            if changed {
+                hasEnteredTextThisAppearance = false
+            }
+            return changed
         }
-        return changed
+        // Classic UIKit hosts on iOS 26 often omit `documentIdentifier`.
+        // Losing a previous id is still a field switch; staying nil is not.
+        guard lastDocumentIdentifier != nil else { return false }
+        lastDocumentIdentifier = nil
+        hasEnteredTextThisAppearance = false
+        return true
+    }
+
+    /// Swift overlays `documentIdentifier` as a non-optional `UUID`. UIKit
+    /// returns nil before the input session is attached, and on some iOS 26
+    /// hosts while `_controllerState` is unset. Bridging that nil traps with
+    /// `EXC_BREAKPOINT`. KVC keeps the nil so we can skip until the proxy is live.
+    private func documentIdentifierIfAvailable() -> UUID? {
+        (textDocumentProxy as AnyObject).value(forKey: "documentIdentifier") as? UUID
     }
 
     /// Delete `word` only when it is still immediately before the caret.
@@ -5418,7 +6416,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func punctuationAlternates(for key: String) -> [String]? {
-        switch key {
+        switch contextualCharacter(for: key) ?? key {
         case ".": return [".", "…", "!", "?", "෴"]
         case ",": return [",", ";", ":", "؟"]
         case "'": return ["'", "‘", "’", "\""]

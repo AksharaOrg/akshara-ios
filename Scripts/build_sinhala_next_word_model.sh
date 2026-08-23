@@ -38,6 +38,7 @@ raw_trigrams="$work_directory/trigrams.raw"
 export SPOKEN_WEIGHT="$spoken_weight"
 export RAW_BIGRAMS="$raw_bigrams"
 export RAW_TRIGRAMS="$raw_trigrams"
+export BLOCKED_WORDS="$root/Scripts/SinhalaBlockedWords.txt"
 
 # Concatenate every argument, gunzipping as needed. An optional per-file byte
 # cap keeps a rebuild bounded; 0 means "consume the whole file".
@@ -62,10 +63,18 @@ export RAW_TRIGRAMS="$raw_trigrams"
   use warnings;
   my $spoken_weight = int($ENV{SPOKEN_WEIGHT} // 4);
   $spoken_weight = 1 if $spoken_weight < 1;
+  my %blocked;
+  open my $blocked_file, "<:encoding(UTF-8)", $ENV{BLOCKED_WORDS} or die $!;
+  while (my $word = <$blocked_file>) {
+    chomp $word;
+    next if $word eq "" || $word =~ /^#/;
+    $blocked{$word} = 1;
+  }
+  close $blocked_file;
   open my $bigrams, ">:encoding(UTF-8)", $ENV{RAW_BIGRAMS} or die $!;
   open my $trigrams, ">:encoding(UTF-8)", $ENV{RAW_TRIGRAMS} or die $!;
   while (my $line = <STDIN>) {
-    my @words = grep { length($_) <= 24 } $line =~ /[\x{0D80}-\x{0DFF}]+/g;
+    my @words = grep { length($_) <= 24 && !$blocked{$_} } $line =~ /[\x{0D80}-\x{0DFF}]+/g;
     next unless @words;
     my $spoken = (
       $line =~ /තියෙනවා|තියෙන්නේ|තිබුණා|නේද|ඕනේ|ඔයා|ඒක|මං|කරන්න|කියන්න|බලන්න|දෙන්න|ගන්න|එන්න|යන්න|වගේ|කොහොමද|මොකද|කියලා|හරි|දැන්/

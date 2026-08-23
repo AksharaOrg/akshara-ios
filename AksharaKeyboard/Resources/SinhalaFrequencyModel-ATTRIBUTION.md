@@ -4,7 +4,9 @@
 University of Moratuwa National Languages Processing Centre's **A Word
 Frequency List for Sinhala**. It retains the first 40,000 highest-frequency
 entries from `word_frequency_list_2M.si`, filters malformed or overlong
-tokens, then sorts them by word for compact on-device prefix lookup.
+tokens and a small exact-match blocked-token list
+(`Scripts/SinhalaBlockedWords.txt`), then sorts them by word for compact
+on-device prefix lookup.
 
 Source: https://github.com/nlpcuom/Word-Frequency-List-for-Sinhala
 

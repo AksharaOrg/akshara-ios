@@ -28,6 +28,10 @@
 		A10000000000000000000019 /* SinhalaEmojiSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */; };
 		A1000000000000000000001A /* SinhalaEmojiSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */; };
 		A1000000000000000000001B /* Resources/SinhalaEmojiIndex.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000021 /* Resources/SinhalaEmojiIndex.json */; };
+		A1000000000000000000001D /* ClipboardHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* ClipboardHistoryStore.swift */; };
+		A1000000000000000000001E /* ClipboardHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000025 /* ClipboardHistoryStore.swift */; };
+		A1000000000000000000001F /* EmojiSkinTone.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* EmojiSkinTone.swift */; };
+		A10000000000000000000020 /* EmojiSkinTone.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000026 /* EmojiSkinTone.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -76,6 +80,9 @@
 		A20000000000000000000019 /* KeyboardCompositionSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardCompositionSession.swift; sourceTree = "<group>"; };
 		A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaEmojiSuggestions.swift; sourceTree = "<group>"; };
 		A20000000000000000000021 /* Resources/SinhalaEmojiIndex.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Resources/SinhalaEmojiIndex.json; sourceTree = "<group>"; };
+		A20000000000000000000024 /* ClassicHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClassicHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000025 /* ClipboardHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryStore.swift; sourceTree = "<group>"; };
+		A20000000000000000000026 /* EmojiSkinTone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiSkinTone.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -87,6 +94,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A30000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A30000000000000000000008 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -139,9 +153,11 @@
 			children = (
 				A20000000000000000000003 /* SinhalaEngine.swift */,
 				A20000000000000000000009 /* KeyboardPreferences.swift */,
+				A20000000000000000000025 /* ClipboardHistoryStore.swift */,
 				A20000000000000000000014 /* SinhalaPrediction.swift */,
 				A20000000000000000000019 /* KeyboardCompositionSession.swift */,
 				A20000000000000000000020 /* SinhalaEmojiSuggestions.swift */,
+				A20000000000000000000026 /* EmojiSkinTone.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -151,6 +167,7 @@
 			children = (
 				A20000000000000000000005 /* Akshara.app */,
 				A20000000000000000000006 /* AksharaKeyboard.appex */,
+				A20000000000000000000024 /* ClassicHost.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -194,6 +211,23 @@
 			productReference = A20000000000000000000006 /* AksharaKeyboard.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		A50000000000000000000003 /* ClassicHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A60000000000000000000004 /* Build configuration list for PBXNativeTarget "ClassicHost" */;
+			buildPhases = (
+				A30000000000000000000008 /* Frameworks */,
+				A30000000000000000000009 /* Sources */,
+				A3000000000000000000000A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ClassicHost;
+			productName = ClassicHost;
+			productReference = A20000000000000000000024 /* ClassicHost.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -208,6 +242,9 @@
 						CreatedOnToolsVersion = 16.0;
 					};
 					A50000000000000000000002 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					A50000000000000000000003 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -227,6 +264,7 @@
 			targets = (
 				A50000000000000000000001 /* Akshara */,
 				A50000000000000000000002 /* AksharaKeyboard */,
+				A50000000000000000000003 /* ClassicHost */,
 			);
 		};
 /* End PBXProject section */
@@ -253,6 +291,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A3000000000000000000000A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -264,9 +309,11 @@
 				A10000000000000000000002 /* HomeView.swift in Sources */,
 				A10000000000000000000003 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
+				A1000000000000000000001D /* ClipboardHistoryStore.swift in Sources */,
 				A10000000000000000000011 /* SinhalaPrediction.swift in Sources */,
 				A10000000000000000000017 /* KeyboardCompositionSession.swift in Sources */,
 				A10000000000000000000019 /* SinhalaEmojiSuggestions.swift in Sources */,
+				A1000000000000000000001F /* EmojiSkinTone.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -277,9 +324,18 @@
 				A10000000000000000000004 /* KeyboardViewController.swift in Sources */,
 				A10000000000000000000005 /* SinhalaEngine.swift in Sources */,
 				A10000000000000000000008 /* KeyboardPreferences.swift in Sources */,
+				A1000000000000000000001E /* ClipboardHistoryStore.swift in Sources */,
 				A10000000000000000000012 /* SinhalaPrediction.swift in Sources */,
 				A10000000000000000000018 /* KeyboardCompositionSession.swift in Sources */,
 				A1000000000000000000001A /* SinhalaEmojiSuggestions.swift in Sources */,
+				A10000000000000000000020 /* EmojiSkinTone.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A30000000000000000000009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -376,6 +432,34 @@
 			};
 			name = Release;
 		};
+		A90000000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 8292UX7379;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ClassicHost/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = lk.org.akshara.keyboard.classichost;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A90000000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 8292UX7379;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ClassicHost/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = lk.org.akshara.keyboard.classichost;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -402,6 +486,15 @@
 			buildConfigurations = (
 				A90000000000000000000001 /* Debug */,
 				A90000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A60000000000000000000004 /* Build configuration list for PBXNativeTarget "ClassicHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A90000000000000000000007 /* Debug */,
+				A90000000000000000000008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

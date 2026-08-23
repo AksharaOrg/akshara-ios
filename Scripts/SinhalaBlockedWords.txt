@@ -1,0 +1,16 @@
+# Exact-match tokens excluded from suggestion models.
+# Seeded from exact hits of thambaru/sinhala-bad-word-moderation-list in
+# SinhalaFrequencyModel.tsv. Everyday collisions left in the models:
+# ඇට, වැල, පෙට්ටිය, ජැක්සන්, තන, සක්, පොල්ල, වල්ල.
+පක
+පුක
+පයිය
+පොන්නයා
+කැරි
+කුක්කු
+ජුන්ඩා
+බැල්ලි
+ලබ්බ
+සක්කිලි
+හුකන්න
+හුත්ත

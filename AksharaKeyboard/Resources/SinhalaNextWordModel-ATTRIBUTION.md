@@ -11,7 +11,8 @@ Kusal Darshana (2025), distributed under CC BY 4.0.
 - DOI: https://doi.org/10.57967/hf/6460
 - License: https://creativecommons.org/licenses/by/4.0/
 
-The source text is not distributed with Akshara. Conversational lines are
+The source text is not distributed with Akshara. Tokens in
+`Scripts/SinhalaBlockedWords.txt` are dropped during counting. Conversational lines are
 up-weighted during counting so chat-like continuations outrank news-style
 function words. The next-word table keeps up to sixteen continuations for
 30,000 preceding-word contexts (about 52,000 unique words). A smaller trigram

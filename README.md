@@ -1,6 +1,6 @@
 # Akshara for iOS
 
-Native iOS host app and system-wide Custom Keyboard Extension. The keyboard processes transliteration entirely on-device. It requests Full Access only to share local preferences with the containing app through its App Group; it does not transmit typed text or use the network.
+Native iOS host app and system-wide Custom Keyboard Extension. The keyboard processes transliteration entirely on-device. It requests Full Access to share local preferences with the containing app through its App Group, play haptics, and optionally read the pasteboard for Clipboard History while the keyboard is open. It does not transmit typed text or use the network.
 
 ## Prediction data
 
@@ -17,6 +17,8 @@ not included; attribution details are in
 Open `AksharaKeyboard.xcodeproj` with Xcode 16 or later, select your Development Team for both targets, connect your iPhone, then Run the **Akshara** scheme.
 
 On the phone, enable it at **Settings → General → Keyboard → Keyboards → Add New Keyboard → Akshara**. Hold the globe key in any editable text field to select it.
+
+To inspect the keyboard in a non–Liquid Glass host, run the **Classic Host** scheme (or sideload `ClassicHost.app` onto the Simulator or a device). That target sets `UIDesignRequiresCompatibility`, so iOS 26 keeps the pre-glass system tray. Set **Keyboard Chrome** to Classic if you also want Akshara’s pre-glass keys and paint; Automatic follows the OS (Liquid Glass on iOS 26) and keeps the canvas clear so the host tray shows through.
 
 ## Building with another Apple Developer account
 

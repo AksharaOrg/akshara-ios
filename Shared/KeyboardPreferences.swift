@@ -65,6 +65,29 @@ enum KeyboardPreferences {
         var title: String { rawValue.capitalized }
     }
 
+    /// Debug override for keyboard chrome. Automatic follows the OS the same
+    /// way KeyboardKit does: Liquid Glass on iOS 26+, classic earlier. The
+    /// host still owns the system tray. Classic forces Akshara’s pre-glass
+    /// paint path so it can be checked from this app.
+    enum KeyboardChromeOverride: String, CaseIterable, Identifiable {
+        case automatic, liquidGlass, classic
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .automatic: return "Automatic"
+            case .liquidGlass: return "Liquid Glass"
+            case .classic: return "Classic"
+            }
+        }
+        var detail: String {
+            switch self {
+            case .automatic: return "Follows the OS: Liquid Glass on iOS 26"
+            case .liquidGlass: return "Force iOS 26 glass keys and insets"
+            case .classic: return "Force the pre-glass tray and keycaps"
+            }
+        }
+    }
+
     enum EmojiSkinTone: String, CaseIterable, Identifiable {
         case standard, light, mediumLight, medium, mediumDark, dark
 
@@ -130,6 +153,9 @@ enum KeyboardPreferences {
     static let emojiSkinToneKey = "keyboardEmojiSkinTone"
     static let showTouchAreasKey = "keyboardShowTouchAreas"
     static let predictiveTouchAreasKey = "keyboardPredictiveTouchAreas"
+    static let keyboardChromeOverrideKey = "keyboardChromeOverride"
+    static let developerModeUnlockedKey = "developerModeUnlocked"
+    static let clipboardHistoryKey = "clipboardHistoryEnabled"
 
     static let supportsSuggestions = true
 
@@ -266,6 +292,19 @@ enum KeyboardPreferences {
         persist(enabled, forKey: emojiSuggestionsKey)
     }
 
+    /// Opt-in clipboard history on the suggestion rail. Off by default.
+    /// Requires Full Access; the extension only captures while it is visible.
+    static func clipboardHistoryEnabled() -> Bool {
+        defaults.object(forKey: clipboardHistoryKey) as? Bool ?? false
+    }
+
+    static func setClipboardHistoryEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: clipboardHistoryKey)
+        if !enabled {
+            ClipboardHistoryStore.clear()
+        }
+    }
+
     static func selectedPredictionProvider() -> String {
         defaults.string(forKey: predictionProviderKey) ?? "uom-frequency-list-v1"
     }
@@ -373,23 +412,42 @@ enum KeyboardPreferences {
     static func predictiveTouchAreas() -> Bool { defaults.object(forKey: predictiveTouchAreasKey) as? Bool ?? false }
     static func setPredictiveTouchAreas(_ enabled: Bool) { persist(enabled, forKey: predictiveTouchAreasKey) }
 
+    static func keyboardChromeOverride() -> KeyboardChromeOverride {
+        enumValue(forKey: keyboardChromeOverrideKey, default: .automatic)
+    }
+
+    static func setKeyboardChromeOverride(_ value: KeyboardChromeOverride) {
+        persist(value.rawValue, forKey: keyboardChromeOverrideKey)
+    }
+
+    /// Hidden developer tools, unlocked by tapping Build seven times in About.
+    static func developerModeUnlocked() -> Bool {
+        defaults.object(forKey: developerModeUnlockedKey) as? Bool ?? false
+    }
+
+    static func setDeveloperModeUnlocked(_ unlocked: Bool) {
+        persist(unlocked, forKey: developerModeUnlockedKey)
+    }
+
     /// Clears user-facing keyboard preferences while leaving Full Access
     /// confirmation alone (that bit is written by the extension).
     static func resetToDefaults() {
         let store = defaults
         let keys = [
             layoutKey, emojiKey, hapticsKey, suggestionsKey, emojiSuggestionsKey,
+            clipboardHistoryKey,
             predictionProviderKey, doubleSpacePeriodKey, numberRowKey, topRowKey,
             longPressPunctuationKey, smartQuotesKey, smartPunctuationSpacingKey,
             englishForOneWordKey, characterPreviewKey, keySpacingKey,
             oneHandedPositionKey, hapticStrengthKey, keyClicksKey, deleteRepeatSpeedKey,
             appearanceKey, highContrastKey, emojiSkinToneKey, showTouchAreasKey,
-            predictiveTouchAreasKey
+            predictiveTouchAreasKey, keyboardChromeOverrideKey
         ]
         for key in keys {
             store.removeObject(forKey: key)
         }
         store.synchronize()
+        ClipboardHistoryStore.clear()
         refreshHotPathCache()
     }
 

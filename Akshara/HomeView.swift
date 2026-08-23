@@ -9,12 +9,12 @@ private enum AksharaLinks {
     static let cleanSinhalaTextCorpus = URL(string: "https://huggingface.co/datasets/Remeinium/CleanSinhalaTextCorpus")!
     static let cleanSinhalaTextCorpusDOI = URL(string: "https://doi.org/10.57967/hf/6460")!
     static let creativeCommonsAttribution = URL(string: "https://creativecommons.org/licenses/by/4.0/")!
+    static let thimiraThenuwara = URL(string: "https://thimirathenuwara.com/")!
 }
 
 struct HomeView: View {
     @State private var mode = KeyboardPreferences.selectedMode()
     @State private var setupComplete = SetupStatus.isComplete()
-    @State private var confirmReset = false
 
     var body: some View {
         NavigationStack {
@@ -73,22 +73,11 @@ struct HomeView: View {
                     }
                 }
 
-                Section("About") {
+                Section {
                     NavigationLink {
-                        PrivacyPolicyView()
+                        AboutView(mode: $mode)
                     } label: {
-                        DashboardLabel(title: "Privacy Policy", icon: "hand.raised.fill", color: .systemTeal)
-                    }
-                    NavigationLink {
-                        OpenSourceNoticesView()
-                    } label: {
-                        DashboardLabel(title: "Open Source Notices", icon: "doc.text.fill", color: .systemOrange)
-                    }
-                    LabeledContent("Version", value: Self.appVersion)
-                    LabeledContent("Copyright", value: "© 2026 Lahiru Himesh Madusanka")
-                    LabeledContent("License", value: "MIT License")
-                    Button("Reset Keyboard Settings", role: .destructive) {
-                        confirmReset = true
+                        DashboardLabel(title: "About", icon: "info.circle.fill", color: .systemTeal)
                     }
                 }
             }
@@ -99,19 +88,6 @@ struct HomeView: View {
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 refreshHome()
             }
-            .confirmationDialog(
-                "Reset Keyboard Settings?",
-                isPresented: $confirmReset,
-                titleVisibility: .visible
-            ) {
-                Button("Reset", role: .destructive) {
-                    KeyboardPreferences.resetToDefaults()
-                    mode = KeyboardPreferences.selectedMode()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This restores layout and feature options to their defaults. Full Access status is unchanged.")
-            }
         }
     }
 
@@ -120,12 +96,82 @@ struct HomeView: View {
         mode = KeyboardPreferences.selectedMode()
         setupComplete = SetupStatus.isComplete()
     }
+}
 
-    private static var appVersion: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "—"
-        let build = info?["CFBundleVersion"] as? String ?? "—"
-        return "\(short) (\(build))"
+private enum AksharaAppInfo {
+    static var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
+    static var buildNumber: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+    }
+}
+
+/// Short-lived banner that stays visible across a navigation push.
+@MainActor
+private enum AksharaToast {
+    private static weak var current: UIView?
+    private static var hideWork: DispatchWorkItem?
+
+    static func show(_ message: String) {
+        hideWork?.cancel()
+        current?.removeFromSuperview()
+
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+            ?? UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .flatMap(\.windows)
+                .first
+        else { return }
+
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.layer.cornerRadius = 20
+        blur.clipsToBounds = true
+
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = message
+        label.font = .systemFont(ofSize: 15, weight: .semibold)
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        blur.contentView.addSubview(label)
+
+        window.addSubview(blur)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: blur.contentView.topAnchor, constant: 12),
+            label.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor, constant: -12),
+            label.leadingAnchor.constraint(equalTo: blur.contentView.leadingAnchor, constant: 18),
+            label.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor, constant: -18),
+            blur.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+            blur.bottomAnchor.constraint(equalTo: window.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            blur.leadingAnchor.constraint(greaterThanOrEqualTo: window.leadingAnchor, constant: 24),
+            blur.trailingAnchor.constraint(lessThanOrEqualTo: window.trailingAnchor, constant: -24)
+        ])
+
+        blur.alpha = 0
+        blur.transform = CGAffineTransform(translationX: 0, y: 12)
+        UIView.animate(withDuration: 0.28, delay: 0, options: .curveEaseOut) {
+            blur.alpha = 1
+            blur.transform = .identity
+        }
+
+        current = blur
+        let work = DispatchWorkItem {
+            UIView.animate(withDuration: 0.22, animations: {
+                current?.alpha = 0
+                current?.transform = CGAffineTransform(translationX: 0, y: 8)
+            }, completion: { _ in
+                current?.removeFromSuperview()
+                current = nil
+            })
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)
     }
 }
 
@@ -154,6 +200,16 @@ private struct SetupStatusBadge: View {
 private func openSystemSettings() {
     guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
     UIApplication.shared.open(settingsURL)
+}
+
+/// Touches the pasteboard so iOS shows Settings → Akshara → Paste from Other
+/// Apps, then opens that app settings page. There is no public URL for the
+/// Paste submenu itself.
+private func openAksharaPasteFromOtherAppsSettings() {
+    let board = UIPasteboard.general
+    _ = board.changeCount
+    _ = board.string
+    openSystemSettings()
 }
 
 /// Liquid Glass button chrome on iOS 26; plain system buttons earlier.
@@ -320,73 +376,104 @@ private struct DashboardLabel: View {
     }
 }
 
-/// Settings-style glyph tile. On iOS 26 the corner is softer to match Liquid Glass list icons.
+/// Settings-style glyph tile. Glyphs are rasterized so Form rows cannot retint them.
+/// On iOS 26 the fill is a live concentric squircle with a gradient and specular edge,
+/// matching Settings list icons instead of a baked CALayer tile.
 private struct SettingsIcon: View {
     let systemName: String
     let color: UIColor
 
     var body: some View {
-        Image(uiImage: Self.image(systemName: systemName, color: color))
-            .renderingMode(.original)
-            .frame(width: Self.side, height: Self.side)
-            .accessibilityHidden(true)
-    }
-
-    private static var side: CGFloat {
-        if #available(iOS 26.0, *) { return 30 }
-        return 29
-    }
-
-    private static var cornerRadius: CGFloat {
-        if #available(iOS 26.0, *) { return 8 }
-        return 6.5
-    }
-
-    private static var glyphInset: CGFloat {
-        if #available(iOS 26.0, *) { return 6.5 }
-        return 6
-    }
-
-    private static var glyphPointSize: CGFloat {
-        if #available(iOS 26.0, *) { return 15 }
-        return 16
-    }
-
-    private static func image(systemName: String, color: UIColor) -> UIImage {
-        let size = CGSize(width: side, height: side)
-        let format = UIGraphicsImageRendererFormat()
-        format.opaque = false
         let fill = color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+        if #available(iOS 26.0, *) {
+            Image(uiImage: Self.glyphImage(systemName: systemName, side: Self.liquidSide, pointSize: 16))
+                .renderingMode(.original)
+                .frame(width: Self.liquidSide, height: Self.liquidSide)
+                .background {
+                    Self.liquidShape.fill(Color(uiColor: fill).gradient)
+                }
+                .overlay {
+                    Self.liquidShape.fill(
+                        LinearGradient(
+                            stops: [
+                                .init(color: Color.white.opacity(0.22), location: 0),
+                                .init(color: Color.white.opacity(0.06), location: 0.4),
+                                .init(color: .clear, location: 0.7)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .allowsHitTesting(false)
+                }
+                .overlay {
+                    Self.liquidShape.stroke(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.38), Color.white.opacity(0.08)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.5
+                    )
+                    .allowsHitTesting(false)
+                }
+                .clipShape(Self.liquidShape)
+                .accessibilityHidden(true)
+        } else {
+            Image(uiImage: Self.legacyImage(systemName: systemName, color: fill))
+                .renderingMode(.original)
+                .frame(width: Self.legacySide, height: Self.legacySide)
+                .accessibilityHidden(true)
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private static var liquidShape: ConcentricRectangle {
+        // Fixed radius so every row matches; ConcentricRectangle uses iOS 26's squircle.
+        ConcentricRectangle(corners: .fixed(8), isUniform: true)
+    }
+
+    private static let liquidSide: CGFloat = 30
+    private static let legacySide: CGFloat = 29
+    private static let legacyCornerRadius: CGFloat = 6.5
+
+    /// White monochrome glyph, optically centered at its natural symbol size.
+    private static func glyphImage(systemName: String, side: CGFloat, pointSize: CGFloat) -> UIImage {
+        let size = CGSize(width: side, height: side)
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.opaque = false
+        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: .medium, scale: .medium)
+            .applying(UIImage.SymbolConfiguration.preferringMonochrome())
+        let fallbackName = systemName.hasSuffix(".fill") ? String(systemName.dropLast(5)) : systemName
+        let symbol = UIImage(systemName: systemName, withConfiguration: config)
+            ?? UIImage(systemName: fallbackName, withConfiguration: config)
+        let glyph = symbol?.withTintColor(.white, renderingMode: .alwaysOriginal)
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            guard let glyph else { return }
+            glyph.draw(at: CGPoint(
+                x: (side - glyph.size.width) / 2,
+                y: (side - glyph.size.height) / 2
+            ))
+        }
+    }
+
+    private static func legacyImage(systemName: String, color: UIColor) -> UIImage {
+        let size = CGSize(width: legacySide, height: legacySide)
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.opaque = false
         return UIGraphicsImageRenderer(size: size, format: format).image { context in
             let rect = CGRect(origin: .zero, size: size)
             let tile = CALayer()
             tile.frame = rect
-            tile.backgroundColor = fill.cgColor
-            tile.cornerRadius = cornerRadius
+            tile.backgroundColor = color.cgColor
+            tile.cornerRadius = legacyCornerRadius
             tile.cornerCurve = .continuous
             tile.masksToBounds = true
             tile.render(in: context.cgContext)
 
-            let config = UIImage.SymbolConfiguration(pointSize: glyphPointSize, weight: .medium, scale: .medium)
-                .applying(UIImage.SymbolConfiguration.preferringMonochrome())
-            let fallbackName = systemName.hasSuffix(".fill") ? String(systemName.dropLast(5)) : systemName
-            let symbol = UIImage(systemName: systemName, withConfiguration: config)
-                ?? UIImage(systemName: fallbackName, withConfiguration: config)
-            guard let glyph = symbol?.withTintColor(.white, renderingMode: .alwaysOriginal) else { return }
-            glyph.draw(in: fittedRect(for: glyph.size, in: rect.insetBy(dx: glyphInset, dy: glyphInset)))
+            let glyph = glyphImage(systemName: systemName, side: legacySide, pointSize: 16)
+            glyph.draw(in: rect)
         }
-    }
-
-    private static func fittedRect(for glyphSize: CGSize, in bounds: CGRect) -> CGRect {
-        guard glyphSize.width > 0, glyphSize.height > 0 else { return bounds }
-        let scale = min(bounds.width / glyphSize.width, bounds.height / glyphSize.height)
-        let size = CGSize(width: glyphSize.width * scale, height: glyphSize.height * scale)
-        return CGRect(
-            x: bounds.midX - size.width / 2,
-            y: bounds.midY - size.height / 2,
-            width: size.width,
-            height: size.height
-        )
     }
 }
 
@@ -410,6 +497,7 @@ private struct SettingLabel: View {
 }
 
 private struct KeyboardSettingsView: View {
+    @State private var showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
     @State private var mode = KeyboardPreferences.selectedMode()
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
     @State private var emojiSkinTone = KeyboardPreferences.emojiSkinTone()
@@ -427,7 +515,6 @@ private struct KeyboardSettingsView: View {
     @State private var appearance = KeyboardPreferences.appearance()
     @State private var highContrastEnabled = KeyboardPreferences.highContrastEnabled()
     @State private var deleteRepeatSpeed = KeyboardPreferences.deleteRepeatSpeed()
-    @State private var showTouchAreas = KeyboardPreferences.showTouchAreas()
     @State private var predictiveTouchAreas = KeyboardPreferences.predictiveTouchAreas()
 
     var body: some View {
@@ -437,11 +524,19 @@ private struct KeyboardSettingsView: View {
             typingSection
             layoutMetricsSection
             appearanceSection
-            developerSection
+            if showsDeveloperSettings {
+                developerSection
+            }
         }
         .navigationTitle("Keyboard Settings")
         .aksharaFormChrome()
-        .onAppear { mode = KeyboardPreferences.selectedMode() }
+        .onAppear {
+            KeyboardPreferences.reload()
+            mode = KeyboardPreferences.selectedMode()
+            emojiEnabled = KeyboardPreferences.emojiEnabled()
+            emojiSkinTone = KeyboardPreferences.emojiSkinTone()
+            showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
+        }
         .onChange(of: mode) { KeyboardPreferences.setSelectedMode($0) }
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
         .onChange(of: emojiSkinTone) { KeyboardPreferences.setEmojiSkinTone($0) }
@@ -459,7 +554,6 @@ private struct KeyboardSettingsView: View {
         .onChange(of: appearance) { KeyboardPreferences.setAppearance($0) }
         .onChange(of: highContrastEnabled) { KeyboardPreferences.setHighContrastEnabled($0) }
         .onChange(of: deleteRepeatSpeed) { KeyboardPreferences.setDeleteRepeatSpeed($0) }
-        .onChange(of: showTouchAreas) { KeyboardPreferences.setShowTouchAreas($0) }
         .onChange(of: predictiveTouchAreas) { KeyboardPreferences.setPredictiveTouchAreas($0) }
     }
 
@@ -503,6 +597,16 @@ private struct KeyboardSettingsView: View {
                         color: .systemOrange
                     )
                 }
+            }
+            NavigationLink {
+                ClipboardHistorySettingsView()
+            } label: {
+                SettingLabel(
+                    title: "Clipboard History",
+                    detail: "Shows a clipboard icon on the suggestion bar",
+                    icon: "doc.on.clipboard",
+                    color: .systemCyan
+                )
             }
             NavigationLink {
                 HapticsSettingsView()
@@ -615,13 +719,16 @@ private struct KeyboardSettingsView: View {
 
     private var developerSection: some View {
         Section {
-            Toggle(isOn: $showTouchAreas) {
-                SettingLabel(title: "Show Touch Areas", detail: "Draw key hit cells over the grid", icon: "square.dashed", color: .systemMint)
+            NavigationLink {
+                DeveloperDebugView()
+            } label: {
+                SettingLabel(
+                    title: "Developer",
+                    detail: "Touch areas, chrome, and try fields",
+                    icon: "ladybug.fill",
+                    color: .systemMint
+                )
             }
-        } header: {
-            Text("Developer")
-        } footer: {
-            Text("For debugging hit targets on the keyboard.")
         }
     }
 }
@@ -677,6 +784,115 @@ private struct LayoutReferenceView: View {
     }
 }
 
+private struct AboutView: View {
+    @Binding var mode: SinhalaEngine.Mode
+    @State private var confirmReset = false
+    @State private var developerUnlocked = KeyboardPreferences.developerModeUnlocked()
+    @State private var openDeveloper = false
+    @State private var buildTapCount = 0
+    @State private var lastBuildTap = Date.distantPast
+
+    var body: some View {
+        Form {
+            Section {
+                NavigationLink {
+                    PrivacyPolicyView()
+                } label: {
+                    DashboardLabel(title: "Privacy Policy", icon: "hand.raised.fill", color: .systemTeal)
+                }
+                NavigationLink {
+                    OpenSourceNoticesView()
+                } label: {
+                    DashboardLabel(title: "Open Source Notices", icon: "doc.text.fill", color: .systemOrange)
+                }
+                NavigationLink {
+                    CreditsView()
+                } label: {
+                    DashboardLabel(title: "Credits", icon: "heart.fill", color: .systemPink)
+                }
+                if developerUnlocked && !openDeveloper {
+                    NavigationLink {
+                        DeveloperDebugView()
+                    } label: {
+                        DashboardLabel(title: "Developer", icon: "ladybug.fill", color: .systemMint)
+                    }
+                }
+            }
+
+            Section {
+                LabeledContent("Version", value: AksharaAppInfo.version)
+                LabeledContent("Build", value: AksharaAppInfo.buildNumber)
+                    .overlay {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture(perform: handleBuildTap)
+                    }
+                LabeledContent("Copyright", value: "© 2026 Lahiru Himesh Madusanka")
+                LabeledContent("License", value: "MIT License")
+            }
+
+            Section {
+                Button("Reset Keyboard Settings", role: .destructive) {
+                    confirmReset = true
+                }
+            }
+        }
+        .navigationTitle("About")
+        .navigationBarTitleDisplayMode(.inline)
+        .aksharaFormChrome()
+        .navigationDestination(isPresented: $openDeveloper) {
+            DeveloperDebugView()
+        }
+        .confirmationDialog(
+            "Reset Keyboard Settings?",
+            isPresented: $confirmReset,
+            titleVisibility: .visible
+        ) {
+            Button("Reset", role: .destructive) {
+                KeyboardPreferences.resetToDefaults()
+                mode = KeyboardPreferences.selectedMode()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This restores layout and feature options to their defaults. Full Access status is unchanged.")
+        }
+    }
+
+    private func handleBuildTap() {
+        let now = Date()
+        if now.timeIntervalSince(lastBuildTap) > 1.5 {
+            buildTapCount = 0
+        }
+        lastBuildTap = now
+        buildTapCount += 1
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        guard buildTapCount >= 7 else { return }
+
+        buildTapCount = 0
+        KeyboardPreferences.setDeveloperModeUnlocked(true)
+        developerUnlocked = true
+        AksharaToast.show("welcome to the අක්ෂර 🇱🇰")
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        openDeveloper = true
+    }
+}
+
+private struct CreditsView: View {
+    var body: some View {
+        List {
+            Section("Layout") {
+                NoticeView(
+                    title: "Thimira Thenuwara",
+                    detail: "Phonetic and Smart Phonetic layout fixes.",
+                    links: [("Website", AksharaLinks.thimiraThenuwara)]
+                )
+            }
+        }
+        .navigationTitle("Credits")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 private struct PrivacyPolicyView: View {
     var body: some View {
         List {
@@ -686,7 +902,12 @@ private struct PrivacyPolicyView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Full Access") {
-                Text("Allow Full Access is only so the app and keyboard can share local preferences through an App Group and play haptics. Apple still shows the system warning when you enable it.")
+                Text("Allow Full Access lets the app and keyboard share local preferences through an App Group, play haptics, and — when Clipboard History is enabled — read the pasteboard while the keyboard is open. Apple still shows the system warning when you enable it. Clipboard items stay on your device and are never sent over the network.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Clipboard History") {
+                Text("When enabled in Keyboard Settings, Akshara saves copied text while the keyboard is open. iOS may ask you to allow pasting from other apps. You can choose Always Allow under Settings → Akshara → Paste from Other Apps so the keyboard stops asking every time. Turning the feature off clears saved history.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -718,6 +939,14 @@ private struct OpenSourceNoticesView: View {
                     title: "Akshara",
                     detail: "Copyright © 2026 Lahiru Himesh Madusanka. Licensed under the MIT License.",
                     links: [("Source code", AksharaLinks.github)]
+                )
+            }
+
+            Section("Contributors") {
+                NoticeView(
+                    title: "Thimira Thenuwara",
+                    detail: "Phonetic and Smart Phonetic layout fixes.",
+                    links: [("Website", AksharaLinks.thimiraThenuwara)]
                 )
             }
 
@@ -768,6 +997,235 @@ private struct NoticeView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+private struct DeveloperDebugView: View {
+    @State private var showTouchAreas = KeyboardPreferences.showTouchAreas()
+    @State private var chromeOverride = KeyboardPreferences.keyboardChromeOverride()
+    @State private var glassText = ""
+    @State private var classicText = ""
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $showTouchAreas) {
+                    SettingLabel(
+                        title: "Show Touch Areas",
+                        detail: "Draw key hit cells over the grid",
+                        icon: "square.dashed",
+                        color: .systemMint
+                    )
+                }
+            } footer: {
+                Text("For debugging hit targets on the keyboard.")
+            }
+
+            Section {
+                Picker(selection: $chromeOverride) {
+                    ForEach(KeyboardPreferences.KeyboardChromeOverride.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                } label: {
+                    SettingLabel(
+                        title: "Keyboard Chrome",
+                        detail: chromeOverride.detail,
+                        icon: "rectangle.on.rectangle.angled",
+                        color: .systemIndigo
+                    )
+                }
+                .pickerStyle(.navigationLink)
+            } header: {
+                Text("Chrome")
+            } footer: {
+                Text("Automatic follows iOS 26 Liquid Glass and keeps the canvas clear so the host tray shows through. Classic paints Akshara’s pre-glass tray. For a true non-glass system tray, run the Classic Host scheme with Keyboard Chrome set to Classic. Dismiss and reopen the keyboard after changing this.")
+            }
+
+            Section {
+                TextField("Type here…", text: $glassText, axis: .vertical)
+                    .lineLimit(3...6)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(false)
+            } header: {
+                Text("Liquid Glass field")
+            } footer: {
+                Text("SwiftUI field. On iOS 26 this uses the host’s Liquid Glass keyboard tray.")
+            }
+
+            Section {
+                ClassicTryField(text: $classicText, placeholder: "Type here…")
+                    .frame(minHeight: 88)
+            } header: {
+                Text("Classic field")
+            } footer: {
+                Text("UIKit field. The field chrome is pre-glass; the keyboard tray still follows the host unless Keyboard Chrome is Classic.")
+            }
+        }
+        .navigationTitle("Developer")
+        .navigationBarTitleDisplayMode(.inline)
+        .aksharaFormChrome()
+        .onAppear {
+            KeyboardPreferences.reload()
+            showTouchAreas = KeyboardPreferences.showTouchAreas()
+            chromeOverride = KeyboardPreferences.keyboardChromeOverride()
+        }
+        .onChange(of: showTouchAreas) { KeyboardPreferences.setShowTouchAreas($0) }
+        .onChange(of: chromeOverride) { value in
+            KeyboardPreferences.setKeyboardChromeOverride(value)
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+}
+
+private struct ClassicTryField: UIViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.delegate = context.coordinator
+        view.font = .preferredFont(forTextStyle: .body)
+        view.backgroundColor = .secondarySystemFill
+        view.layer.cornerRadius = 8
+        view.layer.cornerCurve = .continuous
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        view.keyboardDismissMode = .interactive
+        context.coordinator.placeholderLabel.text = placeholder
+        context.coordinator.placeholderLabel.font = view.font
+        context.coordinator.placeholderLabel.textColor = .placeholderText
+        context.coordinator.placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(context.coordinator.placeholderLabel)
+        NSLayoutConstraint.activate([
+            context.coordinator.placeholderLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+            context.coordinator.placeholderLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 11)
+        ])
+        context.coordinator.syncPlaceholder(for: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+        context.coordinator.placeholderLabel.text = placeholder
+        context.coordinator.syncPlaceholder(for: uiView)
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var text: Binding<String>
+        let placeholderLabel = UILabel()
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            text.wrappedValue = textView.text
+            syncPlaceholder(for: textView)
+        }
+
+        func syncPlaceholder(for textView: UITextView) {
+            placeholderLabel.isHidden = !textView.text.isEmpty
+        }
+    }
+}
+
+private struct ClipboardHistorySettingsView: View {
+    @State private var clipboardHistoryEnabled = KeyboardPreferences.clipboardHistoryEnabled()
+    @State private var fullAccessConfirmed = KeyboardPreferences.fullAccessConfirmed()
+    @State private var confirmClearClipboard = false
+    @State private var showPasteAllowSetup = false
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Clipboard History", isOn: $clipboardHistoryEnabled)
+                    .disabled(!fullAccessConfirmed)
+                Button("Clear History", role: .destructive) {
+                    confirmClearClipboard = true
+                }
+                .disabled(!clipboardHistoryEnabled || !fullAccessConfirmed)
+            } header: {
+                Text("History")
+            } footer: {
+                if !fullAccessConfirmed {
+                    Text("Full Access must be enabled before clipboard history can be used.")
+                } else {
+                    Text("Shows a clipboard icon on the suggestion bar. While Akshara is open, copied text is saved automatically.")
+                }
+            }
+
+            if clipboardHistoryEnabled && fullAccessConfirmed {
+                Section {
+                    Button("Open Paste from Other Apps Settings") {
+                        openAksharaPasteFromOtherAppsSettings()
+                    }
+                    .aksharaGlassButton(prominent: true)
+                } header: {
+                    Text("Paste from Other Apps")
+                } footer: {
+                    Text("To stop repeated “Allow Paste?” prompts, open Akshara’s settings, tap Paste from Other Apps, and choose Allow. Ask keeps prompting; Deny blocks automatic saves. Apple provides this control; it also covers the Akshara keyboard.")
+                }
+            }
+
+            Section {
+                Label(
+                    fullAccessConfirmed ? "Full Access confirmed" : "Full Access required",
+                    systemImage: fullAccessConfirmed ? "checkmark.circle.fill" : "lock.fill"
+                )
+                .foregroundStyle(fullAccessConfirmed ? .green : .secondary)
+                Button("Open iOS Settings") {
+                    openSystemSettings()
+                }
+                .aksharaGlassButton(prominent: !fullAccessConfirmed)
+            } header: {
+                Text("Keyboard Full Access")
+            } footer: {
+                Text("Settings → General → Keyboard → Keyboards → Akshara → Allow Full Access. Then open the Akshara keyboard once and return here.")
+            }
+        }
+        .navigationTitle("Clipboard History")
+        .aksharaFormChrome()
+        .confirmationDialog(
+            "Clear Clipboard History?",
+            isPresented: $confirmClearClipboard,
+            titleVisibility: .visible
+        ) {
+            Button("Clear", role: .destructive) {
+                ClipboardHistoryStore.clear()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes saved clipboard items from this device.")
+        }
+        .alert("Allow Paste from Other Apps", isPresented: $showPasteAllowSetup) {
+            Button("Open Settings") {
+                openAksharaPasteFromOtherAppsSettings()
+            }
+            Button("Later", role: .cancel) {}
+        } message: {
+            Text("In Akshara settings, choose Paste from Other Apps → Allow. That stops iOS from asking every time Akshara saves a copy.")
+        }
+        .onAppear(perform: refresh)
+        .onChange(of: clipboardHistoryEnabled) { enabled in
+            KeyboardPreferences.setClipboardHistoryEnabled(enabled)
+            if enabled {
+                showPasteAllowSetup = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            refresh()
+        }
+    }
+
+    private func refresh() {
+        KeyboardPreferences.reload()
+        fullAccessConfirmed = KeyboardPreferences.fullAccessConfirmed()
+        clipboardHistoryEnabled = KeyboardPreferences.clipboardHistoryEnabled()
     }
 }
 
