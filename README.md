@@ -12,6 +12,28 @@ by Remeinium AI and Kusal Darshana (2025), under
 not included; attribution details are in
 `AksharaKeyboard/Resources/SinhalaNextWordModel-ATTRIBUTION.md`.
 
+## Autocorrect dictionary releases
+
+Autocorrect is a separate, opt-in, on-device verified-spelling feature. Its
+runtime artifact is not a SQLite database and does not replace the frequency or
+n-gram prediction models. `Scripts/SinhalaDictionary.lock` pins the exact
+Akshara Dictionary revision and public export profile for a release.
+
+Release automation must check out that revision, build its `redistributable`
+export with the upstream dictionary tooling, then compile the resulting export:
+
+```sh
+zsh Scripts/build_sinhala_autocorrect_index.sh \
+  /path/to/akshara-dictionary/exports/release \
+  759143ac5e62732710d710aa22f21f170c601a8a
+```
+
+The compiler rejects a different revision/profile and writes both the compact
+`SinhalaAutocorrect.lexicon` bundle resource and a metadata file containing its
+SHA-256, licence, attribution, and word count. Updating the lock and rebuilding
+these resources is the only supported way to update the shipped dictionary; the
+keyboard never downloads a dictionary at runtime.
+
 ## Open and test
 
 Open `AksharaKeyboard.xcodeproj` with Xcode 16 or later, select your Development Team for both targets, connect your iPhone, then Run the **Akshara** scheme.
@@ -33,5 +55,12 @@ Before building locally, use a unique bundle identifier and create an App Group 
 The group identifier must match exactly in all three places. If it does not, layout and feature settings saved in the app will not reach the keyboard extension. After changing signing or entitlements, clean the build folder, reinstall the app, and remove and re-add the keyboard in iOS Settings.
 
 Do not commit your personal Development Team ID, bundle identifiers, provisioning profiles, or App Group identifier back to the shared repository.
+
+## Crash and performance diagnostics
+
+- TestFlight and App Store distributions report symbolicated crashes through Xcode Organizer and App Store Connect. Keep each release archive and its dSYMs.
+- The containing app subscribes to MetricKit and retains up to 24 local crash, hang, CPU, disk-write, and performance payloads. Open **About → Diagnostics**, prepare an export, and share the generated JSON when investigating a report.
+- In Xcode, use **Debug → Simulate MetricKit Payloads** while running the containing app to verify the collection and export flow. Simulated payloads contain sample data.
+- Diagnostics never include typed text and are never uploaded automatically.
 
 The keyboard supports Wijesekara, Phonetic, and Smart Phonetic input, with local marked-text preview and commit-on-space/return behavior.

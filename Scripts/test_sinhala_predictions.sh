@@ -7,7 +7,7 @@ trap 'rm -rf "$temporary_directory"' EXIT
 cp "$root/Scripts/TestSinhalaPrediction.swift" "$temporary_directory/main.swift"
 cat > "$temporary_directory/ClipboardHistoryStoreStub.swift" <<'EOF'
 enum ClipboardHistoryStore {
-    static func clear() {}
+    static func clearAll() {}
 }
 EOF
 
@@ -15,6 +15,7 @@ swiftc \
   "$root/Shared/SinhalaEngine.swift" \
   "$root/Shared/KeyboardPreferences.swift" \
   "$root/Shared/SinhalaPrediction.swift" \
+  "$root/Shared/SinhalaAutocorrection.swift" \
   "$root/Shared/KeyboardCompositionSession.swift" \
   "$root/Shared/SinhalaEmojiSuggestions.swift" \
   "$root/Shared/EmojiSkinTone.swift" \

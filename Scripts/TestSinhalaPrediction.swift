@@ -73,6 +73,25 @@ guard !secondHop.contains(firstHop[0]) else {
 }
 print("Sinhala chained next-word predictions passed (\(firstHop[0]) → \(secondHop.joined(separator: ",")))")
 
+var autocorrectPassed = true
+func expectAutocorrect(_ condition: Bool, label: String) {
+    guard condition else {
+        fputs("FAIL autocorrect \(label)\n", stderr)
+        autocorrectPassed = false
+        return
+    }
+}
+
+let autocorrectURL = root.appendingPathComponent("AksharaKeyboard/Resources/SinhalaAutocorrect.lexicon")
+let autocorrect = SinhalaAutocorrectionService(artifactURL: autocorrectURL)
+expectAutocorrect(autocorrect.isVerified("ගෙදර"), label: "verified word")
+expectAutocorrect(autocorrect.correction(for: "ගෙදරා") == "ගෙදර", label: "one extra grapheme")
+expectAutocorrect(autocorrect.correction(for: "ගෙදර") == nil, label: "verified word unchanged")
+expectAutocorrect(autocorrect.correction(for: "abc") == nil, label: "Latin excluded")
+expectAutocorrect(autocorrect.suggestions(for: "ගෙදරා").first?.text == "ගෙදර", label: "correction suggestion")
+guard autocorrectPassed else { exit(1) }
+print("Sinhala autocorrect fixtures passed")
+
 var easterEggPassed = true
 func expectTrueName(rendered: String, phonetic: String, expected: Bool, label: String) {
     let actual = AksharaEasterEgg.isCompleteTrueName(rendered: rendered, phoneticSource: phonetic)
@@ -128,6 +147,13 @@ expectRendered("ෙක", "කෙ", label: "kombuwa ka")
 expectRendered("ෙක්", "කේ", label: "kombuwa ka virama")
 expectRendered("ෙකා", "කො", label: "kombuwa ka aa")
 expectRendered("අා", "ආ", label: "independent aa")
+let rakaranshaya = "\u{E004}"
+let yansaya = "\u{E005}"
+expectRendered("ෙප\(rakaranshaya)්", "ප්‍රේ", label: "kombuwa pa rakaranshaya virama")
+expectRendered("ෙප\(rakaranshaya)", "ප්‍රෙ", label: "kombuwa pa rakaranshaya")
+expectRendered("ෙක\(yansaya)්", "ක්‍යේ", label: "kombuwa ka yansaya virama")
+expectComposition(SinhalaEngine.canExtendPrebase("ෙප", with: rakaranshaya), true, label: "ke pa plus rakaranshaya")
+expectComposition(SinhalaEngine.canExtendPrebase("ෙප" + rakaranshaya, with: "්"), true, label: "pre plus virama")
 
 guard compositionPassed else { exit(1) }
 print("Wijesekara composition helpers passed")
@@ -369,6 +395,31 @@ expectHygiene(
     label: "idle session is not invalidated by an empty field"
 )
 
+var wordPrefixPassed = true
+func expectWordPrefix(_ actual: String, _ expected: String, label: String) {
+    guard actual == expected else {
+        fputs("FAIL word prefix \(label): expected \(expected), got \(actual)\n", stderr)
+        wordPrefixPassed = false
+        return
+    }
+}
+expectWordPrefix(
+    NativeBackspace.wordPrefixBeforeCaret(in: "මම ගෙද"),
+    "ගෙද",
+    label: "keeps the word before an accidental space"
+)
+expectWordPrefix(
+    NativeBackspace.wordPrefixBeforeCaret(in: "මම ගෙද, "),
+    "",
+    label: "does not cross whitespace or punctuation"
+)
+expectWordPrefix(
+    NativeBackspace.wordPrefixBeforeCaret(in: "මම ගෙදර"),
+    "ගෙදර",
+    label: "reads the prefix at a moved caret"
+)
+guard wordPrefixPassed else { exit(1) }
+
 var session = KeyboardCompositionSession()
 session.phoneticBuffer = "amma"
 session.lastPhoneticRendered = amma
@@ -430,6 +481,226 @@ for event in [
 
 guard hygienePassed else { exit(1) }
 print("Composition field-switch hygiene passed")
+
+var unmarkedPassed = true
+func expectUnmarked(_ actual: Bool, label: String) {
+    guard actual else {
+        fputs("FAIL unmarked rewrite \(label)\n", stderr)
+        unmarkedPassed = false
+        return
+    }
+}
+func expectUnmarkedEqual<T: Equatable>(_ actual: T, _ expected: T, label: String) {
+    guard actual == expected else {
+        fputs("FAIL unmarked rewrite \(label): expected \(expected), got \(actual)\n", stderr)
+        unmarkedPassed = false
+        return
+    }
+}
+
+let smartA = SinhalaEngine.transliterate("a", mode: .smartPhonetic)
+let smartAm = SinhalaEngine.transliterate("am", mode: .smartPhonetic)
+let smartAmm = SinhalaEngine.transliterate("amm", mode: .smartPhonetic)
+let smartAmma = SinhalaEngine.transliterate("amma", mode: .smartPhonetic)
+let smartAmmak = SinhalaEngine.transliterate("ammak", mode: .smartPhonetic)
+let smartAmmaka = SinhalaEngine.transliterate("ammaka", mode: .smartPhonetic)
+let smartS = SinhalaEngine.transliterate("s", mode: .smartPhonetic)
+let smartSh = SinhalaEngine.transliterate("sh", mode: .smartPhonetic)
+let smartK = SinhalaEngine.transliterate("k", mode: .smartPhonetic)
+let smartKa = SinhalaEngine.transliterate("ka", mode: .smartPhonetic)
+let smartKak = SinhalaEngine.transliterate("kak", mode: .smartPhonetic)
+
+expectUnmarkedEqual(
+    UnmarkedCompositionRewrite.plan(from: "", to: smartA),
+    .insertOnly(smartA),
+    label: "first letter is insert-only"
+)
+expectUnmarkedEqual(
+    UnmarkedCompositionRewrite.plan(from: smartA, to: smartAm),
+    .insertOnly(UnmarkedCompositionRewrite.unicodeScalarSuffix(smartAm, afterPrefix: smartA)),
+    label: "a → am appends"
+)
+expectUnmarkedEqual(
+    UnmarkedCompositionRewrite.plan(from: smartAm, to: smartAmm),
+    .insertOnly(UnmarkedCompositionRewrite.unicodeScalarSuffix(smartAmm, afterPrefix: smartAm)),
+    label: "am → amm appends"
+)
+expectUnmarked(
+    {
+        if case .reconcile = UnmarkedCompositionRewrite.plan(from: smartAmm, to: smartAmma) { return true }
+        return false
+    }(),
+    label: "amm → amma strips the trailing virama"
+)
+expectUnmarkedEqual(
+    UnmarkedCompositionRewrite.plan(from: smartAmma, to: smartAmmak),
+    .insertOnly(UnmarkedCompositionRewrite.unicodeScalarSuffix(smartAmmak, afterPrefix: smartAmma)),
+    label: "amma → ammak appends even after a long prefix"
+)
+expectUnmarked(
+    {
+        if case .reconcile = UnmarkedCompositionRewrite.plan(from: smartAmmak, to: smartAmmaka) { return true }
+        return false
+    }(),
+    label: "ammak → ammaka rewrites only the last syllable"
+)
+expectUnmarked(
+    {
+        if case .reconcile = UnmarkedCompositionRewrite.plan(from: smartS, to: smartSh) { return true }
+        return false
+    }(),
+    label: "s → sh rewrites ස් to ශ්"
+)
+expectUnmarked(
+    {
+        if case .reconcile = UnmarkedCompositionRewrite.plan(from: smartK, to: smartKa) { return true }
+        return false
+    }(),
+    label: "k → ka strips the provisional virama"
+)
+
+enum SimulatedDeleteUnit { case unicodeScalar, graphemeCluster }
+struct SimulatedHost {
+    var beforeInput: String
+    var deleteUnit: SimulatedDeleteUnit
+    var deleteCount = 0
+    var insertCount = 0
+    var contextReads = 0
+
+    mutating func apply(_ plan: UnmarkedCompositionRewrite.Plan) {
+        switch plan {
+        case .none:
+            return
+        case .insertOnly(let text):
+            guard !text.isEmpty else { return }
+            beforeInput += text
+            insertCount += 1
+        case .reconcile(let old, let new, let maximumDeletes):
+            UnmarkedCompositionRewrite.reconcile(
+                old: old,
+                new: new,
+                maximumDeletes: maximumDeletes,
+                context: {
+                    self.contextReads += 1
+                    return self.beforeInput
+                },
+                deleteBackward: {
+                    self.deleteCount += 1
+                    switch self.deleteUnit {
+                    case .graphemeCluster:
+                        if !self.beforeInput.isEmpty { self.beforeInput.removeLast() }
+                    case .unicodeScalar:
+                        if !self.beforeInput.unicodeScalars.isEmpty {
+                            self.beforeInput.unicodeScalars.removeLast()
+                        }
+                    }
+                },
+                insert: { text in
+                    guard !text.isEmpty else { return }
+                    self.beforeInput += text
+                    self.insertCount += 1
+                }
+            )
+        }
+    }
+}
+
+func typeSmartPhonetic(
+    _ source: String,
+    onto prefix: String = "",
+    deleteUnit: SimulatedDeleteUnit,
+    maximumLiveSourceLength: Int = PhoneticLiveWindow.defaultMaximumSourceLength
+) -> (host: SimulatedHost, session: KeyboardCompositionSession) {
+    var host = SimulatedHost(beforeInput: prefix, deleteUnit: deleteUnit)
+    var session = KeyboardCompositionSession()
+    session.phoneticCompositionAnchor = prefix
+    for character in source {
+        session.phoneticBuffer.append(character)
+        let rendered = SinhalaEngine.transliterate(session.phoneticBuffer, mode: .smartPhonetic)
+        host.apply(UnmarkedCompositionRewrite.plan(from: session.lastPhoneticRendered, to: rendered))
+        session.lastPhoneticRendered = rendered
+        session.commitStablePhoneticPrefixIfNeeded(
+            mode: .smartPhonetic,
+            maximumLiveSourceLength: maximumLiveSourceLength
+        )
+    }
+    return (host, session)
+}
+
+for unit in [SimulatedDeleteUnit.unicodeScalar, .graphemeCluster] {
+    let unitName = unit == .unicodeScalar ? "scalar" : "grapheme"
+    let typed = typeSmartPhonetic("amma", onto: "hello ", deleteUnit: unit)
+    expectUnmarkedEqual(
+        typed.host.beforeInput,
+        "hello " + smartAmma,
+        label: "\(unitName) host renders amma"
+    )
+    let sh = typeSmartPhonetic("sh", deleteUnit: unit)
+    expectUnmarkedEqual(sh.host.beforeInput, smartSh, label: "\(unitName) host renders sh")
+    let virama = typeSmartPhonetic("ka", deleteUnit: unit)
+    expectUnmarkedEqual(virama.host.beforeInput, smartKa, label: "\(unitName) host renders ka")
+    let backspace = typeSmartPhonetic("kak", deleteUnit: unit)
+    var shrinking = backspace.host
+    shrinking.apply(UnmarkedCompositionRewrite.plan(from: smartKak, to: smartKa))
+    expectUnmarkedEqual(shrinking.beforeInput, smartKa, label: "\(unitName) host backspaces kak → ka")
+}
+
+let longAppend = typeSmartPhonetic("amma", onto: "hello ", deleteUnit: .unicodeScalar)
+let beforeK = longAppend.host
+var grow = beforeK
+grow.apply(UnmarkedCompositionRewrite.plan(from: smartAmma, to: smartAmmak))
+expectUnmarkedEqual(grow.deleteCount, beforeK.deleteCount, label: "amma → ammak does not delete")
+expectUnmarkedEqual(grow.contextReads, beforeK.contextReads, label: "amma → ammak does not poll the host")
+expectUnmarkedEqual(grow.beforeInput, "hello " + smartAmmak, label: "amma → ammak inserts the last cluster")
+
+var lastSyllable = grow
+lastSyllable.apply(UnmarkedCompositionRewrite.plan(from: smartAmmak, to: smartAmmaka))
+expectUnmarkedEqual(lastSyllable.beforeInput, "hello " + smartAmmaka, label: "ammak → ammaka keeps the earlier syllables")
+expectUnmarked(
+    lastSyllable.deleteCount - grow.deleteCount < smartAmmak.unicodeScalars.count,
+    label: "ammak → ammaka deletes fewer scalars than the whole word"
+)
+
+let capped = typeSmartPhonetic(
+    "aksharaya",
+    onto: "prev ",
+    deleteUnit: .unicodeScalar,
+    maximumLiveSourceLength: 4
+)
+expectUnmarked(
+    !capped.session.committedPhoneticSegments.isEmpty,
+    label: "long Smart Phonetic words commit a stable prefix"
+)
+expectUnmarked(
+    capped.session.phoneticBuffer.count <= 4,
+    label: "live Latin window stays at the cap"
+)
+expectUnmarkedEqual(
+    capped.session.phoneticCompositionAnchor,
+    "prev " + capped.session.committedPhoneticSegments.map(\.rendered).joined(),
+    label: "prefix commit advances the live anchor"
+)
+expectUnmarkedEqual(
+    capped.host.beforeInput,
+    "prev " + SinhalaEngine.transliterate("aksharaya", mode: .smartPhonetic),
+    label: "prefix commit does not change visible text"
+)
+expectUnmarkedEqual(
+    capped.session.committedPhoneticSegments.map(\.rendered).joined() + capped.session.lastPhoneticRendered,
+    SinhalaEngine.transliterate("aksharaya", mode: .smartPhonetic),
+    label: "committed prefix plus live suffix stay the full word"
+)
+
+let noSplit = PhoneticLiveWindow.prefixCommitIfNeeded(
+    source: "amma",
+    anchor: "x",
+    mode: .smartPhonetic,
+    maximumLiveSourceLength: 8
+)
+expectUnmarked(noSplit == nil, label: "short words stay entirely live")
+
+guard unmarkedPassed else { exit(1) }
+print("Unmarked phonetic rewrite passed")
 
 var spacingPassed = true
 func expectSpacing(_ actual: String, _ expected: String, label: String) {

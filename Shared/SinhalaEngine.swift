@@ -91,7 +91,11 @@ enum SinhalaEngine {
 
     static func slsKeyLabel(_ key: String, shifted: Bool) -> String {
         let mapped = slsCharacter(for: key, shifted: shifted)
-        return mapped.unicodeScalars.allSatisfy { $0.value < 0xE000 || $0.value > 0xE0FF } ? mapped : ""
+        if mapped.unicodeScalars.allSatisfy({ $0.value < 0xE000 || $0.value > 0xE0FF }) {
+            return mapped
+        }
+        let normalized = normalizeSLS(mapped)
+        return normalized.isEmpty ? "◌" : normalized
     }
 
     /// Produces Unicode-order Sinhala from the visual Wijesekara entry order.
@@ -138,6 +142,7 @@ enum SinhalaEngine {
                     continue
                 }
                 output.unicodeScalars.append(scalars[i]); i += 1
+                i = appendCluster(scalars, i, &output)
                 if prefixes >= 2 { output += "ෛ" }
                 else if i < scalars.count {
                     switch scalars[i].value {
@@ -162,6 +167,31 @@ enum SinhalaEngine {
         return output.precomposedStringWithCanonicalMapping
     }
 
+    /// Rakaranshaya / yansaya / touching letters belong on the consonant before ෙ becomes ේ.
+    private static func appendCluster(_ scalars: [UnicodeScalar], _ start: Int, _ output: inout String) -> Int {
+        var i = start
+        func isConsonant(_ scalar: UnicodeScalar) -> Bool { (0x0D9A...0x0DC6).contains(scalar.value) }
+        while i < scalars.count {
+            switch scalars[i].value {
+            case 0xE004:
+                output += "්‍ර"; i += 1
+            case 0xE005:
+                output += "්‍ය"; i += 1
+            case 0xE000, 0xE001:
+                if i + 1 < scalars.count, isConsonant(scalars[i + 1]) {
+                    output += "්‍"
+                    output.unicodeScalars.append(scalars[i + 1])
+                    i += 2
+                } else {
+                    return i
+                }
+            default:
+                return i
+            }
+        }
+        return i
+    }
+
     static func isSinhalaConsonant(_ text: String) -> Bool {
         text.unicodeScalars.first.map { (0x0D9A...0x0DC6).contains($0.value) } ?? false
     }
@@ -181,9 +211,16 @@ enum SinhalaEngine {
             return (suffix == "ෙ" && prebaseCount < 2) || isSinhalaConsonant(suffix)
         }
         guard prebaseCount == 1 else { return false }
-        if scalars.count == 2 { return ["්", "ා", "ෟ"].contains(suffix) }
-        if scalars.count == 3, scalars[2].value == 0x0DCF { return suffix == "්" }
-        return false
+        let rest = Array(scalars.dropFirst(prebaseCount))
+        guard let first = rest.first, (0x0D9A...0x0DC6).contains(first.value) else { return false }
+        let suffixValue = suffix.unicodeScalars.first?.value
+        let clusterTokens: Set<UInt32> = [0xE004, 0xE005]
+        let finishers: Set<UInt32> = [0x0DCA, 0x0DCF, 0x0DDF]
+        let leftover = rest.dropFirst().drop { clusterTokens.contains($0.value) }
+        if leftover.isEmpty {
+            return suffixValue.map { clusterTokens.contains($0) || finishers.contains($0) } ?? false
+        }
+        return leftover.count == 1 && leftover.first?.value == 0x0DCF && suffix == "්"
     }
 
     static func combinesWithIndependentVowel(_ source: String, suffix: String) -> Bool {
@@ -360,6 +397,21 @@ enum NativeBackspace {
             result.append(char)
         }
         return String(result.reversed())
+    }
+
+    /// The portion of the word immediately before the insertion point. This
+    /// deliberately excludes punctuation and whitespace so it can be joined
+    /// with the next locally-entered glyph when a user resumes a word after
+    /// moving the caret or deleting an accidental space.
+    static func wordPrefixBeforeCaret(in text: String) -> String {
+        var prefix: [Character] = []
+        for character in text.reversed() {
+            if character.isWhitespace || character.isNewline || character.isPunctuation {
+                break
+            }
+            prefix.append(character)
+        }
+        return String(prefix.reversed())
     }
 
     static func endsWith(_ text: String, suffix: String) -> Bool {

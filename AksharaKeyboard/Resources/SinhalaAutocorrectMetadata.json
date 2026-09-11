@@ -1,0 +1,26 @@
+{
+  "format": "AKSHARA_AUTOCORRECT_V1",
+  "licence": "CC-BY-4.0 plus included source licences (see manifest)",
+  "profile": "redistributable",
+  "repository": "https://github.com/AksharaOrg/akshara-dictionary.git",
+  "revision": "759143ac5e62732710d710aa22f21f170c601a8a",
+  "sha256": "00800ea1636456b9dfa85ef8b9a7e412ce5d623f9cb2b23cc769c46d3f77264d",
+  "sources": [
+    {
+      "definitions_redistributable": "true",
+      "headwords_redistributable": "true",
+      "id": "project_seed",
+      "license": "CC-BY-4.0",
+      "license_evidence": "Original project data; see DATA_LICENSE.md",
+      "license_family": "cc-by",
+      "name": "sinhala-dictionary original seed",
+      "notes": "Independently written seed lexemes and definitions. Not copied from published dictionaries.",
+      "publisher": "sinhala-dictionary contributors",
+      "redistribution_allowed": "true",
+      "retrieved_at": "2026-09-09",
+      "tier": "original",
+      "url": "https://github.com/sinhala-dictionary"
+    }
+  ],
+  "wordCount": 8
+}

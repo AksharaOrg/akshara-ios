@@ -502,6 +502,7 @@ private struct KeyboardSettingsView: View {
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
     @State private var emojiSkinTone = KeyboardPreferences.emojiSkinTone()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
+    @State private var autocorrectEnabled = KeyboardPreferences.autocorrectEnabled()
     @State private var emojiSuggestionsEnabled = KeyboardPreferences.emojiSuggestionsEnabled()
     @State private var doubleSpacePeriodEnabled = KeyboardPreferences.doubleSpacePeriodEnabled()
     @State private var topRow = KeyboardPreferences.topRow()
@@ -535,12 +536,15 @@ private struct KeyboardSettingsView: View {
             mode = KeyboardPreferences.selectedMode()
             emojiEnabled = KeyboardPreferences.emojiEnabled()
             emojiSkinTone = KeyboardPreferences.emojiSkinTone()
+            suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
+            autocorrectEnabled = KeyboardPreferences.autocorrectEnabled()
             showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
         }
         .onChange(of: mode) { KeyboardPreferences.setSelectedMode($0) }
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
         .onChange(of: emojiSkinTone) { KeyboardPreferences.setEmojiSkinTone($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
+        .onChange(of: autocorrectEnabled) { KeyboardPreferences.setAutocorrectEnabled($0) }
         .onChange(of: emojiSuggestionsEnabled) { KeyboardPreferences.setEmojiSuggestionsEnabled($0) }
         .onChange(of: doubleSpacePeriodEnabled) { KeyboardPreferences.setDoubleSpacePeriodEnabled($0) }
         .onChange(of: topRow) { KeyboardPreferences.setTopRow($0) }
@@ -587,6 +591,14 @@ private struct KeyboardSettingsView: View {
             }
             Toggle(isOn: $suggestionsEnabled) {
                 SettingLabel(title: "Suggestions", detail: "Shows word completions", icon: "text.badge.plus", color: .systemIndigo)
+            }
+            Toggle(isOn: $autocorrectEnabled) {
+                SettingLabel(
+                    title: "Autocorrect",
+                    detail: "Corrects likely misspellings when you finish a word",
+                    icon: "checkmark.text.page",
+                    color: .systemTeal
+                )
             }
             if suggestionsEnabled {
                 Toggle(isOn: $emojiSuggestionsEnabled) {
@@ -810,6 +822,11 @@ private struct AboutView: View {
                 } label: {
                     DashboardLabel(title: "Credits", icon: "heart.fill", color: .systemPink)
                 }
+                NavigationLink {
+                    DiagnosticsView()
+                } label: {
+                    DashboardLabel(title: "Diagnostics", icon: "waveform.path.ecg", color: .systemRed)
+                }
                 if developerUnlocked && !openDeveloper {
                     NavigationLink {
                         DeveloperDebugView()
@@ -907,12 +924,17 @@ private struct PrivacyPolicyView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Clipboard History") {
-                Text("When enabled in Keyboard Settings, Akshara saves copied text while the keyboard is open. iOS may ask you to allow pasting from other apps. You can choose Always Allow under Settings → Akshara → Paste from Other Apps so the keyboard stops asking every time. Turning the feature off clears saved history.")
+                Text("When enabled in Keyboard Settings, Akshara saves copied text while the keyboard is open. iOS may ask you to allow pasting from other apps. You can choose Always Allow under Settings → Akshara → Paste from Other Apps so the keyboard stops asking every time. Pin important clips from the keyboard; they stay until you delete them manually.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
             Section("Predictions") {
                 Text("Word suggestions use compact models bundled with the app. Source corpora are not included and never leave your device.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Diagnostics") {
+                Text("Apple may provide Akshara with on-device crash, hang, and performance reports. Akshara stores them locally and sends nothing automatically. Reports contain system, device, app-version, and call-stack information—not typed text—and leave your device only when you choose Export Diagnostics.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -928,6 +950,65 @@ private struct PrivacyPolicyView: View {
         }
         .navigationTitle("Privacy Policy")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DiagnosticsView: View {
+    @State private var reportCount = 0
+    @State private var exportFile: URL?
+    @State private var confirmDelete = false
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Stored reports", value: "\(reportCount)")
+                Button("Prepare Export") {
+                    exportFile = CrashReportManager.shared.makeExportFile()
+                    reportCount = CrashReportManager.shared.storedReportCount
+                }
+                .disabled(reportCount == 0)
+
+                if let exportFile {
+                    ShareLink(item: exportFile) {
+                        Label("Share Diagnostics", systemImage: "square.and.arrow.up")
+                    }
+                }
+            } header: {
+                Text("Crash & Performance Reports")
+            } footer: {
+                Text("Reports are generated by iOS and may arrive after a delay. They include crashes, hangs, CPU and disk exceptions, and daily performance metrics. Typed text is never included.")
+            }
+
+            Section {
+                Button("Delete Stored Reports", role: .destructive) {
+                    confirmDelete = true
+                }
+                .disabled(reportCount == 0)
+            }
+        }
+        .navigationTitle("Diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
+        .aksharaFormChrome()
+        .onAppear(perform: refresh)
+        .confirmationDialog(
+            "Delete Diagnostics?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                CrashReportManager.shared.deleteStoredReports()
+                exportFile = nil
+                refresh()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes all locally stored crash and performance reports.")
+        }
+    }
+
+    private func refresh() {
+        reportCount = CrashReportManager.shared.storedReportCount
+        if reportCount == 0 { exportFile = nil }
     }
 }
 
@@ -955,6 +1036,12 @@ private struct OpenSourceNoticesView: View {
                     title: "A Word Frequency List for Sinhala",
                     detail: "SinhalaFrequencyModel.tsv is a compact derivative of the University of Moratuwa National Languages Processing Centre word-frequency list. It retains the first 40,000 high-frequency entries, filters malformed or overlong tokens, and is sorted for on-device prefix lookup.\n\nCitation: Aloka Fernando and Gihan Dias (2021), “Building a Linguistic Resource: A Word Frequency List for Sinhala,” ICON 2021, pages 606–610.",
                     links: [("Source", AksharaLinks.sinhalaFrequencyList)]
+                )
+
+                NoticeView(
+                    title: "Akshara Sinhala Dictionary",
+                    detail: "Autocorrect uses the redistributable verified-spelling export from Akshara Dictionary, pinned to revision 759143ac5e62732710d710aa22f21f170c601a8a for this release. The keyboard bundles only its compact local spelling index; it never downloads dictionary data or sends typed text over the network.",
+                    links: [("Source", URL(string: "https://github.com/AksharaOrg/akshara-dictionary")!)]
                 )
 
                 NoticeView(
@@ -1155,7 +1242,7 @@ private struct ClipboardHistorySettingsView: View {
                 if !fullAccessConfirmed {
                     Text("Full Access must be enabled before clipboard history can be used.")
                 } else {
-                    Text("Shows a clipboard icon on the suggestion bar. While Akshara is open, copied text is saved automatically.")
+                    Text("Shows a clipboard icon on the suggestion bar. While Akshara is open, copied text is saved automatically. Pin important clips from the keyboard to keep them.")
                 }
             }
 
@@ -1196,11 +1283,11 @@ private struct ClipboardHistorySettingsView: View {
             titleVisibility: .visible
         ) {
             Button("Clear", role: .destructive) {
-                ClipboardHistoryStore.clear()
+                ClipboardHistoryStore.clearHistory()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removes saved clipboard items from this device.")
+            Text("Removes recent clips. Pinned clips are kept until you delete them from the keyboard.")
         }
         .alert("Allow Paste from Other Apps", isPresented: $showPasteAllowSetup) {
             Button("Open Settings") {

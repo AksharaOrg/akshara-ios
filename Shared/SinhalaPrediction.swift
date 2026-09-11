@@ -106,11 +106,79 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     private struct Entry { let word: String; let frequency: Int }
     private struct NextWord { let word: String; let count: Int }
+    /// Keeps the 18 MB next-word corpus memory-mapped and indexes only the
+    /// byte ranges for its ~30k preceding words. Expanding all 455k rows into
+    /// Swift strings and dictionaries uses many times the file size.
+    private struct MappedBigramTable {
+        let data: Data
+        let ranges: [String: Range<Int>]
+
+        init?(url: URL?) {
+            guard let url, let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+                return nil
+            }
+            var ranges: [String: Range<Int>] = [:]
+            ranges.reserveCapacity(32_000)
+            var currentKey: String?
+            var currentKeyBytes: [UInt8] = []
+            var groupStart = 0
+            var lineStart = 0
+            var firstTab: Int?
+
+            data.withUnsafeBytes { rawBuffer in
+                let bytes = rawBuffer.bindMemory(to: UInt8.self)
+                func finishLine(at lineEnd: Int) {
+                    defer {
+                        lineStart = lineEnd + 1
+                        firstTab = nil
+                    }
+                    guard let tab = firstTab, tab > lineStart else { return }
+                    let keyBytes = bytes[lineStart..<tab]
+                    let sameKey = keyBytes.count == currentKeyBytes.count
+                        && keyBytes.elementsEqual(currentKeyBytes)
+                    guard !sameKey else { return }
+                    if let currentKey {
+                        ranges[currentKey] = groupStart..<lineStart
+                    }
+                    currentKeyBytes = Array(keyBytes)
+                    currentKey = String(decoding: currentKeyBytes, as: UTF8.self)
+                    groupStart = lineStart
+                }
+
+                for index in bytes.indices {
+                    switch bytes[index] {
+                    case 0x09 where firstTab == nil: firstTab = index
+                    case 0x0A: finishLine(at: index)
+                    default: break
+                    }
+                }
+                if lineStart < bytes.count {
+                    finishLine(at: bytes.count)
+                }
+                if let currentKey {
+                    ranges[currentKey] = groupStart..<bytes.count
+                }
+            }
+            self.data = data
+            self.ranges = ranges
+        }
+
+        func followers(for precedingWord: String) -> [NextWord] {
+            guard let range = ranges[precedingWord] else { return [] }
+            return String(decoding: data[range], as: UTF8.self)
+                .split(whereSeparator: \.isNewline)
+                .compactMap { line in
+                    let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+                    guard fields.count == 3, let count = Int(fields[2]) else { return nil }
+                    return NextWord(word: String(fields[1]), count: count)
+                }
+        }
+    }
     private var entries: [Entry] = []
     private var frequentEntries: [Entry] = []
     private var sentenceStartEntries: [Entry] = []
     private var unigramFrequency: [String: Int] = [:]
-    private var bundledBigrams: [String: [NextWord]] = [:]
+    private var bundledBigrams: MappedBigramTable?
     private var bundledTrigrams: [String: [NextWord]] = [:]
     private var didLoadBundledModels = false
     private let modelURL: URL?
@@ -179,13 +247,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         // of the full frequency model at keyboard startup.
         frequentEntries = Self.mostFrequentEntries(from: loadedEntries, maximum: 96)
         unigramFrequency = Dictionary(uniqueKeysWithValues: loadedEntries.map { ($0.word, $0.frequency) })
-        // The next-word TSV is ~18 MB / 450k lines. Materializing it as one
-        // String plus a dictionary jetsams keyboard extensions on iOS 16
-        // (≈40 MB limit, iPhone X). Unigram + trigram + sentence-start still
-        // fill the rail. iOS 17+ devices get the contextual table.
-        if Self.canLoadNextWordModel {
-            bundledBigrams = Self.loadBigrams(from: nextWordURL)
-        }
+        bundledBigrams = MappedBigramTable(url: nextWordURL)
         bundledTrigrams = Self.loadTrigrams(from: trigramURL)
         sentenceStartEntries = Self.loadEntries(from: sentenceStartURL)
     }
@@ -202,7 +264,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             ? request.precedingWords[request.precedingWords.count - 2]
             : nil
         let learnedNext = previous.flatMap { learnedBigrams[$0] } ?? [:]
-        let bundledNext = previous.flatMap { bundledBigrams[$0] } ?? []
+        let bundledNext = previous.flatMap { bundledBigrams?.followers(for: $0) } ?? []
         let trigramNext: [NextWord]
         if let earlier, let previous {
             trigramNext = bundledTrigrams[Self.trigramKey(earlier, previous)] ?? []
@@ -326,6 +388,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         precedingWords: [String]
     ) -> [String: Double] {
         guard mode != .sls, !latinBuffer.isEmpty, !ranked.isEmpty else { return [:] }
+        modelLock.lock()
+        defer { modelLock.unlock() }
         var scores: [String: Double] = [:]
         let currentRendered = SinhalaEngine.transliterate(latinBuffer, mode: mode)
         var rewriteCache: [String: Double] = [:]
@@ -340,16 +404,15 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             for candidate in ranked where SinhalaEngine.hasUnicodeScalarPrefix(candidate.text, nextRendered) {
                 score += candidate.score
             }
+            // Some roman sequences rewrite the rendered prefix completely
+            // (`s` + `h` is the common case). A tiny binary-search probe keeps
+            // predictive hit areas working without recursively running the
+            // full candidate ranker for every letter key.
             if score == 0 {
                 if let cached = rewriteCache[nextRendered] {
                     score = cached
                 } else {
-                    let extra = candidates(for: SinhalaPredictionRequest(
-                        composingText: nextRendered,
-                        precedingWords: precedingWords,
-                        maximumResults: 8
-                    ))
-                    score = extra.reduce(0) { $0 + $1.score }
+                    score = lightweightCompletionScore(for: nextRendered)
                     rewriteCache[nextRendered] = score
                 }
             }
@@ -359,6 +422,27 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         }
         guard let maximum = scores.values.max(), maximum > 0 else { return [:] }
         return scores.mapValues { $0 / maximum }
+    }
+
+    private func lightweightCompletionScore(for prefix: String) -> Double {
+        let start = firstIndex(atOrAfter: prefix)
+        var score = 0.0
+        var matches = 0
+        for index in start..<entries.count {
+            let entry = entries[index]
+            guard hasUnicodeScalarPrefix(entry.word, prefix) else { break }
+            score += log(Double(max(entry.frequency, 1)) + 1)
+            matches += 1
+            if matches == 8 { break }
+        }
+        if matches < 8 {
+            for (word, count) in learnedWords where hasUnicodeScalarPrefix(word, prefix) {
+                score += log(Double(max(count, 1)) + 1)
+                matches += 1
+                if matches == 8 { break }
+            }
+        }
+        return score
     }
 
     func recordSelection(_ word: String, after precedingWord: String?) {
@@ -512,13 +596,6 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         earlier + "\u{1E}" + previous
     }
 
-    /// Keyboard extensions on iOS 16 are jetsam'd well below the size of
-    /// `SinhalaNextWordModel.tsv`. Newer OS versions allow the extra table.
-    private static var canLoadNextWordModel: Bool {
-        if #available(iOS 17.0, *) { return true }
-        return false
-    }
-
     private static func utf8Contents(of url: URL?) -> String? {
         guard let url, let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
             return nil
@@ -538,22 +615,6 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             let key = trigramKey(String(fields[0]), String(fields[1]))
             grouped[key, default: []].append(NextWord(word: String(fields[2]), count: count))
         }
-        return grouped.mapValues { values in
-            values.sorted { lhs, rhs in lhs.count == rhs.count ? lhs.word < rhs.word : lhs.count > rhs.count }
-        }
-    }
-
-    private static func loadBigrams(from modelURL: URL?) -> [String: [NextWord]] {
-        guard let contents = utf8Contents(of: modelURL) else { return [:] }
-        var grouped: [String: [NextWord]] = [:]
-        for line in contents.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
-            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-            guard fields.count == 3, let count = Int(fields[2]),
-                  Self.isValidModelWord(fields[0]), Self.isValidModelWord(fields[1]) else { continue }
-            grouped[String(fields[0]), default: []].append(NextWord(word: String(fields[1]), count: count))
-        }
-        // Keep deterministic ordering even if a hand-edited replacement model
-        // isn't already grouped by descending count.
         return grouped.mapValues { values in
             values.sorted { lhs, rhs in lhs.count == rhs.count ? lhs.word < rhs.word : lhs.count > rhs.count }
         }

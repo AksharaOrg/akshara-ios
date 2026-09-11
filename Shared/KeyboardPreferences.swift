@@ -133,6 +133,8 @@ enum KeyboardPreferences {
     static let hapticsKey = "keyboardHapticsEnabled"
     static let fullAccessKey = "keyboardFullAccessConfirmed"
     static let suggestionsKey = "keyboardSuggestionsEnabled"
+    static let autocorrectKey = "keyboardAutocorrectEnabled"
+    static let autocorrectProtectedWordsKey = "keyboardAutocorrectProtectedWords.v1"
     static let emojiSuggestionsKey = "keyboardEmojiSuggestionsEnabled"
     static let predictionProviderKey = "selectedPredictionProvider"
     static let doubleSpacePeriodKey = "doubleSpacePeriodEnabled"
@@ -176,12 +178,16 @@ enum KeyboardPreferences {
         var highContrastEnabled = false
         var showTouchAreas = false
         var predictiveTouchAreas = false
+        var suggestionsEnabled = true
+        var autocorrectEnabled = false
+        var emojiSuggestionsEnabled = false
+        var emojiSkinTone = EmojiSkinTone.standard
     }
 
     private(set) static var hotPath = HotPathCache()
 
     /// Opening the App Group suite is measurable work in a keyboard's hot
-    /// path. Keep one process-local handle; `reload()` still synchronizes it
+    /// path. Keep one process-local handle; `reload()` refreshes it
     /// whenever the extension becomes visible.
     static let defaults: UserDefaults = {
         UserDefaults(suiteName: appGroupIdentifier) ?? .standard
@@ -191,7 +197,6 @@ enum KeyboardPreferences {
     /// app. Refresh its App Group cache as it becomes visible so changes made
     /// in the app are reflected before the extension rebuilds its layout.
     static func reload() {
-        defaults.synchronize()
         refreshHotPathCache()
     }
 
@@ -212,18 +217,21 @@ enum KeyboardPreferences {
             deleteRepeatInterval: deleteRepeatSpeed().interval,
             highContrastEnabled: highContrastEnabled(),
             showTouchAreas: showTouchAreas(),
-            predictiveTouchAreas: predictiveTouchAreas()
+            predictiveTouchAreas: predictiveTouchAreas(),
+            suggestionsEnabled: suggestionsEnabled(),
+            autocorrectEnabled: autocorrectEnabled(),
+            emojiSuggestionsEnabled: emojiSuggestionsEnabled(),
+            emojiSkinTone: emojiSkinTone()
         )
     }
 
-    /// The app and keyboard extension are separate processes. Flush each
-    /// small preference update through the App Group so an extension opened
-    /// immediately after a toggle observes the new value rather than a
-    /// buffered copy from the containing app.
+    /// Update the shared suite and the process-local typing snapshot. Modern
+    /// UserDefaults propagates app-group writes; `synchronize()` is both
+    /// unnecessary and a blocking disk/IPC operation that can stall keyboard
+    /// presentation.
     private static func persist(_ value: Any, forKey key: String) {
         let store = defaults
         store.set(value, forKey: key)
-        store.synchronize()
         refreshHotPathCache()
     }
 
@@ -282,6 +290,32 @@ enum KeyboardPreferences {
         persist(enabled, forKey: suggestionsKey)
     }
 
+    /// Conservative spelling replacement is intentionally opt-in. It remains
+    /// independent of the visible suggestion rail.
+    static func autocorrectEnabled() -> Bool {
+        defaults.object(forKey: autocorrectKey) as? Bool ?? false
+    }
+
+    static func setAutocorrectEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: autocorrectKey)
+    }
+
+    static func isAutocorrectProtected(_ word: String) -> Bool {
+        guard !word.isEmpty else { return false }
+        return Set(defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []).contains(word)
+    }
+
+    /// Undoing an automatic replacement is an explicit statement that the
+    /// original spelling is intentional. Bound this local-only list so it
+    /// cannot grow without limit in the shared defaults suite.
+    static func protectFromAutocorrect(_ word: String) {
+        guard !word.isEmpty else { return }
+        var words = defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []
+        words.removeAll { $0 == word }
+        words.insert(word, at: 0)
+        defaults.set(Array(words.prefix(512)), forKey: autocorrectProtectedWordsKey)
+    }
+
     /// When on, matching Sinhala CLDR emoji fill the right suggestion column
     /// (up to two chips). Off by default; requires the word suggestion rail.
     static func emojiSuggestionsEnabled() -> Bool {
@@ -300,9 +334,6 @@ enum KeyboardPreferences {
 
     static func setClipboardHistoryEnabled(_ enabled: Bool) {
         persist(enabled, forKey: clipboardHistoryKey)
-        if !enabled {
-            ClipboardHistoryStore.clear()
-        }
     }
 
     static func selectedPredictionProvider() -> String {
@@ -434,7 +465,7 @@ enum KeyboardPreferences {
     static func resetToDefaults() {
         let store = defaults
         let keys = [
-            layoutKey, emojiKey, hapticsKey, suggestionsKey, emojiSuggestionsKey,
+            layoutKey, emojiKey, hapticsKey, suggestionsKey, autocorrectKey, autocorrectProtectedWordsKey, emojiSuggestionsKey,
             clipboardHistoryKey,
             predictionProviderKey, doubleSpacePeriodKey, numberRowKey, topRowKey,
             longPressPunctuationKey, smartQuotesKey, smartPunctuationSpacingKey,
@@ -446,8 +477,7 @@ enum KeyboardPreferences {
         for key in keys {
             store.removeObject(forKey: key)
         }
-        store.synchronize()
-        ClipboardHistoryStore.clear()
+        ClipboardHistoryStore.clearAll()
         refreshHotPathCache()
     }
 
