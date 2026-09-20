@@ -1,8 +1,27 @@
 import Foundation
 
+/// Cancellation crosses the UI and ranking queues. Checking it between stages
+/// prevents obsolete queued requests from delaying the newest prefix.
+final class PredictionCancellationToken {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+}
+
 /// A request is deliberately independent of UIKit so prediction providers can
 /// be tested and replaced without changing the keyboard controller.
-struct SinhalaPredictionRequest {
+struct SinhalaPredictionRequest: Hashable {
     let composingText: String
     let precedingWords: [String]
     let maximumResults: Int
@@ -203,6 +222,10 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private var recency: [String: Int]
     private var recencyClock: Int
     private var persistenceWorkItem: DispatchWorkItem?
+    // Backspace/retyping often revisits the same prefix and context. Bound the
+    // cache so the keyboard extension cannot retain an entire typing session.
+    private var candidateCache: [SinhalaPredictionRequest: [SinhalaPredictionCandidate]] = [:]
+    private var cachedRequests: [SinhalaPredictionRequest] = []
 
     init(
         identifier: String = "uom-frequency-list-v1",
@@ -256,6 +279,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         modelLock.lock()
         defer { modelLock.unlock() }
         loadBundledModelsLocked()
+        if let cached = candidateCache[request] { return cached }
         let prefix = request.composingText
         let maximumResults = max(request.maximumResults, 0)
         guard maximumResults > 0 else { return [] }
@@ -377,6 +401,11 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
                 unigramWeight: continuationUnigramWeight
             )
         }
+        if cachedRequests.count == 32 {
+            candidateCache.removeValue(forKey: cachedRequests.removeFirst())
+        }
+        cachedRequests.append(request)
+        candidateCache[request] = ranked
         return ranked
     }
 
@@ -459,6 +488,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     private func record(_ word: String, after precedingWord: String?, selectionBoost: Int, persistImmediately: Bool) {
         guard isSinhalaWord(word) else { return }
+        candidateCache.removeAll(keepingCapacity: true)
+        cachedRequests.removeAll(keepingCapacity: true)
         learnedWords[word, default: 0] += selectionBoost
         recencyClock += 1
         recency[word] = recencyClock

@@ -509,6 +509,7 @@ private struct KeyboardSettingsView: View {
     @State private var longPressPunctuationEnabled = KeyboardPreferences.longPressPunctuationEnabled()
     @State private var smartQuotesEnabled = KeyboardPreferences.smartQuotesEnabled()
     @State private var smartPunctuationSpacingEnabled = KeyboardPreferences.smartPunctuationSpacingEnabled()
+    @State private var englishKeyboardEnabled = KeyboardPreferences.englishKeyboardEnabled()
     @State private var englishForOneWordEnabled = KeyboardPreferences.englishForOneWordEnabled()
     @State private var characterPreviewEnabled = KeyboardPreferences.characterPreviewEnabled()
     @State private var keySpacing = KeyboardPreferences.keySpacing()
@@ -538,6 +539,7 @@ private struct KeyboardSettingsView: View {
             emojiSkinTone = KeyboardPreferences.emojiSkinTone()
             suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
             autocorrectEnabled = KeyboardPreferences.autocorrectEnabled()
+            englishKeyboardEnabled = KeyboardPreferences.englishKeyboardEnabled()
             showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
         }
         .onChange(of: mode) { KeyboardPreferences.setSelectedMode($0) }
@@ -551,6 +553,7 @@ private struct KeyboardSettingsView: View {
         .onChange(of: longPressPunctuationEnabled) { KeyboardPreferences.setLongPressPunctuationEnabled($0) }
         .onChange(of: smartQuotesEnabled) { KeyboardPreferences.setSmartQuotesEnabled($0) }
         .onChange(of: smartPunctuationSpacingEnabled) { KeyboardPreferences.setSmartPunctuationSpacingEnabled($0) }
+        .onChange(of: englishKeyboardEnabled) { KeyboardPreferences.setEnglishKeyboardEnabled($0) }
         .onChange(of: englishForOneWordEnabled) { KeyboardPreferences.setEnglishForOneWordEnabled($0) }
         .onChange(of: characterPreviewEnabled) { KeyboardPreferences.setCharacterPreviewEnabled($0) }
         .onChange(of: keySpacing) { KeyboardPreferences.setKeySpacing($0) }
@@ -576,6 +579,9 @@ private struct KeyboardSettingsView: View {
 
     private var featuresSection: some View {
         Section("Keyboard Features") {
+            Toggle(isOn: $englishKeyboardEnabled) {
+                SettingLabel(title: "English Keyboard", detail: "Switch between Sinhala and English beside the emoji key", icon: "character.bubble.fill", color: .systemCyan)
+            }
             Toggle(isOn: $emojiEnabled) {
                 SettingLabel(title: "Emoji Key", detail: "Shows the emoji picker", icon: "face.smiling.fill", color: .systemOrange)
             }
@@ -596,7 +602,17 @@ private struct KeyboardSettingsView: View {
                 SettingLabel(
                     title: "Autocorrect",
                     detail: "Corrects likely misspellings when you finish a word",
-                    icon: "checkmark.text.page",
+                    icon: "text.badge.checkmark",
+                    color: .systemTeal
+                )
+            }
+            NavigationLink {
+                SavedAutocorrectWordsView()
+            } label: {
+                SettingLabel(
+                    title: "Saved Autocorrect Words",
+                    detail: "Never correct these words; add your own",
+                    icon: "bookmark.fill",
                     color: .systemTeal
                 )
             }
@@ -1040,7 +1056,7 @@ private struct OpenSourceNoticesView: View {
 
                 NoticeView(
                     title: "Akshara Sinhala Dictionary",
-                    detail: "Autocorrect uses the redistributable verified-spelling export from Akshara Dictionary, pinned to revision 759143ac5e62732710d710aa22f21f170c601a8a for this release. The keyboard bundles only its compact local spelling index; it never downloads dictionary data or sends typed text over the network.",
+                    detail: "Autocorrect uses the 8,000 highest-ranked verified Sinhala spellings from Akshara Dictionary's redistributable export, pinned to revision 83ba4423ca20784857563cf76ff4648411e3db76 for this release. The keyboard bundles only its compact local spelling index; it never downloads dictionary data or sends typed text over the network.",
                     links: [("Source", URL(string: "https://github.com/AksharaOrg/akshara-dictionary")!)]
                 )
 
@@ -1059,6 +1075,14 @@ private struct OpenSourceNoticesView: View {
                 Text("The source corpus is not included in the app. Predictions use the compact on-device models bundled with Akshara.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+            Section("English Language Data") {
+                Text("English completions and corrections use the 25,000-word aparrish/wordfreq-en-25000 export, derived from rspeer/wordfreq (CC BY-SA 4.0). Next-word counts use synth-inc/predictive-bigrams, derived from the Leipzig Corpora Collection (CC BY). Conversational continuations are shared with Akshara for Android.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Link("Word-frequency data and attribution", destination: URL(string: "https://github.com/aparrish/wordfreq-en-25000")!)
+                Link("wordfreq source attributions", destination: URL(string: "https://github.com/rspeer/wordfreq")!)
+                Link("Next-word data", destination: URL(string: "https://github.com/synth-inc/predictive-bigrams")!)
+                Link("Leipzig Corpora Collection", destination: URL(string: "https://wortschatz.uni-leipzig.de/")!)
             }
         }
         .navigationTitle("Open Source Notices")
@@ -1218,6 +1242,66 @@ private struct ClassicTryField: UIViewRepresentable {
         func syncPlaceholder(for textView: UITextView) {
             placeholderLabel.isHidden = !textView.text.isEmpty
         }
+    }
+}
+
+private struct SavedAutocorrectWordsView: View {
+    @State private var newWord = ""
+    @State private var savedWords = KeyboardPreferences.autocorrectProtectedWords()
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 10) {
+                    TextField("Sinhala word", text: $newWord)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .onSubmit(addWord)
+                    Button("Add", action: addWord)
+                        .disabled(normalizedNewWord.isEmpty)
+                }
+            } footer: {
+                Text("Saved words are never changed automatically. You can add a word here, or the keyboard will save it after you reverse the same autocorrection three times.")
+            }
+
+            Section("Saved Words") {
+                if savedWords.isEmpty {
+                    Text("No saved words yet")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(savedWords, id: \.self) { word in
+                        Text(word)
+                    }
+                    .onDelete(perform: removeWords)
+                }
+            }
+        }
+        .navigationTitle("Saved Autocorrect Words")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: reloadWords)
+    }
+
+    private var normalizedNewWord: String {
+        newWord.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+    }
+
+    private func addWord() {
+        let word = normalizedNewWord
+        guard !word.isEmpty else { return }
+        KeyboardPreferences.protectFromAutocorrect(word)
+        newWord = ""
+        reloadWords()
+    }
+
+    private func removeWords(at offsets: IndexSet) {
+        for index in offsets where savedWords.indices.contains(index) {
+            KeyboardPreferences.removeAutocorrectProtection(savedWords[index])
+        }
+        reloadWords()
+    }
+
+    private func reloadWords() {
+        savedWords = KeyboardPreferences.autocorrectProtectedWords()
     }
 }
 

@@ -1,4 +1,8 @@
 # Pinned source used to build the keyboard's redistributable autocorrect data.
 repository=https://github.com/AksharaOrg/akshara-dictionary.git
-revision=759143ac5e62732710d710aa22f21f170c601a8a
+revision=83ba4423ca20784857563cf76ff4648411e3db76
 profile=redistributable
+# The keyboard intentionally ships a conservative common-word subset, not every
+# verified spelling accepted by the upstream dictionary.
+selection=lowest_frequency_rank
+maximum_verified_words=8000

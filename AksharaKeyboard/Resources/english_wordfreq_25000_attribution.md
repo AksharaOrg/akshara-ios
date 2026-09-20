@@ -1,0 +1,1 @@
+English word-frequency data: 25,000-word export from `aparrish/wordfreq-en-25000`, licensed CC BY-SA 4.0 and derived from `rspeer/wordfreq`. The upstream `wordfreq` project includes its required source attributions; see https://github.com/rspeer/wordfreq.

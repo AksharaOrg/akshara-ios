@@ -3594,7 +3594,22 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var ownEditDepth = 0
     private var ownEditGeneration = 0
     private var ownEditClearWork: DispatchWorkItem?
-    private var mode: SinhalaEngine.Mode = .sls
+    private var selectedSinhalaMode: SinhalaEngine.Mode = .sls
+    private var language: KeyboardLanguage = .sinhala
+    private var mode: SinhalaEngine.Mode {
+        get { language == .english ? .smartPhonetic : selectedSinhalaMode }
+        set { selectedSinhalaMode = newValue }
+    }
+    private var englishEnabled = false
+    private lazy var englishProvider = EnglishPredictionProvider()
+    private var englishOwnedWord = ""
+    private var englishCanLearnWord = false
+    private var englishDisplayedContext: EnglishWordContext?
+    private var englishCorrection: (context: EnglishWordContext, replacement: String)?
+    private weak var languageTransitionOverlay: UIView?
+    private var activePredictionProvider: SinhalaPredictionProviding {
+        language == .english ? englishProvider : SinhalaPredictionProviderRegistry.shared.activeProvider
+    }
     private var lastSpaceTimestamp: TimeInterval?
     /// One reversible replacement, valid only while the cursor remains after
     /// the corrected word and delimiter. It is never inferred from host text.
@@ -3630,6 +3645,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// Spotlight translucency — is the only backdrop. Same on iOS 26.
     private let keyboardChrome = UIView()
     private let keyboardStack = KeyboardGridView()
+    // Attached to the root, which survives replacing the keys during a hold.
+    private lazy var numberDragRecognizer: UILongPressGestureRecognizer = {
+        let recognizer = UILongPressGestureRecognizer(target: self, action: #selector(handleNumberDrag(_:)))
+        recognizer.minimumPressDuration = 0.25
+        recognizer.allowableMovement = 40
+        recognizer.cancelsTouchesInView = true
+        recognizer.delegate = self
+        return recognizer
+    }()
+    private var numberDragActive = false
+    private weak var numberDragSelection: NativeKeyButton?
     private let candidateBar = CandidateRailView()
     private var candidateBarHeight: NSLayoutConstraint!
     private var candidateBarTopInset: NSLayoutConstraint!
@@ -3666,6 +3692,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var hasEnteredTextThisAppearance = false
     private let predictionQueue = DispatchQueue(label: "lk.org.akshara.prediction", qos: .userInitiated)
     private var predictionGeneration = 0
+    private var pendingPredictionToken: PredictionCancellationToken?
     /// Set by UIKit when the host editor can have changed independently of
     /// this extension. A live composition also validates its host rendering
     /// before the next key: some hosts send their reset callback while an
@@ -4265,7 +4292,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         KeyboardPreferences.refreshHotPathCache()
         updateKeyboardAppearance()
         mode = KeyboardPreferences.selectedMode()
+        language = KeyboardPreferences.activeLanguage()
+        englishEnabled = KeyboardPreferences.englishKeyboardEnabled()
         configureLayout()
+        view.addGestureRecognizer(numberDragRecognizer)
         keyFeedback = KeyFeedback(view: view)
         keyFeedback?.prepare()
         needsKeyRebuildWhenGeometryIsStable = true
@@ -4293,7 +4323,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         KeyboardPreferences.setFullAccessConfirmed(hasFullAccess)
         let selectedMode = KeyboardPreferences.selectedMode()
         var needsRebuild = keyboardStack.arrangedSubviews.isEmpty
-        if selectedMode != mode {
+        let newLanguage = KeyboardPreferences.activeLanguage()
+        let newEnglishEnabled = KeyboardPreferences.englishKeyboardEnabled()
+        if newLanguage != language || newEnglishEnabled != englishEnabled {
+            cancelLocalCompositionWithoutCommit()
+            language = newLanguage
+            englishEnabled = newEnglishEnabled
+            layer = .letters
+            needsRebuild = true
+        }
+        if selectedMode != selectedSinhalaMode {
             cancelLocalCompositionWithoutCommit()
             mode = selectedMode
             needsRebuild = true
@@ -4356,7 +4395,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if keyboardStack.arrangedSubviews.isEmpty {
             rebuildKeys()
         }
-        if showsCandidateBar {
+        if englishEnabled {
+            let provider = englishProvider
+            predictionQueue.async { provider.prepareIfNeeded() }
+        }
+        if showsCandidateBar, language == .sinhala {
             SinhalaPredictionProviderRegistry.shared.prepareBundledModelsInBackground()
         }
         if showsCandidateBar || KeyboardPreferences.hotPath.autocorrectEnabled {
@@ -4432,6 +4475,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         isPreparingToAppear = false
+        finishNumberDrag()
         stopDeleteRepeat()
         hideKeyPreview(animated: false)
         hideAlternatePicker()
@@ -4441,6 +4485,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         setTrackpadAppearance(active: false, animated: false)
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        pendingPredictionToken?.cancel()
         cancelSpaceSignatureHold()
         spaceSignatureRestoreWork?.cancel()
         spaceSignatureRestoreWork = nil
@@ -4448,6 +4493,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         hidePendingCompositionChrome()
         cancelLocalCompositionWithoutCommit()
         SinhalaPredictionProviderRegistry.shared.flushPendingPersistence()
+        if englishEnabled {
+            let provider = englishProvider
+            predictionQueue.async { provider.flushPendingPersistence() }
+        }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -4950,12 +4999,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // the right of Space, as on the system web keyboard. A keyboard
         // extension can ask iOS to advance input modes, but cannot select
         // Emoji directly.
-        let emojiKey = KeyboardPreferences.emojiEnabled() ? ["emoji"] : []
-        let globeKey = showsInputModeSwitchKey ? ["globe"] : []
-        let contextualPunctuation = contextualPunctuationKeys
-        let bottom = usesPadLayout
-            ? ["123"] + emojiKey + globeKey + ["space", "123", "dismiss"]
-            : ["123"] + emojiKey + globeKey + ["space"] + contextualPunctuation + ["return"]
+        let bottom = KeyboardBottomRow.keys(isPad: usesPadLayout,
+            emoji: KeyboardPreferences.emojiEnabled(), language: englishEnabled,
+            globe: showsInputModeSwitchKey, punctuation: contextualPunctuationKeys)
         // The native Sinhala reference uses three even 11-key rows. Preserve
         // that geometry while exposing the full direct Wijesekara layer.
         let letterRows: [[String]]
@@ -5130,21 +5176,16 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 )
             }
             if isBottom {
-                switch keyName {
-                case "123", "ABC": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(56)) }
-                case "emoji", "globe", "dismiss": addMetricWidth(to: button) { self.usesPadLayout ? self.keyboardMetrics.padBottomControlWidth : (isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth : self.keyboardMetrics.englishBottomSmallKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(46)) }
-                case "return": addMetricWidth(to: button) { isEnglishAlphabet ? (self.usesStandardPhoneGeometry ? self.keyboardMetrics.standardEnglishReturnKeyWidth : self.keyboardMetrics.englishReturnKeyWidth) : self.keyboardMetrics.scaledPhoneWidth(72) }
-                default:
-                    if keyName.hasPrefix(Self.contextualKeyPrefix) {
-                        addMetricWidth(to: button) {
-                            self.usesPadLayout
-                                ? self.keyboardMetrics.padBottomControlWidth
-                                : (isEnglishAlphabet
-                                    ? (self.usesStandardPhoneGeometry
-                                        ? self.keyboardMetrics.standardEnglishBottomSmallKeyWidth
-                                        : self.keyboardMetrics.englishBottomSmallKeyWidth)
-                                    : self.keyboardMetrics.scaledPhoneWidth(46))
-                        }
+                if keyName != "space" {
+                    addMetricWidth(to: button) {
+                        let metrics = self.keyboardMetrics
+                        let small = self.usesPadLayout ? metrics.padBottomControlWidth
+                            : (self.usesStandardPhoneGeometry ? metrics.standardEnglishBottomSmallKeyWidth : metrics.englishBottomSmallKeyWidth)
+                        let enter = self.usesStandardPhoneGeometry ? metrics.standardEnglishReturnKeyWidth : metrics.englishReturnKeyWidth
+                        let scale = KeyboardBottomRow.controlScale(keys: keys,
+                            availableWidth: metrics.width - 2 * metrics.horizontalInset,
+                            gap: metrics.horizontalGap, smallWidth: small, returnWidth: enter)
+                        return (keyName == "return" ? enter : small) * scale
                     }
                 }
             } else if !usesPadLayout && isControlRow && keyName == "shift" {
@@ -5198,7 +5239,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func makeKey(_ key: String) -> NativeKeyButton {
         // Default and Next use the grey system/utility surface. Only the
         // submit-style actions Apple paints blue get the prominent treatment.
-        let utility = ["shift", "delete", "123", "ABC", "#+=", "globe", "dismiss"].contains(key)
+        let utility = ["shift", "delete", "123", "ABC", "#+=", "globe", "dismiss", "language"].contains(key)
             || (key == "return" && !usesProminentReturnKey)
         let button = NativeKeyButton(
             keyName: key,
@@ -5281,6 +5322,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self?.refreshPendingCompositionChrome()
             }
         }
+        if key == "language" {
+            button.accessibilityLabel = language == .english ? "Switch to Sinhala" : "Switch to English"
+        }
+        if key == "123", layer == .letters {
+            button.accessibilityHint = "Tap for numbers. Hold and drag to enter one number or symbol."
+        }
         if key == "globe" {
             // This gives the system every touch phase it needs to show the
             // native long-press input-mode list as well as ordinary switching.
@@ -5316,7 +5363,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
-            if KeyboardPreferences.englishForOneWordEnabled(), mode == .smartPhonetic {
+            if language == .sinhala, KeyboardPreferences.englishForOneWordEnabled(), mode == .smartPhonetic {
                 let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(handleSpaceEnglishWordSwipe(_:)))
                 swipeUp.direction = .up
                 swipeUp.delegate = self
@@ -5344,6 +5391,66 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         return button
     }
 
+    /// A normal tap keeps Numbers open; a recognized hold temporarily opens
+    /// it and uses the existing grid hit regions to select one printable key.
+    @objc private func handleNumberDrag(_ recognizer: UILongPressGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            numberDragActive = true
+            layer = .numbers
+            rebuildKeys()
+            view.layoutIfNeeded()
+            updateNumberDragSelection(at: recognizer.location(in: keyboardStack))
+        case .changed:
+            guard numberDragActive else { return }
+            updateNumberDragSelection(at: recognizer.location(in: keyboardStack))
+        case .ended:
+            guard numberDragActive else { return }
+            updateNumberDragSelection(at: recognizer.location(in: keyboardStack))
+            let key = numberDragSelection?.keyName
+            // Clear state before editing the host, which can cancel touches.
+            numberDragSelection?.isHighlighted = false
+            numberDragSelection = nil
+            numberDragActive = false
+            if let key { press(key) }
+            layer = .letters
+            rebuildKeys()
+        case .cancelled, .failed:
+            finishNumberDrag()
+        default: break
+        }
+    }
+
+    private func updateNumberDragSelection(at point: CGPoint) {
+        let hit = keyboardStack.hitTest(point, with: nil) as? NativeKeyButton
+        // Utility controls never execute during a one-character gesture.
+        // Sliding onto #+= reveals the additional symbols in the same hold.
+        if hit?.keyName == "#+=", layer == .numbers {
+            numberDragSelection?.isHighlighted = false
+            numberDragSelection = nil
+            layer = .symbols
+            rebuildKeys()
+            view.layoutIfNeeded()
+            return
+        }
+        let selection = hit.flatMap { button -> NativeKeyButton? in
+            button.keyName.count == 1 || button.keyName == "kundaliya" ? button : nil
+        }
+        guard selection !== numberDragSelection else { return }
+        numberDragSelection?.isHighlighted = false
+        numberDragSelection = selection
+        selection?.isHighlighted = true
+    }
+
+    private func finishNumberDrag() {
+        guard numberDragActive else { return }
+        numberDragSelection?.isHighlighted = false
+        numberDragSelection = nil
+        numberDragActive = false
+        layer = .letters
+        rebuildKeys()
+    }
+
     /// The system keyboard visibly commits normal taps as the finger lands.
     /// Space stays on touch-up because a hold enters cursor control. Return
     /// stays on touch-up so Search/Go/Send can be cancelled by sliding off,
@@ -5354,7 +5461,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// choose a value before anything is inserted into the host.
     private func shouldCommitOnTouchDown(_ key: String) -> Bool {
         guard key != "space", key != "return" else { return false }
-        if key == "123" || key == "ABC" || key == "#+=" { return false }
+        if key == "123" || key == "ABC" || key == "#+=" || key == "language" { return false }
         return !(layer == .letters && mode == .sls && wijesekaraAlternates(for: key) != nil)
             && !(KeyboardPreferences.hotPath.longPressPunctuationEnabled && punctuationAlternates(for: key) != nil)
     }
@@ -5371,7 +5478,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         switch recognizer.state {
         case .began:
             spaceSignatureStartLocation = recognizer.location(in: view)
-            if isIdleComposition, isSpaceSignatureLabelRegion(in: button, location: recognizer.location(in: button)) {
+            if language == .sinhala, isIdleComposition, isSpaceSignatureLabelRegion(in: button, location: recognizer.location(in: button)) {
                 spaceSignatureHoldPending = true
                 spaceSignatureHoldConsumed = false
                 let work = DispatchWorkItem { [weak self, weak button] in
@@ -5600,6 +5707,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func title(for key: String) -> String? {
+        if key == "language" { return language == .english ? "සිං" : "EN" }
+        if language == .english, key == "space" { return "English" }
         if key.hasPrefix(Self.topEmojiKeyPrefix) {
             return String(key.dropFirst(Self.topEmojiKeyPrefix.count))
         }
@@ -5629,6 +5738,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func hint(for key: String) -> String? {
+        if language == .english { return nil }
         if temporaryLatinWordActive { return nil }
         if mode == .sls, layer == .letters, let alternate = wijesekaraAlternates(for: key)?.first {
             // Show the held-character result in the same quiet upper-right
@@ -5649,7 +5759,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if KeyboardHitTrace.isTraced(key) {
             KeyboardHitTrace.log("controller press(\(key))")
         }
-        guard !isSpaceTrackpadActive else { return }
+        guard !isSpaceTrackpadActive, !numberDragActive else { return }
         // A host can send, clear, or select text without dismissing this
         // keyboard.  In that case our per-key history still describes the
         // previous draft.  Reconcile it before interpreting the next action:
@@ -5709,6 +5819,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         case "shift":
             shift.toggle()
             refreshShiftedKeyAppearance()
+        case "language": switchKeyboardLanguage()
         case "123": layer = .numbers; rebuildKeys()
         case "#+=": layer = .symbols; rebuildKeys()
         case "ABC": layer = .letters; rebuildKeys()
@@ -5769,7 +5880,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                     button.setImage(UIImage(systemName: symbolName), for: .normal)
                     continue
                 }
-                if ["delete", "emoji", "globe", "dismiss", "return", "space", "123", "ABC", "#+="].contains(key)
+                if ["delete", "emoji", "language", "globe", "dismiss", "return", "space", "123", "ABC", "#+="].contains(key)
                     || key.hasPrefix(Self.topEmojiKeyPrefix)
                     || key.hasPrefix(Self.contextualKeyPrefix) {
                     continue
@@ -5981,6 +6092,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// Search bars typically resign first responder after that — which is
     /// how the system keyboard disappears. We never call `dismissKeyboard()`.
     private func performReturnKey() {
+        if language == .english { commitEnglish(suffix: "\n"); return }
         if temporaryLatinWordActive {
             endTemporaryLatinWordMode()
         }
@@ -6055,8 +6167,279 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         return textDocumentProxy.returnKeyType == .go
     }
 
+    private func switchKeyboardLanguage() {
+        guard englishEnabled else { return }
+        view.layoutIfNeeded()
+        languageTransitionOverlay?.removeFromSuperview()
+        let sourceButton = keyButton(named: "language")
+        let revealOrigin = sourceButton.map {
+            $0.convert(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY), to: keyboardContentContainer)
+        } ?? CGPoint(x: keyboardContentContainer.bounds.midX, y: keyboardContentContainer.bounds.maxY)
+        let previousKeyboard = keyboardContentContainer.snapshotView(afterScreenUpdates: false)
+        stopDeleteRepeat()
+        commitActiveComposition()
+        endTemporaryLatinWordMode()
+        cancelLocalCompositionWithoutCommit()
+        language = language == .english ? .sinhala : .english
+        KeyboardPreferences.setActiveLanguage(language)
+        shift = false
+        layer = .letters
+        rebuildKeys()
+        updatePredictions(for: "")
+        animateLanguageReveal(from: revealOrigin, coveringWith: previousKeyboard)
+    }
+
+    /// Reveal the newly selected keyboard through a quick circular wipe that
+    /// starts at the language key. The old snapshot is only visual and never
+    /// intercepts input after the transition completes.
+    private func animateLanguageReveal(from origin: CGPoint, coveringWith oldSnapshot: UIView?) {
+        guard let oldSnapshot, !keyboardContentContainer.bounds.isEmpty else { return }
+        keyboardContentContainer.layoutIfNeeded()
+        oldSnapshot.frame = keyboardContentContainer.bounds
+        oldSnapshot.isUserInteractionEnabled = false
+        keyboardContentContainer.addSubview(oldSnapshot)
+        languageTransitionOverlay = oldSnapshot
+
+        let removeOverlay = { [weak self, weak oldSnapshot] in
+            oldSnapshot?.removeFromSuperview()
+            if self?.languageTransitionOverlay === oldSnapshot {
+                self?.languageTransitionOverlay = nil
+            }
+        }
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            UIView.animate(withDuration: 0.12, animations: { oldSnapshot.alpha = 0 }, completion: { _ in removeOverlay() })
+            return
+        }
+
+        let bounds = oldSnapshot.bounds
+        let localOrigin = keyboardContentContainer.convert(origin, to: oldSnapshot)
+        let corners = [CGPoint(x: bounds.minX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.minY),
+                       CGPoint(x: bounds.minX, y: bounds.maxY), CGPoint(x: bounds.maxX, y: bounds.maxY)]
+        let maximumRadius = corners.map { hypot($0.x - localOrigin.x, $0.y - localOrigin.y) }.max() ?? bounds.width
+        let initialRadius = max(sourceLanguageKeyRadius(), 2)
+        func cutoutPath(radius: CGFloat) -> CGPath {
+            let path = UIBezierPath(rect: bounds)
+            path.append(UIBezierPath(ovalIn: CGRect(x: localOrigin.x - radius, y: localOrigin.y - radius,
+                                                    width: radius * 2, height: radius * 2)))
+            path.usesEvenOddFillRule = true
+            return path.cgPath
+        }
+
+        let mask = CAShapeLayer()
+        mask.frame = bounds
+        mask.fillRule = .evenOdd
+        mask.fillColor = UIColor.black.cgColor
+        mask.path = cutoutPath(radius: maximumRadius)
+        oldSnapshot.layer.mask = mask
+        let wipe = CABasicAnimation(keyPath: "path")
+        wipe.fromValue = cutoutPath(radius: initialRadius)
+        wipe.toValue = cutoutPath(radius: maximumRadius)
+        wipe.duration = 0.20
+        wipe.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        // Fade the outgoing keyboard as its circular cutout grows. This keeps
+        // the wipe legible without leaving a hard moving edge across keycaps.
+        oldSnapshot.layer.opacity = 0
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        fade.duration = 0.20
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock(removeOverlay)
+        mask.add(wipe, forKey: "languageReveal")
+        oldSnapshot.layer.add(fade, forKey: "languageFade")
+        CATransaction.commit()
+    }
+
+    private func sourceLanguageKeyRadius() -> CGFloat {
+        guard let button = keyButton(named: "language") else { return 2 }
+        return max(button.bounds.width, button.bounds.height) * 0.48
+    }
+
+    private func englishContext() -> EnglishWordContext? {
+        let proxy = textDocumentProxy
+        // UIKit commonly represents an empty side of the caret with nil.
+        // If an owned word exists but its preceding context is unavailable,
+        // withhold replacements rather than guessing that the text survived.
+        guard let before = proxy.documentContextBeforeInput ?? (englishOwnedWord.isEmpty ? "" : nil) else { return nil }
+        return .init(before: before, after: proxy.documentContextAfterInput ?? "",
+                     hasSelection: !(proxy.selectedText?.isEmpty ?? true))
+    }
+
+    private func insertEnglish(_ source: String) {
+        noteInput()
+        pendingAutocorrection = nil
+        englishCorrection = nil
+        let context = englishContext()
+        if englishOwnedWord.isEmpty {
+            englishCanLearnWord = context?.prefix.isEmpty == true && context?.canReplace == true
+        }
+        if context?.hasSelection == true { englishOwnedWord = ""; englishCanLearnWord = false }
+        englishOwnedWord += source
+        insertIntoDocument(source, applyingSmartSpacing: true)
+        let expected = context.flatMap { $0.hasSelection ? nil : EnglishWordContext(before: $0.before + source, after: $0.after) }
+        requestEnglishPredictions(delay: 0.025, context: expected)
+    }
+
+    private func requestEnglishPredictions(delay: TimeInterval, context supplied: EnglishWordContext? = nil) {
+        guard !isDeleteRepeatActive else { return }
+        pendingPredictionUpdate?.cancel()
+        pendingPredictionToken?.cancel()
+        predictionGeneration += 1
+        let generation = predictionGeneration
+        englishCorrection = nil
+        let showRail = showsCandidateBar
+        let correct = KeyboardPreferences.hotPath.autocorrectEnabled && inputFieldAllowsPredictions
+        guard (showRail || correct), let context = supplied ?? englishContext(), !context.hasSelection else {
+            englishDisplayedContext = nil
+            clearCandidateRailDisplay()
+            applyKeyTouchWeights([:])
+            return
+        }
+        let prefix = context.prefix
+        if !prefix.isEmpty { hasEnteredTextThisAppearance = true }
+        predictionPrefix = prefix
+        if !showRail { clearCandidateRailDisplay(); applyKeyTouchWeights([:]) }
+        if showRail && !isKeyboardOverlayPresented {
+            applyCandidateBarLayout()
+            candidateBar.isHidden = false
+            updateClipboardButtonVisibility()
+        }
+        let inflate = showRail && KeyboardPreferences.hotPath.predictiveTouchAreas && layer == .letters
+        let request = SinhalaPredictionRequest(composingText: prefix, precedingWords: context.preceding, maximumResults: inflate ? 24 : 3)
+        let provider = englishProvider
+        let emojis = KeyboardPreferences.hotPath.emojiSuggestionsEnabled && showRail
+        let tone = KeyboardPreferences.hotPath.emojiSkinTone
+        let shifted = shift
+        let token = PredictionCancellationToken()
+        pendingPredictionToken = token
+        let queue = predictionQueue
+        let work = DispatchWorkItem { [weak self] in
+            guard self != nil, !token.isCancelled else { return }
+            queue.async {
+                guard !token.isCancelled else { return }
+                let ranked = showRail ? provider.candidates(for: request) : []
+                guard !token.isCancelled else { return }
+                let correction = correct && context.canAutocorrectAtBoundary ? provider.correction(for: prefix) : nil
+                let emoji = emojis ? provider.emoji(for: prefix, bestWord: ranked.first?.text).map {
+                    EmojiSkinToneApplicator.withPreferredSkinTone($0, tone: tone)
+                } : []
+                guard !token.isCancelled else { return }
+                let weights = inflate ? provider.nextKeyWeights(latinBuffer: prefix, mode: .smartPhonetic,
+                    shifted: shifted, from: ranked, precedingWords: context.preceding) : [:]
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !token.isCancelled, self.language == .english,
+                          self.predictionGeneration == generation, self.englishContext() == context else { return }
+                    self.englishCorrection = correction.map { (context, $0) }
+                    self.englishDisplayedContext = context
+                    if showRail {
+                        var display = ranked.map(\.text)
+                        if let correction, !display.contains(correction) { display.insert(correction, at: 0) }
+                        self.applyPredictions(Array(display.prefix(3)), emoji: emoji, weights: weights,
+                                              for: prefix, generation: generation)
+                    }
+                }
+            }
+        }
+        pendingPredictionUpdate = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func commitEnglish(suffix: String) {
+        let formatted = smartTypography(for: suffix)
+        // Apostrophes/hyphens belong to the token, but are deliberately not
+        // eligible for automatic correction of either fragment.
+        if !formatted.isEmpty, formatted.allSatisfy(EnglishWordContext.isWordCharacter) {
+            insertEnglish(formatted)
+            return
+        }
+        let context = englishContext()
+        let ready = englishCorrection
+        pendingPredictionToken?.cancel()
+        englishCorrection = nil
+        pendingAutocorrection = nil
+        var committed = context?.prefix ?? ""
+        if isAutocorrectionBoundary(formatted), KeyboardPreferences.hotPath.autocorrectEnabled,
+           inputFieldAllowsPredictions, let context, context.canAutocorrectAtBoundary,
+           let ready, ready.context == context,
+           !KeyboardPreferences.isAutocorrectProtected(context.prefix) {
+            deleteDocumentText(context.prefix)
+            insertIntoDocument(ready.replacement)
+            committed = ready.replacement
+            pendingAutocorrection = .init(original: context.prefix, replacement: committed, suffix: formatted)
+        }
+        if inputFieldAllowsPredictions, englishCanLearnWord, context?.canAutocorrectAtBoundary == true,
+           context?.prefix == englishOwnedWord {
+            recordCommittedPredictionWord(committed, after: context?.preceding.last)
+        }
+        englishOwnedWord = ""
+        englishCanLearnWord = false
+        englishDisplayedContext = nil
+        // Keep Return in its own proxy insert so host Search/Send works.
+        insertIntoDocument(formatted, applyingSmartSpacing: formatted != "\n")
+        // Smart punctuation may append a space. Record the actual delimiter
+        // for immediate undo instead of assuming the raw key's length.
+        if let pending = pendingAutocorrection, let before = textDocumentProxy.documentContextBeforeInput,
+           let range = before.range(of: pending.replacement, options: .backwards) {
+            pendingAutocorrection = .init(original: pending.original, replacement: pending.replacement,
+                                          suffix: String(before[range.upperBound...]))
+        }
+        lastSpaceTimestamp = formatted == " " ? CACurrentMediaTime() : nil
+        requestEnglishPredictions(delay: 0)
+    }
+
+    private func selectEnglishCandidate(_ candidate: String, isEmoji: Bool, sourceView: UIView) {
+        guard let context = englishContext(), context == englishDisplayedContext,
+              context.canReplaceWholeWord else { return }
+        pendingAutocorrection = nil
+        englishCorrection = nil
+        replaceWordAroundCaret(context, with: candidate + " ")
+        animateSuggestionAcceptance(from: sourceView)
+        if isEmoji { EmojiCatalog.record(candidate) }
+        else { recordPredictionSelection(candidate, after: context.preceding.last) }
+        englishOwnedWord = ""
+        englishCanLearnWord = false
+        englishDisplayedContext = nil
+        requestEnglishPredictions(delay: 0)
+    }
+
+    /// Replace the complete token intersected by the caret. Moving to the end
+    /// first lets the ordinary backward-delete path remove both the edited
+    /// prefix and the untouched suffix without retaining either fragment.
+    private func replaceWordAroundCaret(_ context: EnglishWordContext, with replacement: String) {
+        performDocumentEdit {
+            if !context.suffix.isEmpty {
+                self.textDocumentProxy.adjustTextPosition(byCharacterOffset: context.suffix.count)
+            }
+            self.deleteDocumentTextWhileEditing(context.wholeWord)
+            self.textDocumentProxy.insertText(replacement)
+        }
+    }
+
+    /// A short chip motion confirms that the visible suggestion performed a
+    /// replacement. Host-app text is outside the extension's view hierarchy,
+    /// so the feedback originates from the tapped candidate instead.
+    private func animateSuggestionAcceptance(from sourceView: UIView) {
+        guard !UIAccessibility.isReduceMotionEnabled,
+              let snapshot = sourceView.snapshotView(afterScreenUpdates: false) else { return }
+        snapshot.frame = sourceView.convert(sourceView.bounds, to: keyboardContentContainer)
+        snapshot.isUserInteractionEnabled = false
+        keyboardContentContainer.addSubview(snapshot)
+        UIView.animateKeyframes(withDuration: 0.20, delay: 0, options: [.calculationModeCubic, .beginFromCurrentState]) {
+            UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.35) {
+                snapshot.transform = CGAffineTransform(scaleX: 1.06, y: 1.06)
+            }
+            UIView.addKeyframe(withRelativeStartTime: 0.35, relativeDuration: 0.65) {
+                snapshot.transform = CGAffineTransform(translationX: 0, y: 10).scaledBy(x: 0.94, y: 0.94)
+                snapshot.alpha = 0
+            }
+        } completion: { _ in
+            snapshot.removeFromSuperview()
+        }
+    }
+
     private func schedulePredictions(for prefix: String) {
-        requestPredictions(for: prefix, delay: 0.075)
+        requestPredictions(for: prefix, delay: 0.025)
     }
 
     private func updatePredictions(for prefix: String) {
@@ -6071,10 +6454,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// return only the newest result to UIKit. Typing and transliteration
     /// therefore never wait for a dictionary scan or candidate animation.
     private func requestPredictions(for prefix: String, delay: TimeInterval) {
+        if language == .english { requestEnglishPredictions(delay: delay); return }
         let prefix = inheritedPredictionPrefix + prefix
         guard !isDeleteRepeatActive else { return }
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        pendingPredictionToken?.cancel()
         predictionGeneration += 1
         let generation = predictionGeneration
         guard showsCandidateBar else {
@@ -6120,12 +6505,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             // likely next letters; 24 avoids ranking a deep tail on every tap.
             maximumResults: inflateLetters ? 24 : 3
         )
-        let provider = SinhalaPredictionProviderRegistry.shared.activeProvider
+        let provider = activePredictionProvider
         let emojiSuggestionsEnabled = KeyboardPreferences.hotPath.emojiSuggestionsEnabled
         let preferredEmojiSkinTone = KeyboardPreferences.hotPath.emojiSkinTone
+        let token = PredictionCancellationToken()
+        pendingPredictionToken = token
         let queue = predictionQueue
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, !token.isCancelled else { return }
             let currentMode = self.mode
             let isShifted = self.shift
             let stillInflating = inflateLetters
@@ -6133,7 +6520,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 && currentMode != .sls
                 && !self.phoneticBuffer.isEmpty
             queue.async {
+                guard !token.isCancelled else { return }
                 let ranked = provider.candidates(for: request)
+                guard !token.isCancelled else { return }
                 let correctionCandidates = prefix.isEmpty
                     ? []
                     : SinhalaAutocorrectionService.shared.suggestions(for: prefix, maximumResults: 3)
@@ -6150,6 +6539,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 } else {
                     emojiHits = []
                 }
+                guard !token.isCancelled else { return }
                 let weights = stillInflating
                     ? provider.nextKeyWeights(
                         latinBuffer: latinBuffer,
@@ -6160,6 +6550,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                     )
                     : [:]
                 DispatchQueue.main.async { [weak self] in
+                    guard !token.isCancelled else { return }
                     self?.applyPredictions(
                         displayRanked.prefix(3).map(\.text),
                         emoji: emojiHits,
@@ -6277,21 +6668,21 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// loading. Keep that lock and UserDefaults serialization off the input
     /// thread so choosing a suggestion never delays the next key-down.
     private func recordPredictionSelection(_ word: String, after precedingWord: String?) {
-        let provider = SinhalaPredictionProviderRegistry.shared.activeProvider
+        let provider = activePredictionProvider
         predictionQueue.async {
             provider.recordSelection(word, after: precedingWord)
         }
     }
 
     private func recordCommittedPredictionWord(_ word: String, after precedingWord: String?) {
-        let provider = SinhalaPredictionProviderRegistry.shared.activeProvider
+        let provider = activePredictionProvider
         predictionQueue.async {
             provider.recordCommittedWord(word, after: precedingWord)
         }
     }
 
     @objc private func selectPrediction(_ sender: UIButton) {
-        guard !isSpaceTrackpadActive else { return }
+        guard !isSpaceTrackpadActive, !numberDragActive else { return }
         guard let candidate = displayedCandidate(on: sender), !candidate.isEmpty else { return }
         let now = CACurrentMediaTime()
         if candidate == lastInsertedPrediction, now - lastPredictionInsertAt < 0.35 {
@@ -6304,6 +6695,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // prefix after the user has already chosen a word.
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        pendingPredictionToken?.cancel()
         predictionGeneration += 1
 
         let isTrueName = candidate == AksharaEasterEgg.trueNameDisplay
@@ -6311,11 +6703,20 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             || (candidate.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.isEmoji }
                 && !candidate.unicodeScalars.contains { (0x0D80...0x0DFF).contains($0.value) }
                 && candidate != AksharaEasterEgg.trueNameDisplay)
+        if language == .english {
+            selectEnglishCandidate(candidate, isEmoji: isEmojiSuggestion, sourceView: sender)
+            return
+        }
         let precedingWord = predictionContext(for: predictionPrefix).last
         let replacingPhonetic = !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty
         let wordToReplace = activePredictionWord()
+        let wholeWordContext = cursorWordContext().flatMap { context -> EnglishWordContext? in
+            guard !context.suffix.isEmpty, context.canReplaceWholeWord,
+                  context.prefix == wordToReplace else { return nil }
+            return context
+        }
 
-        if replacingPhonetic {
+        if wholeWordContext == nil, replacingPhonetic {
             clearPhoneticComposition(refreshingPredictions: false)
             // Some hosts leave the unmarked preview in place after the
             // anchor-based delete. Only try again when we can still see it.
@@ -6329,7 +6730,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 // duplicate candidate after it.
                 deleteComposingWordIfPresent(inheritedPredictionPrefix)
             }
-        } else {
+        } else if wholeWordContext == nil {
             abandonPendingComposition(removingFromDocument: false)
             deleteComposingWordIfPresent(wordToReplace)
         }
@@ -6337,7 +6738,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // by committing its separator as part of the selection, so the next
         // keystroke begins the following word rather than appending to it.
         let inserted = isTrueName ? AksharaEasterEgg.trueNameInsert : candidate
-        insertIntoDocument(inserted + " ", applyingSmartSpacing: true)
+        // Capture the chip before a middle-of-word replacement clears and
+        // repopulates the candidate rail.
+        animateSuggestionAcceptance(from: sender)
+        if let wholeWordContext {
+            // The local buffers describe the prefix that was edited, while
+            // the document context also knows the untouched suffix. Drop the
+            // buffers without deleting their host text, then replace both.
+            cancelLocalCompositionWithoutCommit(refreshingPredictions: false)
+            replaceWordAroundCaret(wholeWordContext, with: inserted + " ")
+        } else {
+            insertIntoDocument(inserted + " ", applyingSmartSpacing: true)
+        }
         // Learn only a deliberate dictionary selection. True-name and emoji
         // chips must not enter the personal Sinhala model.
         if isTrueName {
@@ -6379,11 +6791,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         return nil
     }
 
+    private func cursorWordContext() -> EnglishWordContext? {
+        let proxy = textDocumentProxy
+        guard let before = proxy.documentContextBeforeInput else { return nil }
+        return EnglishWordContext(before: before, after: proxy.documentContextAfterInput ?? "",
+                                  hasSelection: !(proxy.selectedText?.isEmpty ?? true))
+    }
+
     /// `UITextDocumentProxy` gives a bounded pre-cursor window. Use it only to
     /// rank the current suggestion in memory; the provider never persists it.
     /// Ordinary letter keys reuse a cached preceding-word list so ranking does
     /// not pay for a proxy context read on every keystroke.
     private func predictionContext(for composingText: String) -> [String] {
+        if language == .english { return englishContext()?.preceding ?? [] }
         if !precedingWordsCacheValid {
             refreshPrecedingWordsCache(composingText: composingText)
         }
@@ -6435,6 +6855,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         collapseSpaceAfterOpeningPunctuation = false
         noteInput()
         if unit == .character, undoPendingAutocorrectionIfPossible() {
+            return
+        }
+        if language == .english {
+            englishOwnedWord = ""
+            englishCanLearnWord = false
+            englishCorrection = nil
+            if unit == .word, textDocumentProxy.selectedText?.isEmpty ?? true,
+               let before = textDocumentProxy.documentContextBeforeInput {
+                let segment = NativeBackspace.lastWordSegment(in: before)
+                if segment.isEmpty { deleteBackwardFromDocument(times: 1) }
+                else { deleteDocumentText(segment) }
+            } else { deleteBackwardFromDocument(times: 1) }
+            updatePredictionsAfterDelete(for: "")
             return
         }
         if let selected = textDocumentProxy.selectedText, !selected.isEmpty {
@@ -6560,8 +6993,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// written for this composition stays where it is; a new field must not
     /// receive the previous word.
     private func cancelLocalCompositionWithoutCommit(refreshingPredictions: Bool = false) {
+        englishOwnedWord = ""
+        englishCanLearnWord = false
+        englishCorrection = nil
+        englishDisplayedContext = nil
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        pendingPredictionToken?.cancel()
         predictionGeneration += 1
         rawBuffer = ""
         visibleEntries.removeAll()
@@ -6702,6 +7140,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         isDeleteRepeatActive = true
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
+        pendingPredictionToken?.cancel()
         predictionGeneration += 1
         if deleteRepeatBeganAt == 0 {
             deleteRepeatBeganAt = CACurrentMediaTime()
@@ -6781,14 +7220,24 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer === numberDragRecognizer else { return true }
+        guard layer == .letters, !isKeyboardOverlayPresented, !isSpaceTrackpadActive else { return false }
+        return (touch.view as? NativeKeyButton)?.keyName == "123"
+    }
+
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        true
+        gestureRecognizer !== numberDragRecognizer && otherGestureRecognizer !== numberDragRecognizer
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === numberDragRecognizer {
+            return layer == .letters && !isDeleteRepeatActive
+                && !isKeyboardOverlayPresented && !isSpaceTrackpadActive
+        }
         guard let swipe = gestureRecognizer as? UISwipeGestureRecognizer,
               let button = swipe.view as? NativeKeyButton,
               button.keyName == "space" else { return true }
@@ -6953,6 +7402,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func commit(suffix: String) {
+        if language == .english { commitEnglish(suffix: suffix); return }
         flushPendingComposition()
         let formattedSuffix = smartTypography(for: suffix)
         let committedWord = activeRenderedWord()
@@ -7012,7 +7462,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         deleteDocumentText(pending.replacement + pending.suffix)
         insertIntoDocument(pending.original)
-        KeyboardPreferences.protectFromAutocorrect(pending.original)
+        if language == .english { englishOwnedWord = pending.original; englishCanLearnWord = true }
+        KeyboardPreferences.recordAutocorrectionReversal(for: pending.original)
         pendingAutocorrection = nil
         invalidatePrecedingWordsCache()
         updatePredictions(for: pending.original)
@@ -7023,6 +7474,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// immediately, then rewritten in place if a following key completes the
     /// syllable (`ෙ` + `ක` → `කෙ`, `අ` + `ා` → `ආ`).
     private func insertLive(_ source: String) {
+        if language == .english { insertEnglish(source); return }
         noteInput()
         pendingAutocorrection = nil
         captureInheritedPredictionPrefixIfNeeded()
@@ -7185,6 +7637,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func activeRenderedWord() -> String {
+        if language == .english { return englishOwnedWord }
         if mode != .sls {
             return committedPhoneticSegments.map(\.rendered).joined() + lastPhoneticRendered
         }
@@ -7209,6 +7662,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func learnActiveWord() {
+        if language == .english { return }
         let word = activeRenderedWord()
         guard !word.isEmpty else { return }
         let preceding = predictionContext(for: word).last
@@ -7595,7 +8049,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private var isIdleComposition: Bool {
-        phoneticBuffer.isEmpty && committedPhoneticSegments.isEmpty && pendingSource == nil && visibleEntries.isEmpty
+        if language == .english { return englishOwnedWord.isEmpty }
+        return phoneticBuffer.isEmpty && committedPhoneticSegments.isEmpty && pendingSource == nil && visibleEntries.isEmpty
     }
 
     private var activePhoneticSource: String {

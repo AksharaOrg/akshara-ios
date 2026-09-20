@@ -135,6 +135,7 @@ enum KeyboardPreferences {
     static let suggestionsKey = "keyboardSuggestionsEnabled"
     static let autocorrectKey = "keyboardAutocorrectEnabled"
     static let autocorrectProtectedWordsKey = "keyboardAutocorrectProtectedWords.v1"
+    static let autocorrectReversalCountsKey = "keyboardAutocorrectReversalCounts.v1"
     static let emojiSuggestionsKey = "keyboardEmojiSuggestionsEnabled"
     static let predictionProviderKey = "selectedPredictionProvider"
     static let doubleSpacePeriodKey = "doubleSpacePeriodEnabled"
@@ -143,6 +144,8 @@ enum KeyboardPreferences {
     static let longPressPunctuationKey = "longPressPunctuationEnabled"
     static let smartQuotesKey = "smartQuotesEnabled"
     static let smartPunctuationSpacingKey = "smartPunctuationSpacingEnabled"
+    static let englishKeyboardKey = "englishKeyboardEnabled"
+    static let activeLanguageKey = "keyboardActiveLanguage"
     static let englishForOneWordKey = "englishForOneWordEnabled"
     static let characterPreviewKey = "characterPreviewEnabled"
     static let keySpacingKey = "keyboardKeySpacing"
@@ -302,18 +305,52 @@ enum KeyboardPreferences {
 
     static func isAutocorrectProtected(_ word: String) -> Bool {
         guard !word.isEmpty else { return false }
-        return Set(defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []).contains(word)
+        return Set((defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []).map(normalizedProtectedWord)).contains(normalizedProtectedWord(word))
     }
 
-    /// Undoing an automatic replacement is an explicit statement that the
-    /// original spelling is intentional. Bound this local-only list so it
-    /// cannot grow without limit in the shared defaults suite.
+    static func autocorrectProtectedWords() -> [String] {
+        defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []
+    }
+
+    /// Manual entries are immediately excluded from automatic replacement.
     static func protectFromAutocorrect(_ word: String) {
-        guard !word.isEmpty else { return }
+        let normalized = normalizedProtectedWord(word)
+        guard !normalized.isEmpty else { return }
         var words = defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []
-        words.removeAll { $0 == word }
-        words.insert(word, at: 0)
+        words.removeAll { normalizedProtectedWord($0) == normalized }
+        words.insert(normalized, at: 0)
         defaults.set(Array(words.prefix(512)), forKey: autocorrectProtectedWordsKey)
+        var counts = defaults.dictionary(forKey: autocorrectReversalCountsKey) as? [String: Int] ?? [:]
+        counts.removeValue(forKey: normalized)
+        defaults.set(counts, forKey: autocorrectReversalCountsKey)
+    }
+
+    static func removeAutocorrectProtection(_ word: String) {
+        var words = defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []
+        words.removeAll { normalizedProtectedWord($0) == normalizedProtectedWord(word) }
+        defaults.set(words, forKey: autocorrectProtectedWordsKey)
+    }
+
+    /// A reversal can happen accidentally while editing. Only protect a word
+    /// after three separate, immediate reversals of automatic replacements.
+    /// Returns the number of reversals recorded so the keyboard can keep its
+    /// behavior local and deterministic without presenting a modal prompt.
+    @discardableResult
+    static func recordAutocorrectionReversal(for word: String) -> Int {
+        let normalized = normalizedProtectedWord(word)
+        guard !normalized.isEmpty else { return 0 }
+        if isAutocorrectProtected(normalized) { return 3 }
+        var counts = defaults.dictionary(forKey: autocorrectReversalCountsKey) as? [String: Int] ?? [:]
+        let count = min(3, counts[normalized, default: 0] + 1)
+        if count == 3 {
+            counts.removeValue(forKey: normalized)
+            defaults.set(counts, forKey: autocorrectReversalCountsKey)
+            protectFromAutocorrect(normalized)
+        } else {
+            counts[normalized] = count
+            defaults.set(counts, forKey: autocorrectReversalCountsKey)
+        }
+        return count
     }
 
     /// When on, matching Sinhala CLDR emoji fill the right suggestion column
@@ -397,6 +434,29 @@ enum KeyboardPreferences {
         persist(enabled, forKey: smartPunctuationSpacingKey)
     }
 
+    static func englishKeyboardEnabled() -> Bool {
+        defaults.bool(forKey: englishKeyboardKey)
+    }
+
+    static func activeLanguage() -> KeyboardLanguage {
+        guard englishKeyboardEnabled() else { return .sinhala }
+        return KeyboardLanguage(rawValue: defaults.string(forKey: activeLanguageKey) ?? "") ?? .sinhala
+    }
+
+    static func setEnglishKeyboardEnabled(_ enabled: Bool) {
+        if !enabled { defaults.set(KeyboardLanguage.sinhala.rawValue, forKey: activeLanguageKey) }
+        persist(enabled, forKey: englishKeyboardKey)
+    }
+
+    static func setActiveLanguage(_ language: KeyboardLanguage) {
+        persist((englishKeyboardEnabled() ? language : .sinhala).rawValue, forKey: activeLanguageKey)
+    }
+
+    private static func normalizedProtectedWord(_ word: String) -> String {
+        let normalized = word.precomposedStringWithCanonicalMapping
+        return EnglishPredictionProvider.isWord(normalized) ? normalized.lowercased() : normalized
+    }
+
     static func englishForOneWordEnabled() -> Bool {
         defaults.object(forKey: englishForOneWordKey) as? Bool ?? false
     }
@@ -465,11 +525,11 @@ enum KeyboardPreferences {
     static func resetToDefaults() {
         let store = defaults
         let keys = [
-            layoutKey, emojiKey, hapticsKey, suggestionsKey, autocorrectKey, autocorrectProtectedWordsKey, emojiSuggestionsKey,
+            layoutKey, emojiKey, hapticsKey, suggestionsKey, autocorrectKey, autocorrectProtectedWordsKey, autocorrectReversalCountsKey, emojiSuggestionsKey,
             clipboardHistoryKey,
             predictionProviderKey, doubleSpacePeriodKey, numberRowKey, topRowKey,
             longPressPunctuationKey, smartQuotesKey, smartPunctuationSpacingKey,
-            englishForOneWordKey, characterPreviewKey, keySpacingKey,
+            englishKeyboardKey, activeLanguageKey, englishForOneWordKey, characterPreviewKey, keySpacingKey,
             oneHandedPositionKey, hapticStrengthKey, keyClicksKey, deleteRepeatSpeedKey,
             appearanceKey, highContrastKey, emojiSkinToneKey, showTouchAreasKey,
             predictiveTouchAreasKey, keyboardChromeOverrideKey

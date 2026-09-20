@@ -917,3 +917,203 @@ if !frequencyHits.isEmpty || !nextWordHits.isEmpty || !trigramHits.isEmpty || !s
     exit(1)
 }
 print("Blocked suggestion tokens absent from models (\(blockedWords.count) exact tokens)")
+
+// A cancelled request queued behind a busy ranking must never start work.
+let rankingQueue = DispatchQueue(label: "prediction-cancellation-test")
+let unblockRanking = DispatchSemaphore(value: 0)
+let obsolete = PredictionCancellationToken()
+let newest = PredictionCancellationToken()
+var completedRequests: [String] = []
+rankingQueue.async { unblockRanking.wait() }
+rankingQueue.async {
+    if !obsolete.isCancelled { completedRequests.append("obsolete") }
+}
+obsolete.cancel()
+rankingQueue.async {
+    if !newest.isCancelled { completedRequests.append("newest") }
+}
+unblockRanking.signal()
+rankingQueue.sync {}
+precondition(completedRequests == ["newest"], "Obsolete ranking was not skipped")
+print("Queued prediction cancellation passed")
+
+let cacheSuite = "lk.org.akshara.prediction-cache-test"
+let cacheDefaults = UserDefaults(suiteName: cacheSuite)!
+cacheDefaults.removePersistentDomain(forName: cacheSuite)
+let cacheProvider = SinhalaFrequencyListPredictionProvider(
+    modelURL: nil, nextWordURL: nil, trigramURL: nil,
+    sentenceStartURL: nil, defaults: cacheDefaults
+)
+let cacheRequest = SinhalaPredictionRequest(composingText: "ගෙ", precedingWords: [], maximumResults: 3)
+precondition(cacheProvider.candidates(for: cacheRequest).isEmpty)
+cacheProvider.recordCommittedWord("ගෙදර", after: nil)
+let learned = cacheProvider.candidates(for: cacheRequest)
+precondition(learned.first?.text == "ගෙදර", "Learning failed to invalidate cached empty result")
+precondition(cacheProvider.candidates(for: cacheRequest) == learned)
+cacheProvider.recordSelection("ගෙදර", after: nil)
+precondition(cacheProvider.candidates(for: cacheRequest)[0].score > learned[0].score,
+             "Selection failed to invalidate cached score")
+precondition(cacheProvider.candidates(for: .init(composingText: "ගෙ", precedingWords: [], maximumResults: 0)).isEmpty)
+cacheProvider.flushPendingPersistence()
+cacheDefaults.removePersistentDomain(forName: cacheSuite)
+print("Prediction cache learning and result-limit regressions passed")
+
+// Report desktop lookup timings, without imposing hardware-specific thresholds.
+let timingRequest = SinhalaPredictionRequest(composingText: "ක", precedingWords: ["එය"], maximumResults: 24)
+let uncachedStart = DispatchTime.now().uptimeNanoseconds
+let expectedTimingResults = provider.candidates(for: timingRequest)
+let uncachedMS = Double(DispatchTime.now().uptimeNanoseconds - uncachedStart) / 1_000_000
+let cachedStart = DispatchTime.now().uptimeNanoseconds
+for _ in 0..<1000 {
+    precondition(provider.candidates(for: timingRequest) == expectedTimingResults)
+}
+let cachedMS = Double(DispatchTime.now().uptimeNanoseconds - cachedStart) / 1_000_000 / 1000
+print(String(format: "Desktop lookup timing: uncached %.3f ms; repeated cached mean %.4f ms", uncachedMS, cachedMS))
+
+// English model, casing, context and learning are independent of Sinhala.
+let englishSuite = "lk.org.akshara.english-tests.\(UUID().uuidString)"
+let englishDefaults = UserDefaults(suiteName: englishSuite)!
+let englishStart = DispatchTime.now().uptimeNanoseconds
+let english = EnglishPredictionProvider(
+    wordURL: root.appendingPathComponent("AksharaKeyboard/Resources/english_wordfreq_25000.json"),
+    nextURL: root.appendingPathComponent("AksharaKeyboard/Resources/english_next_word_model.tsv"),
+    emojiURL: root.appendingPathComponent("AksharaKeyboard/EmojiSearchIndex.json"), defaults: englishDefaults)
+let constructionMS = Double(DispatchTime.now().uptimeNanoseconds - englishStart) / 1_000_000
+let loadStart = DispatchTime.now().uptimeNanoseconds
+english.prepareIfNeeded()
+let coldMS = Double(DispatchTime.now().uptimeNanoseconds - loadStart) / 1_000_000
+func englishCandidates(_ prefix: String, after: [String] = [], limit: Int = 3) -> [String] {
+    english.candidates(for: .init(composingText: prefix, precedingWords: after, maximumResults: limit)).map(\.text)
+}
+precondition(englishCandidates("the").contains("the"))
+precondition(englishCandidates("h", after: ["hello"]).contains("how"))
+precondition(englishCandidates("", after: ["thank"]).first == "you")
+precondition(englishCandidates("").isEmpty)
+precondition(englishCandidates("", limit: 0).isEmpty)
+precondition(englishCandidates("සිං").isEmpty)
+precondition(englishCandidates("don't").isEmpty)
+precondition(englishCandidates("The").allSatisfy { $0.first?.isUppercase == true })
+precondition(englishCandidates("THE").allSatisfy { $0 == $0.uppercased() })
+precondition(english.correction(for: "the") == nil)
+precondition(english.correction(for: "don't") == nil)
+precondition(english.correction(for: "userName") == nil)
+precondition(english.correction(for: "ab") == nil)
+let weights = english.nextKeyWeights(latinBuffer: "he", mode: .sls, shifted: false,
+    from: [.init(text: "hello", score: 1)], precedingWords: [])
+precondition(weights == ["l": 1])
+precondition(!english.emoji(for: "happy", bestWord: nil).isEmpty)
+
+let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+try FileManager.default.createDirectory(at: fixtureDirectory, withIntermediateDirectories: true)
+let tinyURL = fixtureDirectory.appendingPathComponent("words.json")
+try Data("[[\"hello\",1],[\"cat\",0.9],[\"cot\",0.8],[\"dog\",0.7]]".utf8).write(to: tinyURL)
+let tiny = EnglishPredictionProvider(wordURL: tinyURL, nextURL: nil, emojiURL: nil, defaults: englishDefaults)
+precondition(tiny.correction(for: "helllo") == "hello")
+precondition(tiny.correction(for: "Helllo") == "Hello")
+precondition(tiny.correction(for: "HELLLO") == "HELLO")
+precondition(tiny.correction(for: "hElllo") == nil)
+precondition(tiny.correction(for: "cut") == nil, "Ambiguous typo was corrected")
+precondition(tiny.correction(for: "he-lo") == nil)
+let learnedRequest = SinhalaPredictionRequest(composingText: "z", precedingWords: [], maximumResults: 3)
+precondition(tiny.candidates(for: learnedRequest).isEmpty)
+tiny.recordCommittedWord("zorb", after: "hello")
+precondition(tiny.candidates(for: learnedRequest).first?.text == "zorb")
+precondition(tiny.correction(for: "zorb") == nil)
+let learnedBefore = tiny.candidates(for: learnedRequest)[0].score
+tiny.recordSelection("zorb", after: "hello")
+precondition(tiny.candidates(for: learnedRequest)[0].score > learnedBefore)
+precondition(tiny.candidates(for: .init(composingText: "z", precedingWords: ["hello"], maximumResults: 3))[0].score > learnedBefore)
+tiny.flushPendingPersistence()
+precondition(englishDefaults.object(forKey: "prediction.learnedWords.v1") == nil)
+let reloaded = EnglishPredictionProvider(wordURL: nil, nextURL: nil, emojiURL: nil, defaults: englishDefaults)
+precondition(reloaded.candidates(for: learnedRequest).first?.text == "zorb")
+let unavailableDefaults = UserDefaults(suiteName: englishSuite + ".empty")!
+let unavailable = EnglishPredictionProvider(wordURL: nil, nextURL: nil, emojiURL: nil, defaults: unavailableDefaults)
+precondition(unavailable.candidates(for: .init(composingText: "he", precedingWords: ["hello"], maximumResults: 3)).isEmpty)
+precondition(unavailable.correction(for: "helllo") == nil)
+
+let middle = EnglishWordContext(before: "hello wor", after: "ld!")
+precondition(middle.prefix == "wor" && middle.suffix == "ld" && !middle.canReplace)
+precondition(middle.wholeWord == "world" && middle.canReplaceWholeWord)
+precondition(!middle.canAutocorrectAtBoundary)
+precondition(middle.preceding == ["hello"])
+let selectedEnglish = EnglishWordContext(before: "hello", after: "", hasSelection: true)
+precondition(!selectedEnglish.canReplace && !selectedEnglish.canReplaceWholeWord)
+let middleSinhala = EnglishWordContext(before: "මම සිං", after: "හල ලියමි")
+precondition(middleSinhala.prefix == "සිං" && middleSinhala.suffix == "හල")
+precondition(middleSinhala.wholeWord == "සිංහල" && middleSinhala.canReplaceWholeWord)
+precondition(EnglishWordContext(before: "don't", after: "").prefix == "don't")
+precondition(EnglishWordContext(before: "hello සිංහල wor", after: "").preceding.isEmpty)
+precondition(EnglishWordContext(before: "hello. wor", after: "").preceding.isEmpty)
+precondition(EnglishWordContext(before: "hello", after: "") != EnglishWordContext(before: "x hello", after: ""))
+
+// Restore shared preferences after testing enable/disable and saved-word rules.
+do {
+    let keys = [KeyboardPreferences.englishKeyboardKey, KeyboardPreferences.activeLanguageKey,
+                KeyboardPreferences.layoutKey, KeyboardPreferences.autocorrectProtectedWordsKey,
+                KeyboardPreferences.autocorrectReversalCountsKey]
+    let original = Dictionary(uniqueKeysWithValues: keys.map { ($0, KeyboardPreferences.defaults.object(forKey: $0)) })
+    defer {
+        for key in keys {
+            if let value = original[key] ?? nil { KeyboardPreferences.defaults.set(value, forKey: key) }
+            else { KeyboardPreferences.defaults.removeObject(forKey: key) }
+        }
+        KeyboardPreferences.refreshHotPathCache()
+    }
+    keys.forEach { KeyboardPreferences.defaults.removeObject(forKey: $0) }
+    precondition(!KeyboardPreferences.englishKeyboardEnabled())
+    precondition(KeyboardPreferences.activeLanguage() == .sinhala)
+    for mode in SinhalaEngine.Mode.allCases {
+        KeyboardPreferences.setSelectedMode(mode)
+        KeyboardPreferences.setEnglishKeyboardEnabled(true)
+        KeyboardPreferences.setActiveLanguage(.english)
+        KeyboardPreferences.reload()
+        precondition(KeyboardPreferences.activeLanguage() == .english)
+        precondition(KeyboardPreferences.selectedMode() == mode)
+        KeyboardPreferences.setEnglishKeyboardEnabled(false)
+        precondition(KeyboardPreferences.activeLanguage() == .sinhala)
+        KeyboardPreferences.setEnglishKeyboardEnabled(true)
+        precondition(KeyboardPreferences.activeLanguage() == .sinhala)
+    }
+    KeyboardPreferences.protectFromAutocorrect("HeLlLo")
+    precondition(KeyboardPreferences.isAutocorrectProtected("HELLLO"))
+    precondition(tiny.correction(for: "Helllo") == nil)
+    KeyboardPreferences.removeAutocorrectProtection("helllo")
+    precondition(tiny.correction(for: "Helllo") == "Hello")
+    for _ in 0..<3 { KeyboardPreferences.recordAutocorrectionReversal(for: "HeLlLo") }
+    precondition(tiny.correction(for: "helllo") == nil)
+}
+let warmStart = DispatchTime.now().uptimeNanoseconds
+for _ in 0..<1000 { _ = englishCandidates("hel", after: ["say"]) }
+let warmMS = Double(DispatchTime.now().uptimeNanoseconds - warmStart) / 1_000_000 / 1000
+print(String(format: "English desktop timing: construction %.3f ms, cold load %.3f ms, repeated lookup %.4f ms", constructionMS, coldMS, warmMS))
+print("English resources, correction, context, casing, learning isolation, preferences and protection passed")
+tiny.flushPendingPersistence()
+englishDefaults.removePersistentDomain(forName: englishSuite)
+unavailableDefaults.removePersistentDomain(forName: englishSuite + ".empty")
+try FileManager.default.removeItem(at: fixtureDirectory)
+
+for isPad in [false, true] {
+    for emoji in [false, true] {
+        for language in [false, true] {
+            for globe in [false, true] {
+                for punctuation in [[], ["@", "."]] as [[String]] {
+                    let keys = KeyboardBottomRow.keys(isPad: isPad, emoji: emoji, language: language, globe: globe, punctuation: punctuation)
+                    if language { precondition(keys[1] == "language") }
+                    if language && emoji { precondition(keys[2] == "emoji") }
+                    for width: CGFloat in [256, 320, 393, 402, 600, 1024] {
+                        let gap: CGFloat = 6
+                        let small: CGFloat = isPad ? 60 : 44
+                        let enter: CGFloat = 94
+                        let scale = KeyboardBottomRow.controlScale(keys: keys, availableWidth: width, gap: gap, smallWidth: small, returnWidth: enter)
+                        let budget = width - CGFloat(keys.count - 1) * gap
+                        let controls = keys.reduce(CGFloat.zero) { $0 + ($1 == "space" ? 0 : $1 == "return" ? enter : small) * scale }
+                        precondition(budget - controls >= budget * 0.32 - 0.001, "Space was squeezed by bottom controls")
+                        precondition(scale > 0 && scale <= 1)
+                    }
+                }
+            }
+        }
+    }
+}
+print("Bottom-row key order and Space width budgets passed (phone, iPad, one-handed, URL, optional keys)")

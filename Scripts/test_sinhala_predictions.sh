@@ -15,6 +15,8 @@ swiftc \
   "$root/Shared/SinhalaEngine.swift" \
   "$root/Shared/KeyboardPreferences.swift" \
   "$root/Shared/SinhalaPrediction.swift" \
+  "$root/Shared/EnglishPrediction.swift" \
+  "$root/Shared/KeyboardBottomRow.swift" \
   "$root/Shared/SinhalaAutocorrection.swift" \
   "$root/Shared/KeyboardCompositionSession.swift" \
   "$root/Shared/SinhalaEmojiSuggestions.swift" \

@@ -17,7 +17,9 @@ not included; attribution details are in
 Autocorrect is a separate, opt-in, on-device verified-spelling feature. Its
 runtime artifact is not a SQLite database and does not replace the frequency or
 n-gram prediction models. `Scripts/SinhalaDictionary.lock` pins the exact
-Akshara Dictionary revision and public export profile for a release.
+Akshara Dictionary revision and public export profile for a release. The
+shipped lexicon is the deterministic top 8,000 ranked entries from its verified
+Sinhala spellings; the selection limit is part of the lock file.
 
 Release automation must check out that revision, build its `redistributable`
 export with the upstream dictionary tooling, then compile the resulting export:
@@ -25,7 +27,7 @@ export with the upstream dictionary tooling, then compile the resulting export:
 ```sh
 zsh Scripts/build_sinhala_autocorrect_index.sh \
   /path/to/akshara-dictionary/exports/release \
-  759143ac5e62732710d710aa22f21f170c601a8a
+  83ba4423ca20784857563cf76ff4648411e3db76
 ```
 
 The compiler rejects a different revision/profile and writes both the compact

@@ -1,26 +1,31 @@
 {
+  "availableVerifiedWordCount": 258808,
   "format": "AKSHARA_AUTOCORRECT_V1",
   "licence": "CC-BY-4.0 plus included source licences (see manifest)",
   "profile": "redistributable",
   "repository": "https://github.com/AksharaOrg/akshara-dictionary.git",
-  "revision": "759143ac5e62732710d710aa22f21f170c601a8a",
-  "sha256": "00800ea1636456b9dfa85ef8b9a7e412ce5d623f9cb2b23cc769c46d3f77264d",
+  "revision": "83ba4423ca20784857563cf76ff4648411e3db76",
+  "selection": {
+    "kind": "lowest_frequency_rank",
+    "maximumVerifiedWords": 8000
+  },
+  "sha256": "2a08e6b29f8f347b93f904a4ab230c7556886ff766e24139ae0ad119376cecdc",
   "sources": [
     {
-      "definitions_redistributable": "true",
+      "definitions_redistributable": "false",
       "headwords_redistributable": "true",
-      "id": "project_seed",
-      "license": "CC-BY-4.0",
-      "license_evidence": "Original project data; see DATA_LICENSE.md",
-      "license_family": "cc-by",
-      "name": "sinhala-dictionary original seed",
-      "notes": "Independently written seed lexemes and definitions. Not copied from published dictionaries.",
-      "publisher": "sinhala-dictionary contributors",
+      "id": "uom_verified",
+      "license": "open-research-release",
+      "license_evidence": "NLPC UoM publishes linguistic resources on GitHub for public reuse by design. Fernando & Dias (ICON 2021) released this list as a public linguistic resource and request citation. No SPDX file is present in the repo; this project treats headwords as redistributable with attribution. The source contains no dictionary definitions.\n",
+      "license_family": "open-research",
+      "name": "University of Moratuwa verified Sinhala word list",
+      "notes": "Observed format is \"token count\" (~280k). Verification is accepted spelling evidence, not a spelling-academy canonical status. Include in the default public export. Cite Fernando & Dias 2021.\n",
+      "publisher": "National Languages Processing Centre, University of Moratuwa",
       "redistribution_allowed": "true",
       "retrieved_at": "2026-09-09",
-      "tier": "original",
-      "url": "https://github.com/sinhala-dictionary"
+      "tier": "B",
+      "url": "https://raw.githubusercontent.com/nlpcuom/Word-Frequency-List-for-Sinhala/main/verified_word_list_200K.si"
     }
   ],
-  "wordCount": 8
+  "wordCount": 8000
 }
