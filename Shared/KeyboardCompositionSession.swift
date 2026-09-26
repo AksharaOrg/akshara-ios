@@ -290,3 +290,42 @@ enum UnmarkedCompositionRewrite {
         return ""
     }
 }
+
+/// Editing rules shared by both layouts, independent of UIKit/proxy timing.
+enum KeyboardSpaceAction: Equatable {
+    case insert
+    case useSuggestionSpace
+    case replaceWithPeriod
+
+    static func resolve(before: String, hasSelection: Bool, compositionIsIdle: Bool,
+                        suggestionSpacePending: Bool, lastTap: TimeInterval?,
+                        now: TimeInterval, periodEnabled: Bool) -> Self {
+        guard !hasSelection, compositionIsIdle, before.last == " " else { return .insert }
+        if suggestionSpacePending { return .useSuggestionSpace }
+        let word = before.dropLast().reversed().drop(while: { "\"'’”)]}".contains($0) })
+        guard periodEnabled, let lastTap, now >= lastTap, now - lastTap < 0.45,
+              let preceding = word.first, preceding.isLetter || preceding.isNumber else { return .insert }
+        return .replaceWithPeriod
+    }
+}
+
+enum EnglishCapitalization {
+    enum Mode { case none, words, sentences, allCharacters }
+
+    static func shouldShift(before: String, mode: Mode) -> Bool {
+        switch mode {
+        case .none: return false
+        case .allCharacters: return true
+        case .words: return before.isEmpty || before.last?.isWhitespace == true
+        case .sentences:
+            if before.isEmpty { return true }
+            // Opening quotes/brackets at a sentence start do not consume Shift.
+            let text = before.reversed().drop(while: { "\"'‘“([{ \t".contains($0) })
+            guard let last = text.first else { return true }
+            if last == "\n" || last == "\r" { return true }
+            guard before.last?.isWhitespace == true || before.last.map({ "\"'‘“([{".contains($0) }) == true else { return false }
+            let significant = text.drop(while: { $0.isWhitespace || "\"'’”)]}".contains($0) })
+            return significant.first.map { ".!?".contains($0) } ?? true
+        }
+    }
+}

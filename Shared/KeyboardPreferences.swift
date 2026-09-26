@@ -282,7 +282,10 @@ enum KeyboardPreferences {
     }
 
     static func setFullAccessConfirmed(_ confirmed: Bool) {
-        persist(confirmed, forKey: fullAccessKey)
+        // Presentation happens for every reply field. This flag is not a
+        // typing preference and does not require rebuilding the hot cache.
+        guard defaults.object(forKey: fullAccessKey) as? Bool != confirmed else { return }
+        defaults.set(confirmed, forKey: fullAccessKey)
     }
 
     static func suggestionsEnabled() -> Bool {

@@ -38,13 +38,12 @@
 		A10000000000000000000024 /* Resources/SinhalaAutocorrect.lexicon in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000029 /* Resources/SinhalaAutocorrect.lexicon */; };
 		A10000000000000000000025 /* Resources/SinhalaAutocorrectMetadata.json in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000002A /* Resources/SinhalaAutocorrectMetadata.json */; };
 		E10000000000000000000001 /* EnglishPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* EnglishPrediction.swift */; };
-		E10000000000000000000002 /* Resources/english_wordfreq_25000.json in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000002 /* Resources/english_wordfreq_25000.json */; };
-		E10000000000000000000003 /* Resources/english_next_word_model.tsv in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000003 /* Resources/english_next_word_model.tsv */; };
 		E10000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md */; };
 		E10000000000000000000005 /* Resources/english_next_word_model_attribution.md in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* Resources/english_next_word_model_attribution.md */; };
 		E10000000000000000000006 /* KeyboardBottomRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* KeyboardBottomRow.swift */; };
 		E10000000000000000000007 /* KeyboardBottomRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* KeyboardBottomRow.swift */; };
 		E10000000000000000000010 /* EnglishPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* EnglishPrediction.swift */; };
+		E10000000000000000000011 /* Resources/EnglishPrediction.sqlite3 in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -105,6 +104,7 @@
 		E20000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/english_wordfreq_25000_attribution.md; sourceTree = "<group>"; };
 		E20000000000000000000005 /* Resources/english_next_word_model_attribution.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/english_next_word_model_attribution.md; sourceTree = "<group>"; };
 		E20000000000000000000006 /* KeyboardBottomRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardBottomRow.swift; sourceTree = "<group>"; };
+		E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/EnglishPrediction.sqlite3; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -158,6 +158,7 @@
 				E20000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md */,
 				E20000000000000000000003 /* Resources/english_next_word_model.tsv */,
 				E20000000000000000000002 /* Resources/english_wordfreq_25000.json */,
+				E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */,
 				A20000000000000000000016 /* Resources/SinhalaNextWordModel.tsv */,
 				A20000000000000000000017 /* Resources/SinhalaTrigramModel.tsv */,
 				A20000000000000000000018 /* Resources/SinhalaSentenceStartModel.tsv */,
@@ -289,8 +290,7 @@
 				A10000000000000000000013 /* Resources/SinhalaFrequencyModel.tsv in Resources */,
 				E10000000000000000000005 /* Resources/english_next_word_model_attribution.md in Resources */,
 				E10000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md in Resources */,
-				E10000000000000000000003 /* Resources/english_next_word_model.tsv in Resources */,
-				E10000000000000000000002 /* Resources/english_wordfreq_25000.json in Resources */,
+				E10000000000000000000011 /* Resources/EnglishPrediction.sqlite3 in Resources */,
 				A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */,
 				A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */,
 				A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */,
@@ -357,6 +357,8 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				OTHER_LDFLAGS = "-lsqlite3";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
@@ -366,6 +368,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				OTHER_LDFLAGS = "-lsqlite3";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;

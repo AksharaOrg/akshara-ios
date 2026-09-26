@@ -103,7 +103,10 @@ final class SinhalaPredictionProviderRegistry {
     }
 
     func flushPendingPersistence() {
-        (activeProvider as? SinhalaFrequencyListPredictionProvider)?.flushPendingPersistence()
+        let provider = activeProvider as? SinhalaFrequencyListPredictionProvider
+        DispatchQueue.global(qos: .utility).async {
+            provider?.flushPendingPersistence()
+        }
     }
 
     /// Prefetch the bundled dictionary off the main thread so the first
@@ -222,6 +225,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private var recency: [String: Int]
     private var recencyClock: Int
     private var persistenceWorkItem: DispatchWorkItem?
+    private var hasUnsavedLearning = false
     // Backspace/retyping often revisits the same prefix and context. Bound the
     // cache so the keyboard extension cannot retain an entire typing session.
     private var candidateCache: [SinhalaPredictionRequest: [SinhalaPredictionCandidate]] = [:]
@@ -488,6 +492,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     private func record(_ word: String, after precedingWord: String?, selectionBoost: Int, persistImmediately: Bool) {
         guard isSinhalaWord(word) else { return }
+        hasUnsavedLearning = true
         candidateCache.removeAll(keepingCapacity: true)
         cachedRequests.removeAll(keepingCapacity: true)
         learnedWords[word, default: 0] += selectionBoost
@@ -520,16 +525,18 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private func persistLocked() {
         persistenceWorkItem?.cancel()
         persistenceWorkItem = nil
+        guard hasUnsavedLearning else { return }
         defaults.set(learnedWords, forKey: learnedWordsKey)
         defaults.set(recency, forKey: recencyKey)
         defaults.set(learnedBigrams, forKey: learnedBigramsKey)
+        hasUnsavedLearning = false
     }
 
     private func schedulePersistence() {
         persistenceWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.flushPendingPersistence() }
         persistenceWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3, execute: work)
     }
 
     private func recencyScore(for word: String) -> Double {

@@ -12,6 +12,18 @@ by Remeinium AI and Kusal Darshana (2025), under
 not included; attribution details are in
 `AksharaKeyboard/Resources/SinhalaNextWordModel-ATTRIBUTION.md`.
 
+English completions, next-word counts, correction keys, and emoji tokens ship
+in a query-only SQLite index so the keyboard does not parse and expand the
+source JSON/TSV files at runtime. Regenerate it after changing either source:
+
+```sh
+python3 Scripts/build_english_prediction_db.py \
+  --words AksharaKeyboard/Resources/english_wordfreq_25000.json \
+  --next-words AksharaKeyboard/Resources/english_next_word_model.tsv \
+  --emoji AksharaKeyboard/EmojiSearchIndex.json \
+  --output AksharaKeyboard/Resources/EnglishPrediction.sqlite3
+```
+
 ## Autocorrect dictionary releases
 
 Autocorrect is a separate, opt-in, on-device verified-spelling feature. Its

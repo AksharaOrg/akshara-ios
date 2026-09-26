@@ -43,6 +43,14 @@ private enum KeyboardHitTrace {
     private static var lastHitMessage = ""
     private static var lastHitTime: CFTimeInterval = 0
 
+    static func logSuggestion(_ message: @autoclosure () -> String) {
+#if DEBUG
+        // No typed text. Available on a tethered phone without launch flags.
+        let message = message()
+        logger.notice("suggestion: \(message, privacy: .public)")
+#endif
+    }
+
     static func isTraced(_ key: String) -> Bool { leftoverKeys.contains(key) }
 
     static func log(_ message: @autoclosure () -> String) {
@@ -2601,14 +2609,19 @@ private final class CandidateRailView: UIView {
         guard !isHidden, alpha > 0.01, isUserInteractionEnabled,
               expandedHitBounds.contains(point) else { return nil }
         // Own the touch even when a ranking pass blanks a UIButton. The rail
-        // inserts on touch-down from `touchesBegan`, not `touchUpInside`.
+        // selects on touch-down, then defers the host edit one run-loop turn.
+        KeyboardHitTrace.logSuggestion("rail hit-test accepted")
         return self
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
-        guard let point = touches.first?.location(in: self),
-              let button = suggestionButton(at: point) else { return }
+        guard let point = touches.first?.location(in: self) else { return }
+        guard let button = suggestionButton(at: point) else {
+            KeyboardHitTrace.logSuggestion("rail touch-down has no selectable candidate")
+            return
+        }
+        KeyboardHitTrace.logSuggestion("rail touch-down slot=\(button.tag)")
         highlightedButton?.isHighlighted = false
         highlightedButton = button
         button.isHighlighted = true
@@ -3604,13 +3617,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private lazy var englishProvider = EnglishPredictionProvider()
     private var englishOwnedWord = ""
     private var englishCanLearnWord = false
-    private var englishDisplayedContext: EnglishWordContext?
     private var englishCorrection: (context: EnglishWordContext, replacement: String)?
     private weak var languageTransitionOverlay: UIView?
     private var activePredictionProvider: SinhalaPredictionProviding {
         language == .english ? englishProvider : SinhalaPredictionProviderRegistry.shared.activeProvider
     }
     private var lastSpaceTimestamp: TimeInterval?
+    private var suggestionSpacePending = false
     /// One reversible replacement, valid only while the cursor remains after
     /// the corrected word and delimiter. It is never inferred from host text.
     private struct PendingAutocorrection {
@@ -3709,9 +3722,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     // secondary UI, so coalesce it while the user is actively spelling a word
     // instead of scanning the dictionary and redrawing three buttons per key.
     private var pendingPredictionUpdate: DispatchWorkItem?
-    /// Guards VoiceOver activate + touch-down from inserting the same chip twice.
-    private var lastPredictionInsertAt: TimeInterval = 0
-    private var lastInsertedPrediction: String?
     private var emojiPicker: EmojiPickerView?
     private var clipboardHistoryPanel: ClipboardHistoryView?
     private var clipboardRefreshTimer: Timer?
@@ -3929,11 +3939,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         usesIOS16KeyboardAppearance ? 3 : 7
     }
 
-    /// Test lift so the bottom row clears the host clip. iOS 26 is already
-    /// aligned and must not move.
+    /// Lift so the translated bottom row and its one-point key shadow clear
+    /// the tighter pre-iOS 17 host clip. iOS 26 is already aligned and must
+    /// not move.
     private var preLiquidGlassBottomLift: CGFloat {
         if #available(iOS 26.0, *) { return 0 }
-        if usesIOS16KeyboardAppearance { return 1 }
+        if usesIOS16KeyboardAppearance { return 2 }
         if #available(iOS 18.0, *) { return 1 }
         return 0
     }
@@ -4092,9 +4103,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let height = presentedKeyboardHeight
         let contentHeight = keyboardContentOccupiedHeight
         let constantChanged = abs((keyboardHostHeight?.constant ?? 0) - height) > 0.5
-        keyboardHostHeight?.constant = height
-        preferredContentSize = CGSize(width: max(view.bounds.width, 1), height: height)
-        keyboardContentHeight?.constant = contentHeight
+        if constantChanged { keyboardHostHeight?.constant = height }
+        let requestedSize = CGSize(width: max(view.bounds.width, 1), height: height)
+        if preferredContentSize != requestedSize { preferredContentSize = requestedSize }
+        if keyboardContentHeight?.constant != contentHeight {
+            keyboardContentHeight?.constant = contentHeight
+        }
         if !isKeyboardOverlayPresented {
             applyCandidateBarLayout()
         }
@@ -4294,6 +4308,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         mode = KeyboardPreferences.selectedMode()
         language = KeyboardPreferences.activeLanguage()
         englishEnabled = KeyboardPreferences.englishKeyboardEnabled()
+        syncPrimaryLanguage()
         configureLayout()
         view.addGestureRecognizer(numberDragRecognizer)
         keyFeedback = KeyFeedback(view: view)
@@ -4332,6 +4347,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             layer = .letters
             needsRebuild = true
         }
+        syncPrimaryLanguage()
         if selectedMode != selectedSinhalaMode {
             cancelLocalCompositionWithoutCommit()
             mode = selectedMode
@@ -4365,6 +4381,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             applyKeyboardMetrics()
             updateClipboardButtonVisibility()
         }
+        syncEnglishCapitalization()
         startClipboardCaptureIfNeeded()
     }
 
@@ -4402,7 +4419,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if showsCandidateBar, language == .sinhala {
             SinhalaPredictionProviderRegistry.shared.prepareBundledModelsInBackground()
         }
-        if showsCandidateBar || KeyboardPreferences.hotPath.autocorrectEnabled {
+        if language == .sinhala, showsCandidateBar || KeyboardPreferences.hotPath.autocorrectEnabled {
             DispatchQueue.global(qos: .utility).async {
                 SinhalaAutocorrectionService.shared.prepareIfNeeded()
             }
@@ -4533,6 +4550,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         updateInputTraitsIfNeeded()
         collapseSpaceAfterOpeningPunctuation = false
         reconcileCompositionStateWithDocument()
+        syncEnglishCapitalization()
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
@@ -4542,6 +4560,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         pendingAutocorrection = nil
         collapseSpaceAfterOpeningPunctuation = false
         reconcileCompositionStateWithDocument()
+        syncEnglishCapitalization()
     }
 
     private func refreshInputModeSwitchKeyWhenConnected() {
@@ -4767,11 +4786,18 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         candidateBar.translatesAutoresizingMaskIntoConstraints = false
         candidateBar.isUserInteractionEnabled = true
         candidateBar.isMultipleTouchEnabled = false
-        candidateBar.isExclusiveTouch = true
-        candidateBar.backgroundColor = .clear
+        // Letters commit on touch-down, so their finger may still be down
+        // when the other thumb selects a suggestion. Do not make the rail
+        // compete for exclusive ownership of all touches in the window.
+        candidateBar.isExclusiveTouch = false
+        // Give the remote keyboard host a filled touch surface across the
+        // entire rail, including the spaces around the glyphs. The key grid
+        // uses the same faint fill; a transparent rail can lose taps before
+        // our hitTest is called, even though its suggestions are visible.
+        candidateBar.backgroundColor = UIColor(white: 0.5, alpha: 0.02)
         candidateBar.insetsLayoutMarginsFromSafeArea = false
         candidateBar.onSelect = { [weak self] button in
-            self?.selectPrediction(button)
+            self?.queuePredictionSelection(button)
         }
         applySuggestionRailMargins()
         keyboardContentContainer.addSubview(candidateBar)
@@ -4818,7 +4844,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 button.isUserInteractionEnabled = false
                 button.onActivate = { [weak self, weak button] in
                     guard let button else { return }
-                    self?.selectPrediction(button)
+                    self?.queuePredictionSelection(button)
                 }
                 segments.addArrangedSubview(button)
                 candidateButtons.append(button)
@@ -4853,7 +4879,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             wordButton.translatesAutoresizingMaskIntoConstraints = false
             wordButton.onActivate = { [weak self, weak wordButton] in
                 guard let wordButton else { return }
-                self?.selectPrediction(wordButton)
+                self?.queuePredictionSelection(wordButton)
             }
             thirdColumn.addSubview(wordButton)
             candidateButtons.append(wordButton)
@@ -4874,7 +4900,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 button.isUserInteractionEnabled = false
                 button.onActivate = { [weak self, weak button] in
                     guard let button else { return }
-                    self?.selectPrediction(button)
+                    self?.queuePredictionSelection(button)
                 }
                 emojiStack.addArrangedSubview(button)
                 emojiCandidateButtons.append(button)
@@ -5708,7 +5734,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
 
     private func title(for key: String) -> String? {
         if key == "language" { return language == .english ? "සිං" : "EN" }
-        if language == .english, key == "space" { return "English" }
+        if language == .english, key == "space" { return "Akshara - English" }
         if key.hasPrefix(Self.topEmojiKeyPrefix) {
             return String(key.dropFirst(Self.topEmojiKeyPrefix.count))
         }
@@ -5766,6 +5792,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // otherwise a new letter can extend the sent word, and Delete can
         // consume a selection followed by characters before that selection.
         reconcileCompositionStateWithDocument()
+        defer {
+            if key != "shift", key != "delete" { syncEnglishCapitalization() }
+        }
         let prefs = KeyboardPreferences.hotPath
         if prefs.keyClicksEnabled {
             if prefs.hapticsEnabled {
@@ -5778,6 +5807,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         if key != "space" {
             lastSpaceTimestamp = nil
+            suggestionSpacePending = false
             resetSpaceSignatureTaps()
         }
         if key.hasPrefix(Self.topEmojiKeyPrefix) {
@@ -5849,6 +5879,27 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             }
             else { commit(suffix: input) }
         }
+    }
+
+    private func syncEnglishCapitalization() {
+        guard language == .english else { return }
+        let capitalization: EnglishCapitalization.Mode
+        if smartPunctuationFieldKind != .standard {
+            capitalization = .none
+        } else {
+            switch textDocumentProxy.autocapitalizationType ?? .sentences {
+            case .none: capitalization = .none
+            case .words: capitalization = .words
+            case .allCharacters: capitalization = .allCharacters
+            default: capitalization = .sentences
+            }
+        }
+        let shouldShift = EnglishCapitalization.shouldShift(
+            before: textDocumentProxy.documentContextBeforeInput ?? englishOwnedWord, mode: capitalization
+        )
+        guard shift != shouldShift else { return }
+        shift = shouldShift
+        if layer == .letters { refreshShiftedKeyAppearance() }
     }
 
     /// Shift only changes labels and a few glyphs. Walk existing keys instead
@@ -6182,11 +6233,21 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         cancelLocalCompositionWithoutCommit()
         language = language == .english ? .sinhala : .english
         KeyboardPreferences.setActiveLanguage(language)
+        syncPrimaryLanguage()
         shift = false
         layer = .letters
         rebuildKeys()
+        syncEnglishCapitalization()
         updatePredictions(for: "")
         animateLanguageReveal(from: revealOrigin, coveringWith: previousKeyboard)
+    }
+
+    /// Keep UIKit's language metadata aligned with the layout currently on
+    /// screen. The Info.plist declares Sinhala as the installation label;
+    /// this runtime value lets multilingual text inputs treat English as an
+    /// ASCII-capable English keyboard instead of substituting a system one.
+    private func syncPrimaryLanguage() {
+        primaryLanguage = language == .english ? "en-US" : "si-LK"
     }
 
     /// Reveal the newly selected keyboard through a quick circular wipe that
@@ -6291,7 +6352,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let showRail = showsCandidateBar
         let correct = KeyboardPreferences.hotPath.autocorrectEnabled && inputFieldAllowsPredictions
         guard (showRail || correct), let context = supplied ?? englishContext(), !context.hasSelection else {
-            englishDisplayedContext = nil
             clearCandidateRailDisplay()
             applyKeyTouchWeights([:])
             return
@@ -6331,10 +6391,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                     guard let self, !token.isCancelled, self.language == .english,
                           self.predictionGeneration == generation, self.englishContext() == context else { return }
                     self.englishCorrection = correction.map { (context, $0) }
-                    self.englishDisplayedContext = context
                     if showRail {
                         var display = ranked.map(\.text)
                         if let correction, !display.contains(correction) { display.insert(correction, at: 0) }
+                        if prefix.isEmpty, shifted {
+                            let allCaps = self.textDocumentProxy.autocapitalizationType == .allCharacters
+                            display = display.map { allCaps ? $0.uppercased() : $0.prefix(1).uppercased() + $0.dropFirst() }
+                        }
                         self.applyPredictions(Array(display.prefix(3)), emoji: emoji, weights: weights,
                                               for: prefix, generation: generation)
                     }
@@ -6374,7 +6437,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         englishOwnedWord = ""
         englishCanLearnWord = false
-        englishDisplayedContext = nil
         // Keep Return in its own proxy insert so host Search/Send works.
         insertIntoDocument(formatted, applyingSmartSpacing: formatted != "\n")
         // Smart punctuation may append a space. Record the actual delimiter
@@ -6388,9 +6450,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         requestEnglishPredictions(delay: 0)
     }
 
-    private func selectEnglishCandidate(_ candidate: String, isEmoji: Bool, sourceView: UIView) {
-        guard let context = englishContext(), context == englishDisplayedContext,
-              context.canReplaceWholeWord else { return }
+    private func selectEnglishCandidate(
+        _ candidate: String, context: EnglishWordContext, isEmoji: Bool, sourceView: UIView
+    ) {
         pendingAutocorrection = nil
         englishCorrection = nil
         replaceWordAroundCaret(context, with: candidate + " ")
@@ -6399,7 +6461,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         else { recordPredictionSelection(candidate, after: context.preceding.last) }
         englishOwnedWord = ""
         englishCanLearnWord = false
-        englishDisplayedContext = nil
+        suggestionSpacePending = true
+        lastSpaceTimestamp = nil
+        syncEnglishCapitalization()
         requestEnglishPredictions(delay: 0)
     }
 
@@ -6408,10 +6472,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// prefix and the untouched suffix without retaining either fragment.
     private func replaceWordAroundCaret(_ context: EnglishWordContext, with replacement: String) {
         performDocumentEdit {
-            if !context.suffix.isEmpty {
-                self.textDocumentProxy.adjustTextPosition(byCharacterOffset: context.suffix.count)
+            // Reuse a separator already after the word instead of leaving
+            // two spaces when completing in the middle of an existing draft.
+            let span = context.replacementSpan(for: replacement)
+            if span.advance > 0 {
+                self.textDocumentProxy.adjustTextPosition(byCharacterOffset: span.advance)
             }
-            self.deleteDocumentTextWhileEditing(context.wholeWord)
+            self.deleteDocumentTextWhileEditing(span.text)
             self.textDocumentProxy.insertText(replacement)
         }
     }
@@ -6490,8 +6557,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         predictionPrefix = prefix
         // Keep the previous rail visible while the next ranking runs. Blanking
-        // all three slots on every keystroke made the bar flicker; selection
-        // still rejects stale words that no longer match the live prefix.
+        // all three slots on every keystroke made the bar flicker. A tap
+        // accepts the displayed word against the current composition.
         let latinBuffer = activePhoneticSource
         let inflateLetters = KeyboardPreferences.hotPath.predictiveTouchAreas
             && layer == .letters
@@ -6681,15 +6748,50 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
 
-    @objc private func selectPrediction(_ sender: UIButton) {
-        guard !isSpaceTrackpadActive, !numberDragActive else { return }
-        guard let candidate = displayedCandidate(on: sender), !candidate.isEmpty else { return }
-        let now = CACurrentMediaTime()
-        if candidate == lastInsertedPrediction, now - lastPredictionInsertAt < 0.35 {
+    private func queuePredictionSelection(_ sender: CandidateButton) {
+        guard let text = sender.displayedText, !text.isEmpty else { return }
+        let editGeneration = ownEditGeneration
+        let selectedLanguage = language
+        // Host edits inside touch-down can cancel UIKit's active delivery.
+        // Capture the visible word now; ranking may change the slot before
+        // the next run-loop turn. Never apply it after an intervening edit.
+        DispatchQueue.main.async { [weak self, weak sender] in
+            guard let self, let sender else { return }
+            guard self.language == selectedLanguage, self.ownEditGeneration == editGeneration else {
+                KeyboardHitTrace.logSuggestion("queued selection cancelled after another edit")
+                return
+            }
+            self.selectPrediction(sender, selectedText: text)
+        }
+    }
+
+    private func selectPrediction(_ sender: UIButton, selectedText: String) {
+        guard !isSpaceTrackpadActive, !numberDragActive else {
+            KeyboardHitTrace.logSuggestion("candidate select blocked trackpad=\(isSpaceTrackpadActive) numberDrag=\(numberDragActive)")
             return
         }
-        lastInsertedPrediction = candidate
-        lastPredictionInsertAt = now
+        let candidate = selectedText
+        guard !candidate.isEmpty else { return }
+        // The rail stays visible while ranking catches up with typing. An
+        // explicit tap accepts the displayed word against the live caret,
+        // even when that word came from an earlier ranking context. Validate
+        // before cancelling work so a rejected tap cannot strand the rail.
+        let englishSelectionContext: EnglishWordContext?
+        if language == .english {
+            guard let context = englishContext(), context.canReplaceWholeWord else {
+                KeyboardHitTrace.logSuggestion("selection rejected: unavailable context or selected text")
+                return
+            }
+            englishSelectionContext = context
+        } else {
+            englishSelectionContext = nil
+        }
+        // A suggestion is new input just like a letter: retire any Delete
+        // repeat whose touch-up was lost before inserting or refreshing.
+        // The rail activates only on touch-down, so there is no second
+        // touch-up action to debounce. Separate taps may choose the same word.
+        stopDeleteRepeat()
+        KeyboardHitTrace.logSuggestion("candidate select accepted language=\(language.rawValue)")
 
         // A delayed ranking pass must not disable this chip or rewrite the
         // prefix after the user has already chosen a word.
@@ -6703,16 +6805,17 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             || (candidate.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.isEmoji }
                 && !candidate.unicodeScalars.contains { (0x0D80...0x0DFF).contains($0.value) }
                 && candidate != AksharaEasterEgg.trueNameDisplay)
-        if language == .english {
-            selectEnglishCandidate(candidate, isEmoji: isEmojiSuggestion, sourceView: sender)
+        if let context = englishSelectionContext {
+            selectEnglishCandidate(candidate, context: context, isEmoji: isEmojiSuggestion, sourceView: sender)
             return
         }
         let precedingWord = predictionContext(for: predictionPrefix).last
         let replacingPhonetic = !phoneticBuffer.isEmpty || !committedPhoneticSegments.isEmpty
         let wordToReplace = activePredictionWord()
         let wholeWordContext = cursorWordContext().flatMap { context -> EnglishWordContext? in
-            guard !context.suffix.isEmpty, context.canReplaceWholeWord,
-                  context.prefix == wordToReplace else { return nil }
+            guard context.canReplaceWholeWord,
+                  context.prefix == wordToReplace,
+                  !context.suffix.isEmpty || context.after.hasPrefix(" ") else { return nil }
             return context
         }
 
@@ -6775,20 +6878,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             // ranking cannot wait for `documentContextBeforeInput`.
             seedPrecedingWordsAfterCommit(candidate, previous: precedingWord)
         }
+        suggestionSpacePending = true
+        lastSpaceTimestamp = nil
         // Keep offering the following word, the same way Space does after a
         // commit. Clearing the rail here made suggestion chains die after
         // a single tap.
         updatePredictions(for: "")
-    }
-
-    private func displayedCandidate(on sender: UIButton) -> String? {
-        if let button = sender as? CandidateButton, let text = button.displayedText, !text.isEmpty {
-            return text
-        }
-        if sender.tag < candidates.count, let text = candidates[sender.tag], !text.isEmpty {
-            return text
-        }
-        return nil
     }
 
     private func cursorWordContext() -> EnglishWordContext? {
@@ -6847,10 +6942,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     /// System Delete: a tap removes one grapheme (or one phonetic source
     /// letter while transliterating). A sustained hold later removes words.
     private func deleteOnce(unit: DeleteUnit = .character) {
+        defer { syncEnglishCapitalization() }
         if !isDeleteRepeatActive {
             reconcileCompositionStateWithDocument()
         }
         lastSpaceTimestamp = nil
+        suggestionSpacePending = false
         resetSpaceSignatureTaps()
         collapseSpaceAfterOpeningPunctuation = false
         noteInput()
@@ -6996,7 +7093,6 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         englishOwnedWord = ""
         englishCanLearnWord = false
         englishCorrection = nil
-        englishDisplayedContext = nil
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         pendingPredictionToken?.cancel()
@@ -7012,6 +7108,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         predictionPrefix = ""
         inheritedPredictionPrefix = ""
         lastSpaceTimestamp = nil
+        suggestionSpacePending = false
         collapseSpaceAfterOpeningPunctuation = false
         invalidatePrecedingWordsCache()
         clearCandidateRailDisplay()
@@ -8022,19 +8119,30 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // space when it follows a word; never manufacture punctuation at the
         // start of a field or after an existing sentence terminator.
         let beforeInput = textDocumentProxy.documentContextBeforeInput ?? ""
-        let characterBeforeSpace = beforeInput.dropLast().last
-        let followsWord = characterBeforeSpace.map { $0.isLetter || $0.isNumber } ?? false
-        let isDoubleSpace = KeyboardPreferences.hotPath.doubleSpacePeriodEnabled
-            && rawBuffer.isEmpty && followsWord
-            && (lastSpaceTimestamp.map { now - $0 < 0.45 } ?? false)
-        if isDoubleSpace {
+        let action = KeyboardSpaceAction.resolve(
+            before: beforeInput, hasSelection: !(textDocumentProxy.selectedText?.isEmpty ?? true),
+            compositionIsIdle: wasIdle, suggestionSpacePending: suggestionSpacePending,
+            lastTap: lastSpaceTimestamp, now: now,
+            periodEnabled: KeyboardPreferences.hotPath.doubleSpacePeriodEnabled
+                && smartPunctuationFieldKind == .standard
+        )
+        suggestionSpacePending = false
+        if action == .useSuggestionSpace {
+            // Accepting a suggestion already supplied this tap's separator.
+            // A second physical Space tap can now produce the normal ". ".
+            lastSpaceTimestamp = now
+            return
+        }
+        if action == .replaceWithPeriod {
             performDocumentEdit {
                 self.textDocumentProxy.deleteBackward()
                 self.textDocumentProxy.insertText(". ")
             }
             lastSpaceTimestamp = nil
+            pendingAutocorrection = nil
             collapseSpaceAfterOpeningPunctuation = false
             invalidatePrecedingWordsCache()
+            updatePredictions(for: "")
             noteIdleSpaceSignatureTap(wasIdle: wasIdle, at: now)
             return
         }

@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let fixtureURL = root.appendingPathComponent("Scripts/SinhalaPredictionFixture.tsv")
@@ -975,9 +976,8 @@ let englishSuite = "lk.org.akshara.english-tests.\(UUID().uuidString)"
 let englishDefaults = UserDefaults(suiteName: englishSuite)!
 let englishStart = DispatchTime.now().uptimeNanoseconds
 let english = EnglishPredictionProvider(
-    wordURL: root.appendingPathComponent("AksharaKeyboard/Resources/english_wordfreq_25000.json"),
-    nextURL: root.appendingPathComponent("AksharaKeyboard/Resources/english_next_word_model.tsv"),
-    emojiURL: root.appendingPathComponent("AksharaKeyboard/EmojiSearchIndex.json"), defaults: englishDefaults)
+    databaseURL: root.appendingPathComponent("AksharaKeyboard/Resources/EnglishPrediction.sqlite3"),
+    defaults: englishDefaults)
 let constructionMS = Double(DispatchTime.now().uptimeNanoseconds - englishStart) / 1_000_000
 let loadStart = DispatchTime.now().uptimeNanoseconds
 english.prepareIfNeeded()
@@ -1005,9 +1005,34 @@ precondition(!english.emoji(for: "happy", bestWord: nil).isEmpty)
 
 let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
 try FileManager.default.createDirectory(at: fixtureDirectory, withIntermediateDirectories: true)
-let tinyURL = fixtureDirectory.appendingPathComponent("words.json")
-try Data("[[\"hello\",1],[\"cat\",0.9],[\"cot\",0.8],[\"dog\",0.7]]".utf8).write(to: tinyURL)
-let tiny = EnglishPredictionProvider(wordURL: tinyURL, nextURL: nil, emojiURL: nil, defaults: englishDefaults)
+let tinyURL = fixtureDirectory.appendingPathComponent("EnglishPrediction.sqlite3")
+var tinyHandle: OpaquePointer?
+precondition(sqlite3_open(tinyURL.path, &tinyHandle) == SQLITE_OK)
+let tinySchema = """
+CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE words(word TEXT PRIMARY KEY, rank INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE bigrams(previous TEXT NOT NULL, next TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(previous,next)) WITHOUT ROWID;
+CREATE TABLE deletions(deletion TEXT NOT NULL, word TEXT NOT NULL, PRIMARY KEY(deletion,word)) WITHOUT ROWID;
+CREATE TABLE emoji(token TEXT NOT NULL, emoji TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(token,emoji)) WITHOUT ROWID;
+INSERT INTO metadata VALUES('schema_version','1');
+INSERT INTO words VALUES('hello',0),('cat',1),('cot',2),('dog',3);
+INSERT INTO deletions VALUES
+('ello','hello'),('hllo','hello'),('helo','hello'),('hell','hello'),
+('at','cat'),('ct','cat'),('ca','cat'),('ot','cot'),('ct','cot'),('co','cot'),
+('og','dog'),('dg','dog'),('do','dog');
+INSERT INTO emoji VALUES('happy','😊',0);
+"""
+precondition(sqlite3_exec(tinyHandle, tinySchema, nil, nil, nil) == SQLITE_OK)
+// A personal follower outside the SQL top-48 shortlist must retain its
+// corpus score when personal learning promotes it into the visible rail.
+for index in 0..<50 {
+    let word = "filler" + String(UnicodeScalar(97 + index / 26)!) + String(UnicodeScalar(97 + index % 26)!)
+    precondition(sqlite3_exec(tinyHandle,
+        "INSERT INTO bigrams VALUES('hello','\(word)',100)", nil, nil, nil) == SQLITE_OK)
+}
+precondition(sqlite3_exec(tinyHandle, "INSERT INTO bigrams VALUES('hello','zorb',10)", nil, nil, nil) == SQLITE_OK)
+sqlite3_close(tinyHandle)
+let tiny = EnglishPredictionProvider(databaseURL: tinyURL, defaults: englishDefaults)
 precondition(tiny.correction(for: "helllo") == "hello")
 precondition(tiny.correction(for: "Helllo") == "Hello")
 precondition(tiny.correction(for: "HELLLO") == "HELLO")
@@ -1017,6 +1042,9 @@ precondition(tiny.correction(for: "he-lo") == nil)
 let learnedRequest = SinhalaPredictionRequest(composingText: "z", precedingWords: [], maximumResults: 3)
 precondition(tiny.candidates(for: learnedRequest).isEmpty)
 tiny.recordCommittedWord("zorb", after: "hello")
+let personalFollower = tiny.candidates(for: .init(composingText: "", precedingWords: ["hello"], maximumResults: 3))
+precondition(personalFollower.first?.text == "zorb")
+precondition(personalFollower.first!.score > 100_010_000, "SQL shortlist lost the personal follower's corpus score")
 precondition(tiny.candidates(for: learnedRequest).first?.text == "zorb")
 precondition(tiny.correction(for: "zorb") == nil)
 let learnedBefore = tiny.candidates(for: learnedRequest)[0].score
@@ -1025,10 +1053,13 @@ precondition(tiny.candidates(for: learnedRequest)[0].score > learnedBefore)
 precondition(tiny.candidates(for: .init(composingText: "z", precedingWords: ["hello"], maximumResults: 3))[0].score > learnedBefore)
 tiny.flushPendingPersistence()
 precondition(englishDefaults.object(forKey: "prediction.learnedWords.v1") == nil)
-let reloaded = EnglishPredictionProvider(wordURL: nil, nextURL: nil, emojiURL: nil, defaults: englishDefaults)
+let reloaded = EnglishPredictionProvider(databaseURL: nil, defaults: englishDefaults)
 precondition(reloaded.candidates(for: learnedRequest).first?.text == "zorb")
 let unavailableDefaults = UserDefaults(suiteName: englishSuite + ".empty")!
-let unavailable = EnglishPredictionProvider(wordURL: nil, nextURL: nil, emojiURL: nil, defaults: unavailableDefaults)
+let unavailable = EnglishPredictionProvider(databaseURL: nil, defaults: unavailableDefaults)
+unavailable.flushPendingPersistence()
+precondition(unavailableDefaults.object(forKey: "prediction.english.words.v1") == nil,
+             "An unchanged model should not write learning data on dismissal")
 precondition(unavailable.candidates(for: .init(composingText: "he", precedingWords: ["hello"], maximumResults: 3)).isEmpty)
 precondition(unavailable.correction(for: "helllo") == nil)
 
@@ -1117,3 +1148,52 @@ for isPad in [false, true] {
     }
 }
 print("Bottom-row key order and Space width budgets passed (phone, iPad, one-handed, URL, optional keys)")
+
+// Explicit suggestion separators participate in two *physical* Space taps.
+for word in ["hello", "සිංහල"] {
+    let before = word + " "
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: false, compositionIsIdle: true,
+        suggestionSpacePending: true, lastTap: nil, now: 10, periodEnabled: true) == .useSuggestionSpace)
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: false, compositionIsIdle: true,
+        suggestionSpacePending: false, lastTap: 10, now: 10.2, periodEnabled: true) == .replaceWithPeriod)
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: false, compositionIsIdle: true,
+        suggestionSpacePending: false, lastTap: 10, now: 11, periodEnabled: true) == .insert)
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: true, compositionIsIdle: true,
+        suggestionSpacePending: true, lastTap: 10, now: 10.2, periodEnabled: true) == .insert)
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: false, compositionIsIdle: false,
+        suggestionSpacePending: false, lastTap: 10, now: 10.2, periodEnabled: true) == .insert)
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: false, compositionIsIdle: true,
+        suggestionSpacePending: false, lastTap: 10, now: 10.2, periodEnabled: false) == .insert)
+}
+for before in ["", " ", "hello", "hello  ", "hello. ", "hello! ", "hello\n"] {
+    precondition(KeyboardSpaceAction.resolve(before: before, hasSelection: false, compositionIsIdle: true,
+        suggestionSpacePending: false, lastTap: 10, now: 10.2, periodEnabled: true) == .insert)
+}
+precondition(KeyboardSpaceAction.resolve(before: "“hello” ", hasSelection: false, compositionIsIdle: true,
+    suggestionSpacePending: false, lastTap: 10, now: 10.2, periodEnabled: true) == .replaceWithPeriod)
+for before in ["", " ", "Hello. ", "Hello!  ", "Hello? ", "Hello\n", "Hello\n  ", "“", "Hello. “"] {
+    precondition(EnglishCapitalization.shouldShift(before: before, mode: .sentences), "Missing sentence capital: \(before)")
+}
+for before in ["h", "hello ", "example.", "Hello. w", "don't "] {
+    precondition(!EnglishCapitalization.shouldShift(before: before, mode: .sentences), "Unexpected sentence capital: \(before)")
+}
+precondition(!EnglishCapitalization.shouldShift(before: "", mode: .none))
+precondition(EnglishCapitalization.shouldShift(before: "hello ", mode: .words))
+precondition(!EnglishCapitalization.shouldShift(before: "hello", mode: .words))
+precondition(EnglishCapitalization.shouldShift(before: "hello", mode: .allCharacters))
+print("Sinhala/English suggestion spacing, double-space period, and English capitalization passed")
+
+for (before, after, replacement, expected) in [
+    ("hello wor", "ld again", "world ", "hello world again"),
+    ("hello wor", "ld", "world ", "hello world "),
+    ("hello world", " again", "word ", "hello word again"),
+    ("මම සිං", "හල ලියමි", "සිංහල ", "මම සිංහල ලියමි")
+] {
+    let context = EnglishWordContext(before: before, after: after)
+    let span = context.replacementSpan(for: replacement)
+    let left = before + after.prefix(span.advance)
+    precondition(left.hasSuffix(span.text))
+    let result = left.dropLast(span.text.count) + replacement + after.dropFirst(span.advance)
+    precondition(result == expected, "Suggestion replacement damaged adjacent text: \(result)")
+}
+print("Suggestion replacement preserves adjacent words and reuses existing separators")

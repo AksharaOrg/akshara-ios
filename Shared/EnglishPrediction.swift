@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 enum KeyboardLanguage: String { case sinhala, english }
 
@@ -30,6 +31,12 @@ struct EnglishWordContext: Equatable {
     }
 
     var wholeWord: String { prefix + suffix }
+
+    func replacementSpan(for replacement: String) -> (advance: Int, text: String) {
+        let includesSpace = replacement.hasSuffix(" ") && after.dropFirst(suffix.count).first == " "
+        return (suffix.count + (includesSpace ? 1 : 0), wholeWord + (includesSpace ? " " : ""))
+    }
+
     /// Candidate taps may replace the token on both sides of the caret.
     var canReplaceWholeWord: Bool { !hasSelection }
     /// Boundary autocorrection remains stricter: the caret must be at the end
@@ -38,34 +45,187 @@ struct EnglishWordContext: Equatable {
     var canReplace: Bool { canAutocorrectAtBoundary }
 }
 
+/// A query-only connection to the prebuilt index. Keeping words, deletion
+/// keys, bigrams, and emoji in SQLite prevents the keyboard extension from
+/// expanding a few compact resources into tens of megabytes of Swift objects.
+private final class EnglishPredictionDatabase {
+    private var handle: OpaquePointer?
+    // Access is serialized by the provider lock. Bound the cache because
+    // correction queries have different placeholder counts for word lengths.
+    private var statements: [String: OpaquePointer] = [:]
+    private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    init?(url: URL?) {
+        guard let url else { return nil }
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
+        guard sqlite3_open_v2(url.path, &handle, flags, nil) == SQLITE_OK else {
+            if let handle { sqlite3_close(handle) }
+            handle = nil
+            return nil
+        }
+        sqlite3_exec(handle, "PRAGMA query_only=ON", nil, nil, nil)
+    }
+
+    deinit {
+        for statement in statements.values { sqlite3_finalize(statement) }
+        if let handle { sqlite3_close(handle) }
+    }
+
+    func prepare() {
+        // Touch the word index while the keyboard is idle so the first typed
+        // prefix does not have to fault in the database's root pages.
+        _ = rank(of: "the")
+    }
+
+    func completions(prefix: String, limit: Int) -> [(word: String, rank: Int)] {
+        guard !prefix.isEmpty else { return [] }
+        return rows(
+            sql: "SELECT word, rank FROM words WHERE word >= ? AND word < ? ORDER BY rank LIMIT ?",
+            bindings: [.text(prefix), .text(prefix + "{"), .int(limit)]
+        ).compactMap { row in
+            guard row.count == 2, let word = row[0].text, let rank = row[1].int else { return nil }
+            return (word, rank)
+        }
+    }
+
+    func followers(after previous: String, prefix: String, limit: Int) -> [(word: String, count: Int, rank: Int)] {
+        let sql: String
+        let bindings: [Binding]
+        if prefix.isEmpty {
+            sql = """
+                SELECT b.next, b.count, COALESCE(w.rank, 100000)
+                FROM bigrams b LEFT JOIN words w ON w.word = b.next
+                WHERE b.previous = ? ORDER BY b.count DESC, COALESCE(w.rank, 100000), b.next LIMIT ?
+                """
+            bindings = [.text(previous), .int(limit)]
+        } else {
+            sql = """
+                SELECT b.next, b.count, COALESCE(w.rank, 100000)
+                FROM bigrams b LEFT JOIN words w ON w.word = b.next
+                WHERE b.previous = ? AND b.next >= ? AND b.next < ?
+                ORDER BY b.count DESC, COALESCE(w.rank, 100000), b.next LIMIT ?
+                """
+            bindings = [.text(previous), .text(prefix), .text(prefix + "{"), .int(limit)]
+        }
+        return rows(sql: sql, bindings: bindings).compactMap { row in
+            guard row.count == 3, let word = row[0].text,
+                  let count = row[1].int, let rank = row[2].int else { return nil }
+            return (word, count, rank)
+        }
+    }
+
+    func rank(of word: String) -> Int? {
+        scalarInt(sql: "SELECT rank FROM words WHERE word = ?", bindings: [.text(word)])
+    }
+
+    func count(of word: String, after previous: String) -> Int {
+        scalarInt(sql: "SELECT count FROM bigrams WHERE previous = ? AND next = ?",
+                  bindings: [.text(previous), .text(word)]) ?? 0
+    }
+
+    func correctionCandidates(for word: String) -> [String] {
+        let deleted = EnglishPredictionProvider.deletionKeys(word)
+        let deletionLookups = [word] + deleted
+        let deletionMarks = Array(repeating: "?", count: deletionLookups.count).joined(separator: ",")
+        let wordMarks = Array(repeating: "?", count: deleted.count).joined(separator: ",")
+        var sql = "SELECT word FROM deletions WHERE deletion IN (\(deletionMarks))"
+        var bindings = deletionLookups.map(Binding.text)
+        if !deleted.isEmpty {
+            sql += " UNION SELECT word FROM words WHERE word IN (\(wordMarks))"
+            bindings += deleted.map(Binding.text)
+        }
+        return rows(sql: sql, bindings: bindings).compactMap { $0.first?.text }
+    }
+
+    func emoji(for token: String) -> [String] {
+        rows(
+            sql: "SELECT emoji FROM emoji WHERE token = ? ORDER BY ordinal LIMIT 2",
+            bindings: [.text(token)]
+        ).compactMap { $0.first?.text }
+    }
+
+    private enum Binding {
+        case text(String)
+        case int(Int)
+    }
+
+    private enum Value {
+        case text(String)
+        case int(Int)
+
+        var text: String? { if case let .text(value) = self { return value }; return nil }
+        var int: Int? { if case let .int(value) = self { return value }; return nil }
+    }
+
+    private func scalarInt(sql: String, bindings: [Binding]) -> Int? {
+        rows(sql: sql, bindings: bindings).first?.first?.int
+    }
+
+    private func rows(sql: String, bindings: [Binding]) -> [[Value]] {
+        guard let handle else { return [] }
+        let statement: OpaquePointer
+        if let cached = statements[sql] {
+            statement = cached
+        } else {
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &prepared, nil) == SQLITE_OK,
+                  let prepared else { return [] }
+            if statements.count >= 32, let key = statements.keys.first,
+               let old = statements.removeValue(forKey: key) {
+                sqlite3_finalize(old)
+            }
+            statements[sql] = prepared
+            statement = prepared
+        }
+        defer {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+        }
+        for (offset, binding) in bindings.enumerated() {
+            let index = Int32(offset + 1)
+            switch binding {
+            case let .text(value):
+                sqlite3_bind_text(statement, index, value, -1, transient)
+            case let .int(value):
+                sqlite3_bind_int64(statement, index, sqlite3_int64(value))
+            }
+        }
+        var result: [[Value]] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            var row: [Value] = []
+            for column in 0..<sqlite3_column_count(statement) {
+                if sqlite3_column_type(statement, column) == SQLITE_INTEGER {
+                    row.append(.int(Int(sqlite3_column_int64(statement, column))))
+                } else if let text = sqlite3_column_text(statement, column) {
+                    row.append(.text(String(cString: text)))
+                }
+            }
+            result.append(row)
+        }
+        return result
+    }
+}
+
 /// All model operations run on the prediction worker. The lock also permits
 /// standalone tests and persistence callbacks without exposing mutable state.
 final class EnglishPredictionProvider: SinhalaPredictionProviding {
     let identifier = "english-wordfreq-v1"
     private let lock = NSLock()
-    private let wordURL: URL?
-    private let nextURL: URL?
-    private let emojiURL: URL?
+    private let database: EnglishPredictionDatabase?
     private let defaults: UserDefaults
-    private var loaded = false
-    private var words: [String] = []
-    private var ranks: [String: Int] = [:]
-    private var deletions: [String: [String]] = [:]
-    private var followers: [String: [String: Int]] = [:]
-    private var emojiTokens: [String: [String]] = [:]
     private var learned: [String: Int]
     private var learnedNext: [String: [String: Int]]
     private var cache: [SinhalaPredictionRequest: [SinhalaPredictionCandidate]] = [:]
     private var cacheOrder: [SinhalaPredictionRequest] = []
     private var persistence: DispatchWorkItem?
+    private var hasUnsavedLearning = false
     private static let wordsKey = "prediction.english.words.v1"
     private static let nextKey = "prediction.english.followers.v1"
 
-    init(wordURL: URL? = Bundle.main.url(forResource: "english_wordfreq_25000", withExtension: "json"),
-         nextURL: URL? = Bundle.main.url(forResource: "english_next_word_model", withExtension: "tsv"),
-         emojiURL: URL? = Bundle.main.url(forResource: "EmojiSearchIndex", withExtension: "json"),
+    init(databaseURL: URL? = Bundle.main.url(forResource: "EnglishPrediction", withExtension: "sqlite3"),
          defaults: UserDefaults = KeyboardPreferences.defaults) {
-        self.wordURL = wordURL; self.nextURL = nextURL; self.emojiURL = emojiURL; self.defaults = defaults
+        database = EnglishPredictionDatabase(url: databaseURL)
+        self.defaults = defaults
         learned = defaults.dictionary(forKey: Self.wordsKey) as? [String: Int] ?? [:]
         learnedNext = defaults.dictionary(forKey: Self.nextKey) as? [String: [String: Int]] ?? [:]
     }
@@ -80,68 +240,25 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         return word == "i" ? "I" : word
     }
 
-    func prepareIfNeeded() { lock.lock(); defer { lock.unlock() }; load() }
-
-    private func load() {
-        guard !loaded else { return }; loaded = true
-        if let wordURL, let data = try? Data(contentsOf: wordURL, options: .mappedIfSafe),
-           let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[Any]] {
-            for (rank, row) in rows.enumerated() {
-                guard let word = (row.first as? String)?.lowercased(), Self.isWord(word), ranks[word] == nil else { continue }
-                ranks[word] = rank
-            }
-        }
-        words = ranks.keys.sorted()
-        for word in words where word.count >= 2 {
-            for key in Set(Self.deletionKeys(word)) { deletions[key, default: []].append(word) }
-        }
-        if let nextURL, let text = try? String(contentsOf: nextURL, encoding: .utf8) {
-            for row in text.split(separator: "\n") {
-                let fields = row.split(separator: "\t")
-                guard fields.count == 3 else { continue }
-                let previous = fields[0].lowercased(), next = fields[1].lowercased()
-                guard Self.isWord(previous), Self.isWord(next), let count = Int(fields[2]) else { continue }
-                followers[previous, default: [:]][next] = max(followers[previous]?[next] ?? 0, count)
-            }
-        }
-        // Same conversational additions as Android.
-        let conversation = ["hello": ["how": 50000, "there": 42000, "everyone": 16000],
-                            "hi": ["how": 45000, "there": 38000], "how": ["are": 55000, "do": 40000],
-                            "thank": ["you": 60000], "good": ["morning": 30000, "night": 30000, "afternoon": 18000]]
-        if !words.isEmpty {
-            for (previous, values) in conversation {
-                for (next, count) in values where followers[previous]?[next] == nil {
-                    followers[previous, default: [:]][next] = max(followers[previous]?[next] ?? 0, count)
-                }
-            }
-        }
-        if let emojiURL, let data = try? Data(contentsOf: emojiURL),
-           let entries = try? JSONDecoder().decode([String: [String]].self, from: data) {
-            for emoji in entries.keys.sorted() {
-                for phrase in entries[emoji] ?? [] where !phrase.hasPrefix("akshara-") {
-                    for token in phrase.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
-                        where token.count >= 2 && Self.isWord(token) {
-                        if !emojiTokens[token, default: []].contains(emoji) { emojiTokens[token, default: []].append(emoji) }
-                    }
-                }
-            }
-        }
-    }
+    func prepareIfNeeded() { lock.lock(); defer { lock.unlock() }; database?.prepare() }
 
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate] {
-        lock.lock(); defer { lock.unlock() }; load()
+        lock.lock(); defer { lock.unlock() }
         guard request.maximumResults > 0 else { return [] }
         if let cached = cache[request] { return cached }
         let prefix = request.composingText.lowercased()
         guard prefix.isEmpty || Self.isWord(prefix) else { return [] }
         let previous = request.precedingWords.last?.lowercased() ?? ""
-        let localNext = learnedNext[previous] ?? [:], bundledNext = followers[previous] ?? [:]
+        let localNext = learnedNext[previous] ?? [:]
+        let bundled = database?.followers(after: previous, prefix: prefix, limit: 48) ?? []
+        let bundledNext = Dictionary(uniqueKeysWithValues: bundled.map { ($0.word, $0.count) })
+        var bundledRanks = Dictionary(uniqueKeysWithValues: bundled.map { ($0.word, $0.rank) })
         var pool = Set(localNext.keys).union(bundledNext.keys).union(learned.keys)
         if !prefix.isEmpty {
-            var low = 0, high = words.count
-            while low < high { let mid = (low + high) / 2; if words[mid] < prefix { low = mid + 1 } else { high = mid } }
-            var index = low
-            while index < words.count && words[index].hasPrefix(prefix) { pool.insert(words[index]); index += 1 }
+            for completion in database?.completions(prefix: prefix, limit: 48) ?? [] {
+                pool.insert(completion.word)
+                bundledRanks[completion.word] = completion.rank
+            }
         } else {
             // No generic opener rail. Empty-prefix results require context.
             pool = Set(localNext.keys).union(bundledNext.keys)
@@ -149,9 +266,13 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         var ranked: [SinhalaPredictionCandidate] = []
         for word in pool where word.hasPrefix(prefix) {
             let personalContext = Double(localNext[word, default: 0]) * 100_000_000.0
-            let corpusContext = Double(bundledNext[word, default: 0]) * 1_000.0
+            // A learned word may rank above the SQL shortlist. Preserve its
+            // corpus score even if it was outside the first 48 followers.
+            let count = bundledNext[word] ?? database?.count(of: word, after: previous) ?? 0
+            let corpusContext = Double(count) * 1_000.0
             let personalFrequency = Double(learned[word, default: 0]) * 100.0
-            let frequency = 1.0 / Double(ranks[word, default: 100_000] + 1)
+            let rank = bundledRanks[word] ?? database?.rank(of: word) ?? 100_000
+            let frequency = 1.0 / Double(rank + 1)
             ranked.append(.init(text: Self.cased(word, like: request.composingText),
                                 score: personalContext + corpusContext + personalFrequency + frequency))
         }
@@ -163,16 +284,12 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     }
 
     func correction(for source: String) -> String? {
-        lock.lock(); defer { lock.unlock() }; load()
+        lock.lock(); defer { lock.unlock() }
         let word = source.lowercased()
-        guard word.count >= 3, Self.isWord(word), ranks[word] == nil, learned[word] == nil,
+        guard word.count >= 3, Self.isWord(word), database?.rank(of: word) == nil, learned[word] == nil,
               source == word || source == source.uppercased() || source == Self.cased(word, like: "A"),
               !KeyboardPreferences.isAutocorrectProtected(word) else { return nil }
-        var pool = Set(deletions[word] ?? [])
-        for key in Self.deletionKeys(word) {
-            pool.formUnion(deletions[key] ?? [])
-            if ranks[key] != nil { pool.insert(key) }
-        }
+        let pool = Set(database?.correctionCandidates(for: word) ?? [])
         // Never truncate the index before counting: that can make an ambiguous
         // typo appear to have a unique correction.
         let matches = pool.filter { Self.oneEdit(word, $0) }
@@ -180,7 +297,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         return Self.cased(match, like: source)
     }
 
-    private static func deletionKeys(_ word: String) -> [String] {
+    fileprivate static func deletionKeys(_ word: String) -> [String] {
         let chars = Array(word)
         return chars.indices.map { index in String(chars[..<index] + chars[(index + 1)...]) }
     }
@@ -197,9 +314,11 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     }
 
     func emoji(for prefix: String, bestWord: String?) -> [String] {
-        lock.lock(); defer { lock.unlock() }; load()
+        lock.lock(); defer { lock.unlock() }
         guard prefix.count >= 2 else { return [] }
-        return Array((emojiTokens[prefix.lowercased()] ?? emojiTokens[bestWord?.lowercased() ?? ""] ?? []).prefix(2))
+        let exact = database?.emoji(for: prefix.lowercased()) ?? []
+        if !exact.isEmpty { return exact }
+        return database?.emoji(for: bestWord?.lowercased() ?? "") ?? []
     }
 
     func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
@@ -222,6 +341,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         lock.lock(); defer { lock.unlock() }
         let word = source.lowercased()
         guard Self.isWord(word) else { return }
+        hasUnsavedLearning = true
         learned[word] = min(10000, learned[word, default: 0] + boost)
         if let previous = previous?.lowercased(), Self.isWord(previous) {
             learnedNext[previous, default: [:]][word] = min(10000, (learnedNext[previous]?[word] ?? 0) + boost)
@@ -245,6 +365,8 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     func flushPendingPersistence() {
         lock.lock(); defer { lock.unlock() }
         persistence?.cancel(); persistence = nil
+        guard hasUnsavedLearning else { return }
         defaults.set(learned, forKey: Self.wordsKey); defaults.set(learnedNext, forKey: Self.nextKey)
+        hasUnsavedLearning = false
     }
 }
