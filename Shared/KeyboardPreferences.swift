@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Preferences shared by the containing app and the keyboard extension.
 /// Both targets require the same App Group entitlement for this store.
@@ -133,6 +134,7 @@ enum KeyboardPreferences {
     static let hapticsKey = "keyboardHapticsEnabled"
     static let fullAccessKey = "keyboardFullAccessConfirmed"
     static let suggestionsKey = "keyboardSuggestionsEnabled"
+    static let spaceAcceptsSuggestionKey = "keyboardSpaceAcceptsSuggestionEnabled"
     static let autocorrectKey = "keyboardAutocorrectEnabled"
     static let autocorrectProtectedWordsKey = "keyboardAutocorrectProtectedWords.v1"
     static let autocorrectReversalCountsKey = "keyboardAutocorrectReversalCounts.v1"
@@ -148,6 +150,7 @@ enum KeyboardPreferences {
     static let activeLanguageKey = "keyboardActiveLanguage"
     static let englishForOneWordKey = "englishForOneWordEnabled"
     static let characterPreviewKey = "characterPreviewEnabled"
+    static let hideDottedCirclesKey = "keyboardHideDottedCirclesEnabled"
     static let keySpacingKey = "keyboardKeySpacing"
     static let oneHandedPositionKey = "keyboardOneHandedPosition"
     static let hapticStrengthKey = "keyboardHapticStrength"
@@ -174,6 +177,7 @@ enum KeyboardPreferences {
         var keySpacingHorizontalGap = 6.0
         var longPressPunctuationEnabled = true
         var characterPreviewEnabled = false
+        var hideDottedCirclesEnabled = false
         var doubleSpacePeriodEnabled = true
         var smartQuotesEnabled = true
         var smartPunctuationSpacingEnabled = true
@@ -182,6 +186,7 @@ enum KeyboardPreferences {
         var showTouchAreas = false
         var predictiveTouchAreas = false
         var suggestionsEnabled = true
+        var spaceAcceptsSuggestionEnabled = false
         var autocorrectEnabled = false
         var emojiSuggestionsEnabled = false
         var emojiSkinTone = EmojiSkinTone.standard
@@ -214,6 +219,7 @@ enum KeyboardPreferences {
             keySpacingHorizontalGap: spacing.horizontalGap,
             longPressPunctuationEnabled: longPressPunctuationEnabled(),
             characterPreviewEnabled: characterPreviewEnabled(),
+            hideDottedCirclesEnabled: hideDottedCirclesEnabled(),
             doubleSpacePeriodEnabled: doubleSpacePeriodEnabled(),
             smartQuotesEnabled: smartQuotesEnabled(),
             smartPunctuationSpacingEnabled: smartPunctuationSpacingEnabled(),
@@ -222,6 +228,7 @@ enum KeyboardPreferences {
             showTouchAreas: showTouchAreas(),
             predictiveTouchAreas: predictiveTouchAreas(),
             suggestionsEnabled: suggestionsEnabled(),
+            spaceAcceptsSuggestionEnabled: spaceAcceptsSuggestionEnabled(),
             autocorrectEnabled: autocorrectEnabled(),
             emojiSuggestionsEnabled: emojiSuggestionsEnabled(),
             emojiSkinTone: emojiSkinTone()
@@ -294,6 +301,14 @@ enum KeyboardPreferences {
 
     static func setSuggestionsEnabled(_ enabled: Bool) {
         persist(enabled, forKey: suggestionsKey)
+    }
+
+    static func spaceAcceptsSuggestionEnabled() -> Bool {
+        defaults.object(forKey: spaceAcceptsSuggestionKey) as? Bool ?? false
+    }
+
+    static func setSpaceAcceptsSuggestionEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: spaceAcceptsSuggestionKey)
     }
 
     /// Conservative spelling replacement is intentionally opt-in. It remains
@@ -479,6 +494,14 @@ enum KeyboardPreferences {
         persist(enabled, forKey: characterPreviewKey)
     }
 
+    static func hideDottedCirclesEnabled() -> Bool {
+        defaults.object(forKey: hideDottedCirclesKey) as? Bool ?? false
+    }
+
+    static func setHideDottedCirclesEnabled(_ enabled: Bool) {
+        persist(enabled, forKey: hideDottedCirclesKey)
+    }
+
     static func keySpacing() -> KeySpacing { enumValue(forKey: keySpacingKey, default: .standard) }
     static func setKeySpacing(_ value: KeySpacing) { persist(value.rawValue, forKey: keySpacingKey) }
 
@@ -523,16 +546,53 @@ enum KeyboardPreferences {
         persist(unlocked, forKey: developerModeUnlockedKey)
     }
 
-    /// Clears user-facing keyboard preferences while leaving Full Access
-    /// confirmation alone (that bit is written by the extension).
+    static let learningResetKey = "prediction.resetGeneration.v1"
+    static let learnedDataKeys = [
+        "prediction.learnedWords.v1", "prediction.learnedBigrams.v1", "prediction.recency.v1",
+        "prediction.english.words.v1", "prediction.english.followers.v1"
+    ]
+
+    /// Serialize deletion with extension saves so an in-flight save cannot
+    /// restore erased words. Only persistence uses this lock, never key input.
+    @discardableResult
+    static func withLearningPersistenceLock(_ action: () -> Void) -> Bool {
+#if os(iOS)
+        let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)
+            ?? FileManager.default.temporaryDirectory
+#else
+        let directory = FileManager.default.temporaryDirectory
+#endif
+        let path = directory.appendingPathComponent("akshara-learning.lock").path
+        let descriptor = open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else { return false }
+        defer { flock(descriptor, LOCK_UN) }
+        action()
+        return true
+    }
+
+    /// The generation invalidates live providers, cached rankings and saves.
+    @discardableResult
+    static func clearLearnedWords(in store: UserDefaults = defaults) -> Bool {
+        withLearningPersistenceLock {
+            store.synchronize()
+            store.set(UUID().uuidString, forKey: learningResetKey)
+            for key in learnedDataKeys { store.removeObject(forKey: key) }
+            // Flush inside the interprocess lock before another provider saves.
+            store.synchronize()
+        }
+    }
+
+    /// Resets settings; learned words have their own explicit deletion action.
     static func resetToDefaults() {
         let store = defaults
         let keys = [
-            layoutKey, emojiKey, hapticsKey, suggestionsKey, autocorrectKey, autocorrectProtectedWordsKey, autocorrectReversalCountsKey, emojiSuggestionsKey,
+            layoutKey, emojiKey, hapticsKey, suggestionsKey, spaceAcceptsSuggestionKey, autocorrectKey, autocorrectProtectedWordsKey, autocorrectReversalCountsKey, emojiSuggestionsKey,
             clipboardHistoryKey,
             predictionProviderKey, doubleSpacePeriodKey, numberRowKey, topRowKey,
             longPressPunctuationKey, smartQuotesKey, smartPunctuationSpacingKey,
-            englishKeyboardKey, activeLanguageKey, englishForOneWordKey, characterPreviewKey, keySpacingKey,
+            englishKeyboardKey, activeLanguageKey, englishForOneWordKey, characterPreviewKey, hideDottedCirclesKey, keySpacingKey,
             oneHandedPositionKey, hapticStrengthKey, keyClicksKey, deleteRepeatSpeedKey,
             appearanceKey, highContrastKey, emojiSkinToneKey, showTouchAreasKey,
             predictiveTouchAreasKey, keyboardChromeOverrideKey

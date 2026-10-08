@@ -16,3 +16,4 @@ DerivedData/
 *.xcarchive/
 *.ipa
 *.dSYM/
+*.profraw

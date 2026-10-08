@@ -1082,7 +1082,8 @@ precondition(EnglishWordContext(before: "hello", after: "") != EnglishWordContex
 do {
     let keys = [KeyboardPreferences.englishKeyboardKey, KeyboardPreferences.activeLanguageKey,
                 KeyboardPreferences.layoutKey, KeyboardPreferences.autocorrectProtectedWordsKey,
-                KeyboardPreferences.autocorrectReversalCountsKey]
+                KeyboardPreferences.autocorrectReversalCountsKey,
+                KeyboardPreferences.spaceAcceptsSuggestionKey]
     let original = Dictionary(uniqueKeysWithValues: keys.map { ($0, KeyboardPreferences.defaults.object(forKey: $0)) })
     defer {
         for key in keys {
@@ -1093,6 +1094,13 @@ do {
     }
     keys.forEach { KeyboardPreferences.defaults.removeObject(forKey: $0) }
     precondition(!KeyboardPreferences.englishKeyboardEnabled())
+    precondition(!KeyboardPreferences.spaceAcceptsSuggestionEnabled())
+    precondition(!KeyboardPreferences.hotPath.spaceAcceptsSuggestionEnabled)
+    KeyboardPreferences.setSpaceAcceptsSuggestionEnabled(true)
+    precondition(KeyboardPreferences.spaceAcceptsSuggestionEnabled())
+    precondition(KeyboardPreferences.hotPath.spaceAcceptsSuggestionEnabled)
+    KeyboardPreferences.setSpaceAcceptsSuggestionEnabled(false)
+    precondition(!KeyboardPreferences.hotPath.spaceAcceptsSuggestionEnabled)
     precondition(KeyboardPreferences.activeLanguage() == .sinhala)
     for mode in SinhalaEngine.Mode.allCases {
         KeyboardPreferences.setSelectedMode(mode)
@@ -1197,3 +1205,84 @@ for (before, after, replacement, expected) in [
     precondition(result == expected, "Suggestion replacement damaged adjacent text: \(result)")
 }
 print("Suggestion replacement preserves adjacent words and reuses existing separators")
+
+// The Space path may only use a completed ranking for the current Sinhala
+// composition, never the visible chips left over from an asynchronous pass.
+for (typed, selected) in [("දුර", "දුරකථනය"), ("දුර", "දුර"), ("සිං", "සිංහල")] {
+    precondition(SpaceSuggestionEligibility.accepts(candidate: selected, displayedPrefix: typed,
+        displayedGeneration: 7, currentPrefix: typed, currentGeneration: 7))
+    precondition(!SpaceSuggestionEligibility.accepts(candidate: selected, displayedPrefix: typed,
+        displayedGeneration: 7, currentPrefix: typed + "ක", currentGeneration: 8))
+}
+for candidate in [nil, "", "📞", "✦ අක්ෂර", "hello"] as [String?] {
+    precondition(!SpaceSuggestionEligibility.accepts(candidate: candidate, displayedPrefix: "දුර",
+        displayedGeneration: 7, currentPrefix: "දුර", currentGeneration: 7))
+}
+precondition(!SpaceSuggestionEligibility.accepts(candidate: "දුරකථනය", displayedPrefix: nil,
+    displayedGeneration: nil, currentPrefix: "දුර", currentGeneration: 7))
+precondition(!SpaceSuggestionEligibility.accepts(candidate: "දුරකථනය", displayedPrefix: "දුර",
+    displayedGeneration: 6, currentPrefix: "දුර", currentGeneration: 7))
+precondition(!SpaceSuggestionEligibility.accepts(candidate: "දුරකථනය", displayedPrefix: "",
+    displayedGeneration: 7, currentPrefix: "", currentGeneration: 7))
+precondition(KeyboardSpaceAction.resolve(before: "දුරකථනය ", hasSelection: false,
+    compositionIsIdle: true, suggestionSpacePending: false, lastTap: 10,
+    now: 10.2, periodEnabled: true) == .replaceWithPeriod)
+print("Space suggestion preference, current-ranking eligibility, and period handoff passed")
+
+// Live caches and pending writes must not resurrect personal data after reset.
+do {
+    let resetSuite = "lk.org.akshara.learning-reset-test"
+    let store = UserDefaults(suiteName: resetSuite)!
+    store.removePersistentDomain(forName: resetSuite)
+    defer { store.removePersistentDomain(forName: resetSuite) }
+    let si = SinhalaFrequencyListPredictionProvider(modelURL: nil, nextWordURL: nil,
+        trigramURL: nil, sentenceStartURL: nil, defaults: store)
+    let en = EnglishPredictionProvider(databaseURL: nil, defaults: store)
+    let siRequest = SinhalaPredictionRequest(composingText: "දුර", precedingWords: [], maximumResults: 3)
+    let enRequest = SinhalaPredictionRequest(composingText: "zzak", precedingWords: [], maximumResults: 3)
+    si.recordCommittedWord("දුරකථනය", after: "මගේ")
+    en.recordCommittedWord("zzakshara", after: "my")
+    precondition(si.candidates(for: siRequest).contains { $0.text == "දුරකථනය" })
+    precondition(en.candidates(for: enRequest).contains { $0.text == "zzakshara" })
+    precondition(KeyboardPreferences.clearLearnedWords(in: store))
+    si.flushPendingPersistence()
+    en.flushPendingPersistence()
+    precondition(si.candidates(for: siRequest).isEmpty)
+    precondition(en.candidates(for: enRequest).isEmpty)
+    precondition(KeyboardPreferences.learnedDataKeys.allSatisfy { store.object(forKey: $0) == nil })
+    si.recordCommittedWord("දුරකථනය", after: nil)
+    en.recordCommittedWord("zzakshara", after: nil)
+    si.flushPendingPersistence()
+    en.flushPendingPersistence()
+    precondition(!si.candidates(for: siRequest).isEmpty)
+    precondition(!en.candidates(for: enRequest).isEmpty)
+}
+print("Learning reset clears both live caches and pending saves; new learning resumes")
+
+// The literal word must remain selectable even with no dictionary match or emoji.
+precondition(CandidateRailLayout.words(typed: "ගෙදරා", ranked: ["ගෙදර", "ගෙදරට", "ගෙදරින්"])
+             == ["ගෙදරා", "ගෙදර", "ගෙදරට"])
+precondition(CandidateRailLayout.words(typed: "teh", ranked: ["the", "ten", "tea"])
+             == ["teh", "the", "ten"])
+precondition(CandidateRailLayout.words(typed: "customname", ranked: []) == ["customname", nil, nil])
+precondition(CandidateRailLayout.words(typed: "word", ranked: ["word", "words", "words", "wording"])
+             == ["word", "word", "words"])
+precondition(CandidateRailLayout.words(typed: "", ranked: ["one", "two", "three"])
+             == ["two", "one", "three"])
+var withEmoji = CandidateRailLayout.words(typed: "ආදරෙ", ranked: ["ආදරය", "ආදරෙයි"])
+withEmoji[2] = nil
+precondition(withEmoji[0] == "ආදරෙ" && withEmoji[1] == "ආදරය")
+
+// One undo must prevent the same automatic replacement on the next boundary,
+// including when the user deletes and retypes the word during the session.
+var rejectedCorrections = AutocorrectionRejection()
+precondition(!rejectedCorrections.contains("ගෙදරා"))
+rejectedCorrections.reject("ගෙදරා")
+precondition(rejectedCorrections.contains("ගෙදරා"))
+precondition(!rejectedCorrections.contains("ගෙදරට"))
+rejectedCorrections.reject("Teh")
+precondition(rejectedCorrections.contains("TEH"))
+precondition(rejectedCorrections.contains("ගෙදරා"))
+rejectedCorrections.reset()
+precondition(!rejectedCorrections.contains("ගෙදරා") && !rejectedCorrections.contains("teh"))
+print("Literal suggestion slots and immediate autocorrection rejection passed")

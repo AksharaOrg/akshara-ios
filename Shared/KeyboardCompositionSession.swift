@@ -309,6 +309,49 @@ enum KeyboardSpaceAction: Equatable {
     }
 }
 
+/// A visible chip is eligible for Space only if it came from the latest
+/// completed ranking for the word still being composed.
+enum SpaceSuggestionEligibility {
+    static func accepts(candidate: String?, displayedPrefix: String?, displayedGeneration: Int?,
+                        currentPrefix: String, currentGeneration: Int) -> Bool {
+        guard let candidate, let displayedPrefix, let displayedGeneration,
+              !currentPrefix.isEmpty, displayedPrefix == currentPrefix,
+              displayedGeneration == currentGeneration else { return false }
+        return !candidate.isEmpty && candidate.unicodeScalars.allSatisfy {
+            (0x0D80...0x0DFF).contains($0.value)
+        }
+    }
+}
+
+/// Keep an explicit escape hatch for names, slang and words outside the dictionary.
+enum CandidateRailLayout {
+    static func words(typed: String, ranked: [String]) -> [String?] {
+        var seen = Set<String>()
+        let alternatives = ranked.filter { !$0.isEmpty && seen.insert($0).inserted }
+        if !typed.isEmpty {
+            // Keep an exact best match in the centre. Promoting a longer
+            // completion here would make Space replace an already-correct word.
+            return [typed, alternatives.first, alternatives.dropFirst().first(where: { $0 != typed })]
+        }
+        let next = Array(alternatives.prefix(3))
+        return [next.count > 1 ? next[1] : nil, next.first, next.count > 2 ? next[2] : nil]
+    }
+}
+
+/// An immediate undo rejects this spelling for the current editing session.
+/// Persistent learning still requires repeated reversals in preferences.
+struct AutocorrectionRejection {
+    private var words = Set<String>()
+
+    mutating func reject(_ word: String) { words.insert(word.precomposedStringWithCanonicalMapping.lowercased()) }
+
+    func contains(_ word: String) -> Bool {
+        words.contains(word.precomposedStringWithCanonicalMapping.lowercased())
+    }
+
+    mutating func reset() { words.removeAll() }
+}
+
 enum EnglishCapitalization {
     enum Mode { case none, words, sentences, allCharacters }
 

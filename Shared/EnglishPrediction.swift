@@ -219,6 +219,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     private var cacheOrder: [SinhalaPredictionRequest] = []
     private var persistence: DispatchWorkItem?
     private var hasUnsavedLearning = false
+    private var learningGeneration: String?
     private static let wordsKey = "prediction.english.words.v1"
     private static let nextKey = "prediction.english.followers.v1"
 
@@ -226,6 +227,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
          defaults: UserDefaults = KeyboardPreferences.defaults) {
         database = EnglishPredictionDatabase(url: databaseURL)
         self.defaults = defaults
+        learningGeneration = defaults.string(forKey: KeyboardPreferences.learningResetKey)
         learned = defaults.dictionary(forKey: Self.wordsKey) as? [String: Int] ?? [:]
         learnedNext = defaults.dictionary(forKey: Self.nextKey) as? [String: [String: Int]] ?? [:]
     }
@@ -240,10 +242,10 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         return word == "i" ? "I" : word
     }
 
-    func prepareIfNeeded() { lock.lock(); defer { lock.unlock() }; database?.prepare() }
+    func prepareIfNeeded() { lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked(); database?.prepare() }
 
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate] {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         guard request.maximumResults > 0 else { return [] }
         if let cached = cache[request] { return cached }
         let prefix = request.composingText.lowercased()
@@ -284,7 +286,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     }
 
     func correction(for source: String) -> String? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         let word = source.lowercased()
         guard word.count >= 3, Self.isWord(word), database?.rank(of: word) == nil, learned[word] == nil,
               source == word || source == source.uppercased() || source == Self.cased(word, like: "A"),
@@ -314,7 +316,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     }
 
     func emoji(for prefix: String, bestWord: String?) -> [String] {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         guard prefix.count >= 2 else { return [] }
         let exact = database?.emoji(for: prefix.lowercased()) ?? []
         if !exact.isEmpty { return exact }
@@ -338,7 +340,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     func recordSelection(_ word: String, after precedingWord: String?) { record(word, after: precedingWord, boost: 4) }
     func recordCommittedWord(_ word: String, after precedingWord: String?) { record(word, after: precedingWord, boost: 1) }
     private func record(_ source: String, after previous: String?, boost: Int) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         let word = source.lowercased()
         guard Self.isWord(word) else { return }
         hasUnsavedLearning = true
@@ -362,11 +364,31 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         persistence = work
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5, execute: work)
     }
+    private func synchronizeLearningResetLocked() {
+        let generation = defaults.string(forKey: KeyboardPreferences.learningResetKey)
+        guard generation != learningGeneration else { return }
+        learningGeneration = generation
+        persistence?.cancel()
+        persistence = nil
+        learned.removeAll()
+        learnedNext.removeAll()
+        cache.removeAll()
+        cacheOrder.removeAll()
+        hasUnsavedLearning = false
+    }
+
     func flushPendingPersistence() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         persistence?.cancel(); persistence = nil
         guard hasUnsavedLearning else { return }
-        defaults.set(learned, forKey: Self.wordsKey); defaults.set(learnedNext, forKey: Self.nextKey)
-        hasUnsavedLearning = false
+        KeyboardPreferences.withLearningPersistenceLock {
+            defaults.synchronize()
+            synchronizeLearningResetLocked()
+            guard hasUnsavedLearning else { return }
+            defaults.set(learned, forKey: Self.wordsKey)
+            defaults.set(learnedNext, forKey: Self.nextKey)
+            defaults.synchronize()
+            hasUnsavedLearning = false
+        }
     }
 }

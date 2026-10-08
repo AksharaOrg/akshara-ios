@@ -226,6 +226,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private var recencyClock: Int
     private var persistenceWorkItem: DispatchWorkItem?
     private var hasUnsavedLearning = false
+    private var learningGeneration: String?
     // Backspace/retyping often revisits the same prefix and context. Bound the
     // cache so the keyboard extension cannot retain an entire typing session.
     private var candidateCache: [SinhalaPredictionRequest: [SinhalaPredictionCandidate]] = [:]
@@ -245,6 +246,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         self.trigramURL = trigramURL
         self.sentenceStartURL = sentenceStartURL
         self.defaults = defaults
+        learningGeneration = defaults.string(forKey: KeyboardPreferences.learningResetKey)
         // Keep construction cheap for keyboard cold start. Bundled TSV models
         // are loaded on the first prediction request (off the main thread).
         // Only the compact personal model is read up front.
@@ -259,6 +261,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     func prepareBundledModelsIfNeeded() {
         modelLock.lock()
         defer { modelLock.unlock() }
+        synchronizeLearningResetLocked()
         loadBundledModelsLocked()
     }
 
@@ -282,6 +285,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate] {
         modelLock.lock()
         defer { modelLock.unlock() }
+        synchronizeLearningResetLocked()
         loadBundledModelsLocked()
         if let cached = candidateCache[request] { return cached }
         let prefix = request.composingText
@@ -423,6 +427,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         guard mode != .sls, !latinBuffer.isEmpty, !ranked.isEmpty else { return [:] }
         modelLock.lock()
         defer { modelLock.unlock() }
+        synchronizeLearningResetLocked()
         var scores: [String: Double] = [:]
         let currentRendered = SinhalaEngine.transliterate(latinBuffer, mode: mode)
         var rewriteCache: [String: Double] = [:]
@@ -481,12 +486,14 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     func recordSelection(_ word: String, after precedingWord: String?) {
         modelLock.lock()
         defer { modelLock.unlock() }
+        synchronizeLearningResetLocked()
         record(word, after: precedingWord, selectionBoost: 4, persistImmediately: true)
     }
 
     func recordCommittedWord(_ word: String, after precedingWord: String?) {
         modelLock.lock()
         defer { modelLock.unlock() }
+        synchronizeLearningResetLocked()
         record(word, after: precedingWord, selectionBoost: 1, persistImmediately: false)
     }
 
@@ -516,9 +523,25 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         else { schedulePersistence() }
     }
 
+    private func synchronizeLearningResetLocked() {
+        let generation = defaults.string(forKey: KeyboardPreferences.learningResetKey)
+        guard generation != learningGeneration else { return }
+        learningGeneration = generation
+        persistenceWorkItem?.cancel()
+        persistenceWorkItem = nil
+        learnedWords.removeAll()
+        learnedBigrams.removeAll()
+        recency.removeAll()
+        recencyClock = 0
+        candidateCache.removeAll()
+        cachedRequests.removeAll()
+        hasUnsavedLearning = false
+    }
+
     func flushPendingPersistence() {
         modelLock.lock()
         defer { modelLock.unlock() }
+        synchronizeLearningResetLocked()
         persistLocked()
     }
 
@@ -526,10 +549,16 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         persistenceWorkItem?.cancel()
         persistenceWorkItem = nil
         guard hasUnsavedLearning else { return }
-        defaults.set(learnedWords, forKey: learnedWordsKey)
-        defaults.set(recency, forKey: recencyKey)
-        defaults.set(learnedBigrams, forKey: learnedBigramsKey)
-        hasUnsavedLearning = false
+        KeyboardPreferences.withLearningPersistenceLock {
+            defaults.synchronize()
+            synchronizeLearningResetLocked()
+            guard hasUnsavedLearning else { return }
+            defaults.set(learnedWords, forKey: learnedWordsKey)
+            defaults.set(recency, forKey: recencyKey)
+            defaults.set(learnedBigrams, forKey: learnedBigramsKey)
+            defaults.synchronize()
+            hasUnsavedLearning = false
+        }
     }
 
     private func schedulePersistence() {

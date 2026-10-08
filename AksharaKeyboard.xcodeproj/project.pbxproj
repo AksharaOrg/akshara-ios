@@ -44,6 +44,8 @@
 		E10000000000000000000007 /* KeyboardBottomRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* KeyboardBottomRow.swift */; };
 		E10000000000000000000010 /* EnglishPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* EnglishPrediction.swift */; };
 		E10000000000000000000011 /* Resources/EnglishPrediction.sqlite3 in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */; };
+		F10000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy */; };
+		F10000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -105,6 +107,8 @@
 		E20000000000000000000005 /* Resources/english_next_word_model_attribution.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/english_next_word_model_attribution.md; sourceTree = "<group>"; };
 		E20000000000000000000006 /* KeyboardBottomRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardBottomRow.swift; sourceTree = "<group>"; };
 		E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/EnglishPrediction.sqlite3; sourceTree = "<group>"; };
+		F20000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Akshara/PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
+		F20000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = AksharaKeyboard/PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -125,6 +129,15 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		842DAE9F306987C700A4300F /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				F20000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy */,
+				F20000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
 		A40000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
@@ -132,6 +145,7 @@
 				A40000000000000000000003 /* AksharaKeyboard */,
 				A40000000000000000000004 /* Shared */,
 				A40000000000000000000005 /* Products */,
+				842DAE9F306987C700A4300F /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
@@ -279,6 +293,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000009 /* Assets.xcassets in Resources */,
+				F10000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -287,6 +302,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000010 /* EmojiSearchIndex.json in Resources */,
+				F10000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy in Resources */,
 				A10000000000000000000013 /* Resources/SinhalaFrequencyModel.tsv in Resources */,
 				E10000000000000000000005 /* Resources/english_next_word_model_attribution.md in Resources */,
 				E10000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md in Resources */,

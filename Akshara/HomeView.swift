@@ -53,7 +53,7 @@ struct HomeView: View {
                 } footer: {
                     Text(setupComplete
                         ? "Akshara is ready to use."
-                        : "Add the keyboard and allow Full Access to finish setup.")
+                        : "Add Akshara in Settings, then try it here. Full Access is optional.")
                 }
 
                 Section("Reference") {
@@ -176,12 +176,12 @@ private enum AksharaToast {
 }
 
 private enum SetupStatus {
-    static func isSinhalaKeyboardEnabled() -> Bool {
-        UITextInputMode.activeInputModes.contains { $0.primaryLanguage == "si-LK" }
-    }
+    static let confirmationKey = "aksharaSetupConfirmed"
 
+    // iOS exposes a language, not a public identifier for installed keyboards.
+    // Let the user confirm Akshara rather than misidentifying Apple's Sinhala.
     static func isComplete() -> Bool {
-        isSinhalaKeyboardEnabled() && KeyboardPreferences.fullAccessConfirmed()
+        UserDefaults.standard.bool(forKey: confirmationKey)
     }
 }
 
@@ -237,129 +237,65 @@ private extension View {
     }
 }
 
-/// Guided enable flow. Full Access can only be confirmed after the keyboard
-/// extension runs once, so step 3 includes the try field.
+/// Setup confirmation is explicit because iOS cannot identify Akshara by language.
 private struct SetupView: View {
-    @State private var keyboardEnabled = SetupStatus.isSinhalaKeyboardEnabled()
+    @AppStorage(SetupStatus.confirmationKey) private var setupConfirmed = false
     @State private var fullAccessConfirmed = KeyboardPreferences.fullAccessConfirmed()
     @State private var tryText = ""
-
-    private var setupComplete: Bool {
-        keyboardEnabled && fullAccessConfirmed
-    }
 
     var body: some View {
         Form {
             Section {
-                HStack(spacing: 12) {
-                    SettingsIcon(
-                        systemName: setupComplete ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
-                        color: setupComplete ? .systemGreen : .systemYellow
-                    )
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(setupComplete ? "Setup complete" : "Setup incomplete")
-                            .font(.body.weight(.semibold))
-                        Text(setupComplete
-                            ? "Akshara is ready to use."
-                            : "Finish the steps below.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 8)
-                    SetupStatusBadge(isComplete: setupComplete)
-                }
-            } footer: {
-                Text("Full Access is confirmed only after you open the Akshara keyboard once.")
+                Label(setupConfirmed ? "Setup confirmed" : "Set up Akshara",
+                      systemImage: setupConfirmed ? "checkmark.seal.fill" : "keyboard")
+                Text("Basic typing works without Full Access or an internet connection.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
-
-            Section {
-                stepRow(
-                    number: 1,
-                    title: "Add Akshara Keyboard",
-                    done: keyboardEnabled
-                )
+            Section("1. Add Akshara") {
                 Text("Settings → General → Keyboard → Keyboards → Add New Keyboard → Akshara")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Button("Open iOS Settings") {
-                    openSystemSettings()
-                }
-                .aksharaGlassButton(prominent: !keyboardEnabled)
+                Button("Open iOS Settings", action: openSystemSettings)
+                    .aksharaGlassButton(prominent: !setupConfirmed)
                 Link("Apple Keyboard Guide", destination: AksharaLinks.appleKeyboardGuide)
-            } header: {
-                Text("Step 1")
-            } footer: {
-                Text(keyboardEnabled
-                    ? "A Sinhala keyboard is enabled. This can also read On if Apple’s Sinhala keyboard is on."
-                    : "Return here after adding Akshara. Status updates when you come back to the app.")
             }
-
             Section {
-                stepRow(
-                    number: 2,
-                    title: "Allow Full Access",
-                    done: fullAccessConfirmed
-                )
-                Text("Settings → General → Keyboard → Keyboards → Akshara → Allow Full Access")
+                Text("Tap the field, hold the globe key, and select Akshara. Type a few characters to check it works.")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Button("Open iOS Settings") {
-                    openSystemSettings()
-                }
-                .aksharaGlassButton(prominent: keyboardEnabled && !fullAccessConfirmed)
-                .disabled(!keyboardEnabled)
-            } header: {
-                Text("Step 2")
-            } footer: {
-                Text(fullAccessConfirmed
-                    ? "Full Access is confirmed."
-                    : "Required for shared settings and haptics. Apple shows a system warning when you enable it.")
-            }
-
-            Section {
-                stepRow(
-                    number: 3,
-                    title: "Open Akshara Once",
-                    done: fullAccessConfirmed
-                )
-                Text("Tap the field below, then use the globe key to select Akshara. Opening it once lets the app confirm Full Access.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
                 TextField("Type here to try Akshara…", text: $tryText, axis: .vertical)
                     .lineLimit(3...6)
-                    .disabled(!keyboardEnabled)
+                Toggle("I selected and tested Akshara", isOn: $setupConfirmed)
             } header: {
-                Text("Step 3")
+                Text("2. Try the Keyboard")
             } footer: {
-                Text(fullAccessConfirmed
-                    ? "Akshara has run with Full Access. You can keep typing here to try the keyboard."
-                    : "After enabling Full Access, switch to Akshara in this field, then return to this screen.")
+                Text("iOS does not let this app distinguish Akshara from other Sinhala keyboards. Confirm setup after selecting Akshara yourself.")
+            }
+            Section {
+                Text("Full Access enables shared settings, haptics, and optional Clipboard History. You can keep it off and use basic typing.")
+                    .font(.footnote)
+                Text("Settings → General → Keyboard → Keyboards → Akshara → Allow Full Access")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("Open iOS Settings", action: openSystemSettings)
+                    .aksharaGlassButton(prominent: false)
+                if fullAccessConfirmed {
+                    Text("Full Access was confirmed the last time Akshara opened. Settings shows its current status.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Optional: Full Access")
+            } footer: {
+                Text("Apple shows a system warning. Akshara processes typing on your device and does not transmit it.")
             }
         }
         .navigationTitle("Set Up")
         .navigationBarTitleDisplayMode(.inline)
         .aksharaFormChrome()
         .onAppear(perform: refresh)
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-            refresh()
-        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in refresh() }
     }
 
     private func refresh() {
         KeyboardPreferences.reload()
-        keyboardEnabled = SetupStatus.isSinhalaKeyboardEnabled()
         fullAccessConfirmed = KeyboardPreferences.fullAccessConfirmed()
-    }
-
-    private func stepRow(number: Int, title: String, done: Bool) -> some View {
-        HStack {
-            Text("\(number). \(title)")
-            Spacer()
-            Image(systemName: done ? "checkmark.circle.fill" : "circle")
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(done ? Color.green : Color.secondary)
-                .accessibilityLabel(done ? "\(title) complete" : "\(title) incomplete")
-        }
     }
 }
 
@@ -497,11 +433,15 @@ private struct SettingLabel: View {
 }
 
 private struct KeyboardSettingsView: View {
+    @State private var confirmClearLearnedWords = false
+    @State private var clearingLearnedWords = false
+    @State private var clearLearningFailed = false
     @State private var showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
     @State private var mode = KeyboardPreferences.selectedMode()
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
     @State private var emojiSkinTone = KeyboardPreferences.emojiSkinTone()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
+    @State private var spaceAcceptsSuggestionEnabled = KeyboardPreferences.spaceAcceptsSuggestionEnabled()
     @State private var autocorrectEnabled = KeyboardPreferences.autocorrectEnabled()
     @State private var emojiSuggestionsEnabled = KeyboardPreferences.emojiSuggestionsEnabled()
     @State private var doubleSpacePeriodEnabled = KeyboardPreferences.doubleSpacePeriodEnabled()
@@ -512,6 +452,7 @@ private struct KeyboardSettingsView: View {
     @State private var englishKeyboardEnabled = KeyboardPreferences.englishKeyboardEnabled()
     @State private var englishForOneWordEnabled = KeyboardPreferences.englishForOneWordEnabled()
     @State private var characterPreviewEnabled = KeyboardPreferences.characterPreviewEnabled()
+    @State private var hideDottedCirclesEnabled = KeyboardPreferences.hideDottedCirclesEnabled()
     @State private var keySpacing = KeyboardPreferences.keySpacing()
     @State private var oneHandedPosition = KeyboardPreferences.oneHandedPosition()
     @State private var appearance = KeyboardPreferences.appearance()
@@ -530,6 +471,26 @@ private struct KeyboardSettingsView: View {
                 developerSection
             }
         }
+        .confirmationDialog("Clear Learned Words?", isPresented: $confirmClearLearnedWords, titleVisibility: .visible) {
+            Button("Clear Learned Words", role: .destructive) {
+                clearingLearnedWords = true
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let cleared = KeyboardPreferences.clearLearnedWords()
+                    DispatchQueue.main.async {
+                        clearingLearnedWords = false
+                        clearLearningFailed = !cleared
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes words and word pairs learned in Sinhala and English. The bundled dictionaries and your settings stay available.")
+        }
+        .alert("Could Not Clear Learned Words", isPresented: $clearLearningFailed) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Please try again after closing the keyboard.")
+        }
         .navigationTitle("Keyboard Settings")
         .aksharaFormChrome()
         .onAppear {
@@ -538,14 +499,17 @@ private struct KeyboardSettingsView: View {
             emojiEnabled = KeyboardPreferences.emojiEnabled()
             emojiSkinTone = KeyboardPreferences.emojiSkinTone()
             suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
+            spaceAcceptsSuggestionEnabled = KeyboardPreferences.spaceAcceptsSuggestionEnabled()
             autocorrectEnabled = KeyboardPreferences.autocorrectEnabled()
             englishKeyboardEnabled = KeyboardPreferences.englishKeyboardEnabled()
+            hideDottedCirclesEnabled = KeyboardPreferences.hideDottedCirclesEnabled()
             showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
         }
         .onChange(of: mode) { KeyboardPreferences.setSelectedMode($0) }
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
         .onChange(of: emojiSkinTone) { KeyboardPreferences.setEmojiSkinTone($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
+        .onChange(of: spaceAcceptsSuggestionEnabled) { KeyboardPreferences.setSpaceAcceptsSuggestionEnabled($0) }
         .onChange(of: autocorrectEnabled) { KeyboardPreferences.setAutocorrectEnabled($0) }
         .onChange(of: emojiSuggestionsEnabled) { KeyboardPreferences.setEmojiSuggestionsEnabled($0) }
         .onChange(of: doubleSpacePeriodEnabled) { KeyboardPreferences.setDoubleSpacePeriodEnabled($0) }
@@ -556,6 +520,7 @@ private struct KeyboardSettingsView: View {
         .onChange(of: englishKeyboardEnabled) { KeyboardPreferences.setEnglishKeyboardEnabled($0) }
         .onChange(of: englishForOneWordEnabled) { KeyboardPreferences.setEnglishForOneWordEnabled($0) }
         .onChange(of: characterPreviewEnabled) { KeyboardPreferences.setCharacterPreviewEnabled($0) }
+        .onChange(of: hideDottedCirclesEnabled) { KeyboardPreferences.setHideDottedCirclesEnabled($0) }
         .onChange(of: keySpacing) { KeyboardPreferences.setKeySpacing($0) }
         .onChange(of: oneHandedPosition) { KeyboardPreferences.setOneHandedPosition($0) }
         .onChange(of: appearance) { KeyboardPreferences.setAppearance($0) }
@@ -646,6 +611,12 @@ private struct KeyboardSettingsView: View {
 
     private var typingSection: some View {
         Section {
+            Button(clearingLearnedWords ? "Clearing Learned Words…" : "Clear Learned Words", role: .destructive) { confirmClearLearnedWords = true }
+                .disabled(clearingLearnedWords)
+
+            Toggle(isOn: $spaceAcceptsSuggestionEnabled) {
+                SettingLabel(title: "Space Accepts Suggestion", detail: "Press Space to use the centre suggestion while typing.", icon: "text.badge.plus", color: .systemIndigo)
+            }
             Toggle(isOn: $characterPreviewEnabled) {
                 SettingLabel(title: "Character Preview", detail: "Enlarges the pressed key", icon: "textformat.size", color: .systemBlue)
             }
@@ -741,6 +712,9 @@ private struct KeyboardSettingsView: View {
             .pickerStyle(.navigationLink)
             Toggle(isOn: $highContrastEnabled) {
                 SettingLabel(title: "Higher Key Contrast", detail: "Stronger key borders and fills", icon: "circle.lefthalf.striped.horizontal.inverse", color: .systemBrown)
+            }
+            Toggle(isOn: $hideDottedCirclesEnabled) {
+                SettingLabel(title: "Hide Dotted Circles", detail: "Use clean Sinhala mark icons on keys and previews", icon: "circle.dotted", color: .systemBlue)
             }
         }
     }
@@ -940,12 +914,12 @@ private struct PrivacyPolicyView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Clipboard History") {
-                Text("When enabled in Keyboard Settings, Akshara saves copied text while the keyboard is open. iOS may ask you to allow pasting from other apps. You can choose Always Allow under Settings → Akshara → Paste from Other Apps so the keyboard stops asking every time. Pin important clips from the keyboard; they stay until you delete them manually.")
+                Text("When enabled in Keyboard Settings, Akshara saves copied text while the keyboard is open. iOS may ask you to allow pasting from other apps. You can choose Always Allow under Settings → Akshara → Paste from Other Apps so the keyboard stops asking every time. Recent history retains up to 10 clips; newer clips replace older ones. Pin important clips from the keyboard; they stay until you delete them manually. You can delete individual clips or clear history in Keyboard Settings. Turning Clipboard History off stops capture but does not erase saved clips.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
             Section("Predictions") {
-                Text("Word suggestions use compact models bundled with the app. Source corpora are not included and never leave your device.")
+                Text("Word suggestions use bundled models and words and word pairs learned from your typing and suggestion selections. Learned data stays on your device until you clear it in Keyboard Settings → Clear Learned Words. Clearing also invalidates cached predictions and pending saves. Typing can learn new words afterwards. Reset Keyboard Settings does not clear learned words.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
