@@ -190,6 +190,13 @@ enum KeyboardPreferences {
         var autocorrectEnabled = false
         var emojiSuggestionsEnabled = false
         var emojiSkinTone = EmojiSkinTone.standard
+        var clipboardHistoryEnabled = false
+        var emojiEnabled = true
+        var oneHandedPosition = OneHandedPosition.centered
+        var topRow = TopRow.disabled
+        var appearance = Appearance.system
+        var keyboardChromeOverride = KeyboardChromeOverride.automatic
+        var englishForOneWordEnabled = true
     }
 
     private(set) static var hotPath = HotPathCache()
@@ -209,6 +216,7 @@ enum KeyboardPreferences {
     }
 
     static func refreshHotPathCache() {
+        refreshProtectedWords()
         let spacing = keySpacing()
         let strength = hapticStrength()
         hotPath = HotPathCache(
@@ -231,7 +239,14 @@ enum KeyboardPreferences {
             spaceAcceptsSuggestionEnabled: spaceAcceptsSuggestionEnabled(),
             autocorrectEnabled: autocorrectEnabled(),
             emojiSuggestionsEnabled: emojiSuggestionsEnabled(),
-            emojiSkinTone: emojiSkinTone()
+            emojiSkinTone: emojiSkinTone(),
+            clipboardHistoryEnabled: clipboardHistoryEnabled(),
+            emojiEnabled: emojiEnabled(),
+            oneHandedPosition: oneHandedPosition(),
+            topRow: topRow(),
+            appearance: appearance(),
+            keyboardChromeOverride: keyboardChromeOverride(),
+            englishForOneWordEnabled: englishForOneWordEnabled()
         )
     }
 
@@ -321,9 +336,29 @@ enum KeyboardPreferences {
         persist(enabled, forKey: autocorrectKey)
     }
 
+    private static let protectionLock = NSLock()
+    private static var protectedWords: Set<String>?
+    private static var protectionRevision = 0
+
+    static var protectedWordRevision: Int {
+        protectionLock.lock(); defer { protectionLock.unlock() }
+        return protectionRevision
+    }
+
+    private static func refreshProtectedWords() {
+        let words = Set((defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []).map(normalizedProtectedWord))
+        protectionLock.lock(); defer { protectionLock.unlock() }
+        if protectedWords != words { protectedWords = words; protectionRevision += 1 }
+    }
+
     static func isAutocorrectProtected(_ word: String) -> Bool {
         guard !word.isEmpty else { return false }
-        return Set((defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []).map(normalizedProtectedWord)).contains(normalizedProtectedWord(word))
+        protectionLock.lock()
+        let loaded = protectedWords != nil
+        protectionLock.unlock()
+        if !loaded { refreshProtectedWords() }
+        protectionLock.lock(); defer { protectionLock.unlock() }
+        return protectedWords?.contains(normalizedProtectedWord(word)) == true
     }
 
     static func autocorrectProtectedWords() -> [String] {
@@ -338,6 +373,7 @@ enum KeyboardPreferences {
         words.removeAll { normalizedProtectedWord($0) == normalized }
         words.insert(normalized, at: 0)
         defaults.set(Array(words.prefix(512)), forKey: autocorrectProtectedWordsKey)
+        refreshProtectedWords()
         var counts = defaults.dictionary(forKey: autocorrectReversalCountsKey) as? [String: Int] ?? [:]
         counts.removeValue(forKey: normalized)
         defaults.set(counts, forKey: autocorrectReversalCountsKey)
@@ -347,6 +383,7 @@ enum KeyboardPreferences {
         var words = defaults.stringArray(forKey: autocorrectProtectedWordsKey) ?? []
         words.removeAll { normalizedProtectedWord($0) == normalizedProtectedWord(word) }
         defaults.set(words, forKey: autocorrectProtectedWordsKey)
+        refreshProtectedWords()
     }
 
     /// A reversal can happen accidentally while editing. Only protect a word

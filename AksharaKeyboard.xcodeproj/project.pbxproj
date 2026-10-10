@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B10000000000000000000001 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
+		B10000000000000000000002 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
 		A10000000000000000000001 /* AksharaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AksharaApp.swift */; };
 		A10000000000000000000002 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* HomeView.swift */; };
 		A10000000000000000000003 /* SinhalaEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SinhalaEngine.swift */; };
@@ -73,6 +75,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B20000000000000000000001 /* KeyboardRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRuntime.swift; sourceTree = "<group>"; };
 		A20000000000000000000001 /* AksharaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AksharaApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* SinhalaEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaEngine.swift; sourceTree = "<group>"; };
@@ -188,6 +191,7 @@
 		A40000000000000000000004 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				B20000000000000000000001 /* KeyboardRuntime.swift */,
 				A20000000000000000000003 /* SinhalaEngine.swift */,
 				A20000000000000000000009 /* KeyboardPreferences.swift */,
 				A20000000000000000000025 /* ClipboardHistoryStore.swift */,
@@ -327,6 +331,7 @@
 				A10000000000000000000002 /* HomeView.swift in Sources */,
 				A10000000000000000000021 /* CrashReportManager.swift in Sources */,
 				A10000000000000000000003 /* SinhalaEngine.swift in Sources */,
+				B10000000000000000000001 /* KeyboardRuntime.swift in Sources */,
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
 				A1000000000000000000001D /* ClipboardHistoryStore.swift in Sources */,
 				A10000000000000000000011 /* SinhalaPrediction.swift in Sources */,
@@ -345,6 +350,7 @@
 			files = (
 				A10000000000000000000004 /* KeyboardViewController.swift in Sources */,
 				A10000000000000000000005 /* SinhalaEngine.swift in Sources */,
+				B10000000000000000000002 /* KeyboardRuntime.swift in Sources */,
 				A10000000000000000000008 /* KeyboardPreferences.swift in Sources */,
 				A1000000000000000000001E /* ClipboardHistoryStore.swift in Sources */,
 				A10000000000000000000012 /* SinhalaPrediction.swift in Sources */,

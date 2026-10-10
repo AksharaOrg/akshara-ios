@@ -1,6 +1,45 @@
 import Foundation
 import SQLite3
 
+// Operation-scoped snapshots reuse nil as well as text; every mutation or
+// callback must invalidate before a subsequent authoritative read.
+do {
+    var beforeReads = 0, afterReads = 0, selectionReads = 0
+    var before: String? = "ක"
+    let snapshot = DocumentContextSnapshot(before: { beforeReads += 1; return before },
+        after: { afterReads += 1; return nil }, selection: { selectionReads += 1; return nil })
+    precondition(snapshot.before == "ක" && snapshot.before == "ක" && beforeReads == 1)
+    precondition(snapshot.after == nil && snapshot.after == nil && afterReads == 1)
+    precondition(snapshot.selection == nil && snapshot.selection == nil && selectionReads == 1)
+    before = "කා"
+    snapshot.invalidate()
+    precondition(snapshot.before == "කා" && beforeReads == 2 && snapshot.generation == 1)
+    snapshot.invalidate() // Host reset during an extension-owned mutation.
+    before = ""
+    precondition(snapshot.before == "" && beforeReads == 3 && snapshot.generation == 2)
+    let nextOperation = DocumentContextSnapshot(before: { beforeReads += 1; return before },
+        after: { nil }, selection: { nil })
+    precondition(nextOperation.before == "" && beforeReads == 4)
+}
+
+// A blocked active job must not build up obsolete pending work.
+do {
+    let worker = LatestRequestWorker(label: "lk.org.akshara.latest-test")
+    let began = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+    let finished = DispatchSemaphore(value: 0)
+    let lock = NSLock()
+    var delivered: [Int] = []
+    worker.submit { began.signal(); release.wait() }
+    precondition(began.wait(timeout: .now() + 5) == .success)
+    for value in 0..<100 {
+        worker.submit { lock.lock(); delivered.append(value); lock.unlock(); finished.signal() }
+    }
+    release.signal()
+    precondition(finished.wait(timeout: .now() + 5) == .success)
+    lock.lock(); precondition(delivered == [99]); lock.unlock()
+}
+print("Document snapshots and bounded latest-request worker passed")
+
 let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let fixtureURL = root.appendingPathComponent("Scripts/SinhalaPredictionFixture.tsv")
 let frequencyURL = root.appendingPathComponent("AksharaKeyboard/Resources/SinhalaFrequencyModel.tsv")

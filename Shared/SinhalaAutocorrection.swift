@@ -43,33 +43,33 @@ final class SinhalaAutocorrectionService {
         return exact[Self.normalized(word)] != nil
     }
 
-    /// Returned candidates are safe to display in the existing suggestion rail.
-    /// An exact verified word never receives spelling alternatives.
-    func suggestions(for word: String, maximumResults: Int = 3) -> [Candidate] {
-        lock.lock()
-        defer { lock.unlock() }
-        loadLocked()
-        let normalized = Self.normalized(word)
-        guard isEligible(normalized), exact[normalized] == nil,
-              !KeyboardPreferences.isAutocorrectProtected(normalized) else { return [] }
-        return rankedCandidatesLocked(for: normalized).prefix(max(0, maximumResults)).map {
-            Candidate(text: $0.word, frequency: $0.frequency)
-        }
+    struct CorrectionEvaluation: Equatable {
+        let suggestions: [Candidate]
+        let replacement: String?
     }
 
-    /// V1 is deliberately more conservative than its suggestion list: it only
-    /// replaces when exactly one verified one-edit candidate exists.
-    func correction(for word: String) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
+    /// One lookup supplies both the rail and conservative boundary correction.
+    func evaluate(_ word: String, maximumResults: Int = 3) -> CorrectionEvaluation {
+        let interval = KeyboardPerformance.begin("CorrectionEvaluation")
+        defer { KeyboardPerformance.end(interval) }
+        lock.lock(); defer { lock.unlock() }
         loadLocked()
         let normalized = Self.normalized(word)
         guard isEligible(normalized), exact[normalized] == nil,
-              !KeyboardPreferences.isAutocorrectProtected(normalized) else { return nil }
-        let candidates = rankedCandidatesLocked(for: normalized)
-        guard candidates.count == 1 else { return nil }
-        return candidates[0].word
+              !KeyboardPreferences.isAutocorrectProtected(normalized) else {
+            return .init(suggestions: [], replacement: nil)
+        }
+        let ranked = rankedCandidatesLocked(for: normalized)
+        return .init(suggestions: ranked.prefix(max(0, maximumResults)).map {
+            Candidate(text: $0.word, frequency: $0.frequency)
+        }, replacement: ranked.count == 1 ? ranked[0].word : nil)
     }
+
+    func suggestions(for word: String, maximumResults: Int = 3) -> [Candidate] {
+        evaluate(word, maximumResults: maximumResults).suggestions
+    }
+
+    func correction(for word: String) -> String? { evaluate(word).replacement }
 
     static func normalized(_ text: String) -> String {
         text.precomposedStringWithCanonicalMapping
@@ -77,6 +77,8 @@ final class SinhalaAutocorrectionService {
 
     private func loadLocked() {
         guard !didLoad else { return }
+        let interval = KeyboardPerformance.begin("CorrectionPreparation")
+        defer { KeyboardPerformance.end(interval) }
         didLoad = true
         guard let artifactURL,
               let data = try? Data(contentsOf: artifactURL, options: .mappedIfSafe),
