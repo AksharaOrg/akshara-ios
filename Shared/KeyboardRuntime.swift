@@ -37,24 +37,28 @@ enum KeyboardPerformance {
 final class LatestRequestWorker {
     private let lock = NSLock()
     private let queue: DispatchQueue
-    private var pending: (() -> Void)?
+    private var pending: (job: () -> Void, wait: KeyboardPerformance.Interval?)?
     private var running = false
 
     init(label: String, qos: DispatchQoS = .userInitiated) {
         queue = DispatchQueue(label: label, qos: qos)
     }
 
-    func submit(_ job: @escaping () -> Void) {
+    func submit(generation: Int = 0, _ job: @escaping () -> Void) {
+        let interval = KeyboardPerformance.begin("WorkerQueueDelay", generation: generation, count: 1)
         lock.lock()
-        pending = job
+        let replaced = pending
+        pending = (job, interval)
         let start = !running
         running = true
         lock.unlock()
+        KeyboardPerformance.end(replaced?.wait)
         if start { queue.async { self.drain() } }
     }
 
     func cancelPending() {
-        lock.lock(); pending = nil; lock.unlock()
+        lock.lock(); let removed = pending; pending = nil; lock.unlock()
+        KeyboardPerformance.end(removed?.wait)
     }
 
     private func drain() {
@@ -67,7 +71,8 @@ final class LatestRequestWorker {
             }
             pending = nil
             lock.unlock()
-            job()
+            KeyboardPerformance.end(job.wait)
+            job.job()
         }
     }
 }

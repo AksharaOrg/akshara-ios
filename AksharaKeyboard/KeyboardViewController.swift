@@ -1449,7 +1449,7 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         let worker = searchWorker
         let work = DispatchWorkItem { [weak self] in
             guard self != nil, !token.isCancelled else { return }
-            worker.submit { [weak self] in
+            worker.submit(generation: generation) { [weak self] in
                 guard !token.isCancelled else { return }
                 let matches = EmojiCatalog.search(query, tone: tone, cancellation: token)
                 guard !token.isCancelled else { return }
@@ -3645,7 +3645,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         requestedCorrection = identity
         let token = PredictionCancellationToken()
         pendingCorrectionToken = token
-        correctionWorker.submit { [weak self] in
+        correctionWorker.submit(generation: identity.generation) { [weak self] in
             guard !token.isCancelled else { return }
             let result = SinhalaAutocorrectionService.shared.evaluate(word)
             guard !token.isCancelled else { return }
@@ -6461,7 +6461,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let worker = rankingWorker
         let work = DispatchWorkItem { [weak self] in
             guard self != nil, !token.isCancelled else { return }
-            worker.submit {
+            worker.submit(generation: generation) {
                 guard !token.isCancelled else { return }
                 let ranked = showRail ? provider.candidates(for: request, cancellation: token) : []
                 guard !token.isCancelled else { return }
@@ -6675,7 +6675,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 && self.layer == .letters
                 && currentMode != .sls
                 && !self.phoneticBuffer.isEmpty
-            worker.submit {
+            worker.submit(generation: generation) {
                 guard !token.isCancelled else { return }
                 let ranked = provider.candidates(for: request, cancellation: token)
                 guard !token.isCancelled else { return }

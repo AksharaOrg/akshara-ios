@@ -76,5 +76,6 @@ Do not commit your personal Development Team ID, bundle identifiers, provisionin
 - The containing app subscribes to MetricKit and retains up to 24 local crash, hang, CPU, disk-write, and performance payloads. Open **About → Diagnostics**, prepare an export, and share the generated JSON when investigating a report.
 - In Xcode, use **Debug → Simulate MetricKit Payloads** while running the containing app to verify the collection and export flow. Simulated payloads contain sample data.
 - Diagnostics never include typed text and are never uploaded automatically.
+- See [Typing performance](Docs/Typing-Performance.md) for opt-in extension signposts, optimized benchmarks, regression checks and pending device acceptance.
 
 The keyboard supports Wijesekara, Phonetic, and Smart Phonetic input, with local marked-text preview and commit-on-space/return behavior.

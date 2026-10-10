@@ -28,6 +28,13 @@
 - Clear Learned Words while providers are warm, switch back, and restart: old personal words must not reappear from caches or delayed saves.
 - iOS 17/18/26, iPad compact/full-width, portrait/landscape, dark/light, long typing sessions; inspect extension crashes and memory pressure.
 
+## Typing performance gate — not yet verified
+
+- Follow [Typing performance validation](Typing-Performance.md): three Release runs of at least 500 events per mode on older/current iPhones, including native and messaging-app fields.
+- Verify correctness, accessibility, retained preview/label rendering, Full Access/secure-field clipboard behavior, rapid emoji search and overlapping touches.
+- Record CPU, memory, first-key time and queue delays; compare host waits separately. Target 30% lower affected-scenario p95, no more than 10% regression elsewhere and 8 ms extension-owned main-thread p95. Desktop provider timings do not satisfy this gate.
+- Complete this gate before TestFlight distribution of the typing optimizations.
+
 ## Submission checks — not yet performed
 
 - Validate the final archive in Xcode Organizer / App Store Connect; a local archive build is not submission validation.
