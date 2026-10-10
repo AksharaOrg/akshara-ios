@@ -1,6 +1,6 @@
 # Simulator typing performance — 2026-10-11
 
-A Release build of `243ada7` ran on the iPhone 17 Pro simulator, iOS 26.5, on the development Mac. The containing app's Setup text field hosted the actual Akshara extension. Software-keyboard taps exercised Wijesekara letters, Space and Delete; the visible field changed correctly. These measurements cover one short run, not the required device acceptance study or a before/after comparison.
+A Release build of `243ada7` ran on the iPhone 17 Pro simulator, iOS 26.5, on the development Mac. The containing app's Setup text field hosted the actual Akshara extension. The initial 48-event Wijesekara sample is preserved below. The resumed [expanded study](Expanded/README.md) covers 512 events in each of the four modes and a separate hidden-rail correction exercise. Neither study establishes physical-device acceptance or a before/after improvement.
 
 ## Measurements
 
@@ -28,12 +28,12 @@ The observed key-handler and rail work are small in this scenario. Background ra
 
 ## Scope and limitations
 
-- Wijesekara only; predictions enabled, autocorrect disabled, predictive touch areas/emoji suggestions/clipboard history disabled, Full Access off, portrait Liquid Glass appearance.
+- Initial sample: Wijesekara only; predictions enabled, autocorrect disabled, predictive touch areas/emoji suggestions/clipboard history disabled, portrait Liquid Glass appearance. The extension recorded Full Access as available in the simulator; the original report incorrectly described it as off. The containing app and extension used separate simulator preference files.
 - 48 key events, including three Delete touch handlers; three actual deletes were handled on later main-loop turns. No rapid overlapping-touch validation.
 - No pre-optimization baseline, three-run comparison, 500-event sample per mode, messaging-app host, CPU flamegraph or peak-memory measurement.
 - Direct Instruments attachment could not locate the extension process. An all-process Time Profiler/Points of Interest capture stalled during recorder startup and was stopped. No CPU conclusions are drawn from that trace.
 - Thirty other begin/end pairs had malformed names (`mode=%{public}ld` / empty) in the unified-log export and are excluded from named interval statistics. Correction-evaluation timing needs a clean Instruments capture or investigation of the signpost export before attribution.
-- The Mac locked when starting the expanded run. UI automation could not unlock it; further mode/scenario testing requires manual unlock.
+- The Mac locked when starting the expanded run. After manual unlock, testing resumed; see the expanded results linked above.
 - Physical-device acceptance and TestFlight distribution remain pending.
 
 The archived statistics can be reproduced with:

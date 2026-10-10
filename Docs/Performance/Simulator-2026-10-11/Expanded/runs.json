@@ -1,0 +1,185 @@
+{
+  "buildRevision": "243ada7",
+  "simulator": "iPhone 17 Pro",
+  "runtime": "iOS 26.5",
+  "configuration": "Release",
+  "timebase": {
+    "numer": 125,
+    "denom": 3
+  },
+  "runs": [
+    {
+      "id": "wijesekara",
+      "processID": 79783,
+      "mode": 0,
+      "expectedKeys": 512,
+      "firstKey": "2026-10-11 02:40:32.896205+0530",
+      "lastKey": "2026-10-11 02:42:14.403814+0530",
+      "keyPrefix": [],
+      "keyPattern": [
+        "letter",
+        "letter",
+        "space",
+        "letter",
+        "letter",
+        "letter",
+        "space",
+        "delete"
+      ],
+      "features": {
+        "suggestions": true,
+        "autocorrect": false,
+        "predictiveTouchAreas": false,
+        "emojiSuggestions": false,
+        "clipboardHistory": false,
+        "englishKeyboardEnabled": false,
+        "fullAccessReportedByExtension": true
+      },
+      "signposts": "wijesekara.ndjson.gz",
+      "intervals": "wijesekara-intervals.json.gz",
+      "statistics": "wijesekara-statistics.md"
+    },
+    {
+      "id": "phonetic",
+      "processID": 80333,
+      "mode": 1,
+      "expectedKeys": 512,
+      "firstKey": "2026-10-11 02:44:26.789664+0530",
+      "lastKey": "2026-10-11 02:48:17.297246+0530",
+      "keyPrefix": [],
+      "keyPattern": [
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "space",
+        "letter",
+        "space",
+        "delete"
+      ],
+      "features": {
+        "suggestions": true,
+        "autocorrect": false,
+        "predictiveTouchAreas": false,
+        "emojiSuggestions": false,
+        "clipboardHistory": false,
+        "englishKeyboardEnabled": false,
+        "fullAccessReportedByExtension": true
+      },
+      "signposts": "phonetic.ndjson.gz",
+      "intervals": "phonetic-intervals.json.gz",
+      "statistics": "phonetic-statistics.md"
+    },
+    {
+      "id": "smart",
+      "processID": 81042,
+      "mode": 2,
+      "expectedKeys": 512,
+      "firstKey": "2026-10-11 02:49:07.136191+0530",
+      "lastKey": "2026-10-11 02:52:56.181210+0530",
+      "keyPrefix": [],
+      "keyPattern": [
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "space",
+        "letter",
+        "space",
+        "delete"
+      ],
+      "features": {
+        "suggestions": true,
+        "autocorrect": false,
+        "predictiveTouchAreas": false,
+        "emojiSuggestions": false,
+        "clipboardHistory": false,
+        "englishKeyboardEnabled": false,
+        "fullAccessReportedByExtension": true
+      },
+      "signposts": "smart.ndjson.gz",
+      "intervals": "smart-intervals.json.gz",
+      "statistics": "smart-statistics.md"
+    },
+    {
+      "id": "english",
+      "processID": 81747,
+      "mode": 3,
+      "expectedKeys": 512,
+      "firstKey": "2026-10-11 02:53:52.988434+0530",
+      "lastKey": "2026-10-11 02:57:38.512597+0530",
+      "keyPrefix": [],
+      "keyPattern": [
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "space",
+        "letter",
+        "space",
+        "delete"
+      ],
+      "features": {
+        "suggestions": true,
+        "autocorrect": false,
+        "predictiveTouchAreas": false,
+        "emojiSuggestions": false,
+        "clipboardHistory": false,
+        "englishKeyboardEnabled": true,
+        "fullAccessReportedByExtension": true
+      },
+      "signposts": "english.ndjson.gz",
+      "intervals": "english-intervals.json.gz",
+      "statistics": "english-statistics.md"
+    },
+    {
+      "id": "hidden",
+      "processID": 82388,
+      "mode": 2,
+      "expectedKeys": 137,
+      "firstKey": "2026-10-11 02:58:43.491978+0530",
+      "lastKey": "2026-10-11 03:00:04.500949+0530",
+      "keyPrefix": [
+        "space",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "space"
+      ],
+      "keyPattern": [
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "space",
+        "delete",
+        "space",
+        "letter",
+        "letter",
+        "letter",
+        "letter",
+        "space"
+      ],
+      "features": {
+        "suggestions": false,
+        "autocorrect": true,
+        "predictiveTouchAreas": false,
+        "emojiSuggestions": false,
+        "clipboardHistory": false,
+        "englishKeyboardEnabled": true,
+        "fullAccessReportedByExtension": true
+      },
+      "signposts": "hidden.ndjson.gz",
+      "intervals": "hidden-intervals.json.gz",
+      "statistics": "hidden-statistics.md"
+    }
+  ]
+}
