@@ -1,12 +1,16 @@
 import Foundation
 
-/// Cancellation crosses the UI and ranking queues. Checking it between stages
-/// prevents obsolete queued requests from delaying the newest prefix.
+/// Cancellation crosses queues and is checked during scans as well as between stages.
 final class PredictionCancellationToken {
     private let lock = NSLock()
     private var cancelled = false
+    private let onCheck: (() -> Void)?
+
+    /// Optional checkpoint supports deterministic concurrent-cancellation tests.
+    init(onCheck: (() -> Void)? = nil) { self.onCheck = onCheck }
 
     var isCancelled: Bool {
+        onCheck?()
         lock.lock()
         defer { lock.unlock() }
         return cancelled
@@ -38,6 +42,10 @@ struct SinhalaPredictionCandidate: Equatable {
 protocol SinhalaPredictionProviding: AnyObject {
     var identifier: String { get }
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate]
+    func candidates(for request: SinhalaPredictionRequest, cancellation: PredictionCancellationToken?) -> [SinhalaPredictionCandidate]
+    func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
+                        from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
+                        cancellation: PredictionCancellationToken?) -> [String: Double]
     func recordSelection(_ word: String, after precedingWord: String?)
     /// Called for words the keyboard itself commits, not text merely observed
     /// in the host field. This lets the personal model learn naturally while
@@ -56,6 +64,19 @@ protocol SinhalaPredictionProviding: AnyObject {
 }
 
 extension SinhalaPredictionProviding {
+    func candidates(for request: SinhalaPredictionRequest, cancellation: PredictionCancellationToken?) -> [SinhalaPredictionCandidate] {
+        guard cancellation?.isCancelled != true else { return [] }
+        let result = candidates(for: request)
+        return cancellation?.isCancelled == true ? [] : result
+    }
+    func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
+                        from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
+                        cancellation: PredictionCancellationToken?) -> [String: Double] {
+        guard cancellation?.isCancelled != true else { return [:] }
+        let result = nextKeyWeights(latinBuffer: latinBuffer, mode: mode, shifted: shifted, from: ranked, precedingWords: precedingWords)
+        return cancellation?.isCancelled == true ? [:] : result
+    }
+
     func nextKeyWeights(
         latinBuffer: String,
         mode: SinhalaEngine.Mode,
@@ -134,10 +155,18 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private struct MappedBigramTable {
         let data: Data
         let ranges: [String: Range<Int>]
+        let usesPrebuiltIndex: Bool
+        private var cache: [String: [NextWord]] = [:]
+        private var cacheOrder: [String] = []
 
         init?(url: URL?) {
             guard let url, let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
                 return nil
+            }
+            let indexURL = url.deletingPathExtension().appendingPathExtension("offsets")
+            if let indexed = Self.loadRanges(url: indexURL, source: data) {
+                self.data = data; ranges = indexed; usesPrebuiltIndex = true
+                return
             }
             var ranges: [String: Range<Int>] = [:]
             ranges.reserveCapacity(32_000)
@@ -183,17 +212,42 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             }
             self.data = data
             self.ranges = ranges
+            usesPrebuiltIndex = false
         }
 
-        func followers(for precedingWord: String) -> [NextWord] {
+        private static func loadRanges(url: URL, source: Data) -> [String: Range<Int>]? {
+            guard var reader = PredictionIndexReader(url: url, magic: "AKSHARA_BIGRAM_INDEX_V1\0", source: source),
+                  let count = reader.uint32(), count <= source.count / 3 else { return nil }
+            var ranges: [String: Range<Int>] = [:]
+            ranges.reserveCapacity(count)
+            var previousEnd = 0
+            for _ in 0..<count {
+                guard let key = reader.string(), !key.isEmpty, ranges[key] == nil,
+                      let start = reader.uint32(), let end = reader.uint32(),
+                      start >= previousEnd, start < end, end <= source.count,
+                      start == 0 || source[start - 1] == 10,
+                      end == source.count || source[end - 1] == 10,
+                      source[start..<end].starts(with: Array((key + "\t").utf8)) else { return nil }
+                ranges[key] = start..<end; previousEnd = end
+            }
+            return reader.isAtEnd ? ranges : nil
+        }
+
+        mutating func followers(for precedingWord: String, cancellation: PredictionCancellationToken?) -> [NextWord] {
+            guard cancellation?.isCancelled != true else { return [] }
+            if let cached = cache[precedingWord] { return cached }
             guard let range = ranges[precedingWord] else { return [] }
-            return String(decoding: data[range], as: UTF8.self)
-                .split(whereSeparator: \.isNewline)
-                .compactMap { line in
-                    let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-                    guard fields.count == 3, let count = Int(fields[2]) else { return nil }
-                    return NextWord(word: String(fields[1]), count: count)
-                }
+            var result: [NextWord] = []
+            for (offset, line) in String(decoding: data[range], as: UTF8.self).split(whereSeparator: \.isNewline).enumerated() {
+                if offset & 63 == 0, cancellation?.isCancelled == true { return [] }
+                let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+                guard fields.count == 3, let count = Int(fields[2]) else { continue }
+                result.append(NextWord(word: String(fields[1]), count: count))
+            }
+            guard cancellation?.isCancelled != true else { return [] }
+            if cacheOrder.count == 32 { cache.removeValue(forKey: cacheOrder.removeFirst()) }
+            cacheOrder.append(precedingWord); cache[precedingWord] = result
+            return result
         }
     }
     private var entries: [Entry] = []
@@ -226,6 +280,9 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private var recencyClock: Int
     private var persistenceWorkItem: DispatchWorkItem?
     private var hasUnsavedLearning = false
+    private var learningRevision = 0
+    private var persistedRevision = -1
+    private let persistenceQueue = DispatchQueue(label: "lk.org.akshara.sinhala.persistence", qos: .utility)
     private var learningGeneration: String?
     // Backspace/retyping often revisits the same prefix and context. Bound the
     // cache so the keyboard extension cannot retain an entire typing session.
@@ -267,6 +324,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     private func loadBundledModelsLocked() {
         guard !didLoadBundledModels else { return }
+        let interval = KeyboardPerformance.begin("SinhalaModelPreparation")
+        defer { KeyboardPerformance.end(interval) }
         didLoadBundledModels = true
         // The build script emits lexical order. Avoid sorting the bundled
         // model during the first prediction request in the keyboard process.
@@ -282,11 +341,28 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         sentenceStartEntries = Self.loadEntries(from: sentenceStartURL)
     }
 
+    var usesPrebuiltBigramIndex: Bool {
+        modelLock.lock(); defer { modelLock.unlock() }
+        return bundledBigrams?.usesPrebuiltIndex == true
+    }
+
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate] {
+        candidates(for: request, cancellation: nil)
+    }
+    func candidates(for request: SinhalaPredictionRequest, cancellation: PredictionCancellationToken?) -> [SinhalaPredictionCandidate] {
+        let interval = KeyboardPerformance.begin("SinhalaRanking")
+        defer { KeyboardPerformance.end(interval) }
+        guard cancellation?.isCancelled != true else { return [] }
         modelLock.lock()
         defer { modelLock.unlock() }
         synchronizeLearningResetLocked()
         loadBundledModelsLocked()
+        guard cancellation?.isCancelled != true else { return [] }
+        var processed = 0
+        func shouldCancel() -> Bool {
+            processed += 1
+            return processed & 63 == 0 && cancellation?.isCancelled == true
+        }
         if let cached = candidateCache[request] { return cached }
         let prefix = request.composingText
         let maximumResults = max(request.maximumResults, 0)
@@ -296,7 +372,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             ? request.precedingWords[request.precedingWords.count - 2]
             : nil
         let learnedNext = previous.flatMap { learnedBigrams[$0] } ?? [:]
-        let bundledNext = previous.flatMap { bundledBigrams?.followers(for: $0) } ?? []
+        let bundledNext = previous.flatMap { bundledBigrams?.followers(for: $0, cancellation: cancellation) } ?? []
         let trigramNext: [NextWord]
         if let earlier, let previous {
             trigramNext = bundledTrigrams[Self.trigramKey(earlier, previous)] ?? []
@@ -305,10 +381,12 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         }
         var bundledCounts: [String: Int] = [:]
         for next in bundledNext {
+            if shouldCancel() { return [] }
             bundledCounts[next.word] = max(bundledCounts[next.word, default: 0], next.count)
         }
         var trigramCounts: [String: Int] = [:]
         for next in trigramNext {
+            if shouldCancel() { return [] }
             trigramCounts[next.word] = max(trigramCounts[next.word, default: 0], next.count)
         }
         let hasContinuations = previous != nil && (
@@ -355,10 +433,12 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
                     ? frequentEntries.prefix(max(maximumResults * 8, 24))
                     : ArraySlice(sentenceStartEntries.prefix(max(maximumResults * 8, 24)))
                 for entry in starts {
+                    if shouldCancel() { return [] }
                     consider(word: entry.word, frequency: entry.frequency, unigramWeight: 1.0)
                 }
             } else {
                 for entry in frequentEntries.prefix(max(maximumResults * 8, 24)) {
+                    if shouldCancel() { return [] }
                     consider(word: entry.word, frequency: entry.frequency, unigramWeight: 1.0)
                 }
             }
@@ -366,20 +446,25 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             let firstMatch = firstIndex(atOrAfter: prefix)
             let upperBound = min(entries.count, firstMatch + 4_096)
             for index in firstMatch..<upperBound {
+                if shouldCancel() { return [] }
                 let entry = entries[index]
                 guard hasUnicodeScalarPrefix(entry.word, prefix) else { break }
                 consider(word: entry.word, frequency: entry.frequency, unigramWeight: 1.0)
             }
             // Personal words need not exist in the bundled corpus to be
             // returned as a completion.
-            for (word, count) in learnedWords where hasUnicodeScalarPrefix(word, prefix) {
+            for (word, count) in learnedWords {
+                if shouldCancel() { return [] }
+                guard hasUnicodeScalarPrefix(word, prefix) else { continue }
                 consider(word: word, frequency: count, unigramWeight: 1.0)
             }
             // A single edit is enough to rescue the common near-miss without
             // turning the candidate rail into a spell-check UI. Restrict the
             // scan to the personal model, which is intentionally compact.
             if prefix.count >= 3 {
-                for (word, count) in learnedWords where editDistanceAtMostOne(prefix, word) {
+                for (word, count) in learnedWords {
+                    if shouldCancel() { return [] }
+                    guard editDistanceAtMostOne(prefix, word) else { continue }
                     consider(word: word, frequency: count, unigramWeight: 1.0)
                 }
             }
@@ -388,27 +473,34 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         // Contextual selections can be custom words which are absent from the
         // corpus's initial frequency slice. Include them without a full sort.
         let continuationUnigramWeight: Double = prefix.isEmpty && hasContinuations ? 0.20 : 1.0
-        for (word, count) in learnedNext where prefix.isEmpty || hasUnicodeScalarPrefix(word, prefix) {
+        for (word, count) in learnedNext {
+            if shouldCancel() { return [] }
+            guard prefix.isEmpty || hasUnicodeScalarPrefix(word, prefix) else { continue }
             consider(
                 word: word,
                 frequency: unigramFrequency[word, default: learnedWords[word, default: count]],
                 unigramWeight: continuationUnigramWeight
             )
         }
-        for next in bundledNext where prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) {
+        for next in bundledNext {
+            if shouldCancel() { return [] }
+            guard prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) else { continue }
             consider(
                 word: next.word,
                 frequency: unigramFrequency[next.word, default: 0],
                 unigramWeight: continuationUnigramWeight
             )
         }
-        for next in trigramNext where prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) {
+        for next in trigramNext {
+            if shouldCancel() { return [] }
+            guard prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) else { continue }
             consider(
                 word: next.word,
                 frequency: unigramFrequency[next.word, default: 0],
                 unigramWeight: continuationUnigramWeight
             )
         }
+        guard cancellation?.isCancelled != true else { return [] }
         if cachedRequests.count == 32 {
             candidateCache.removeValue(forKey: cachedRequests.removeFirst())
         }
@@ -424,7 +516,15 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         from ranked: [SinhalaPredictionCandidate],
         precedingWords: [String]
     ) -> [String: Double] {
-        guard mode != .sls, !latinBuffer.isEmpty, !ranked.isEmpty else { return [:] }
+        nextKeyWeights(latinBuffer: latinBuffer, mode: mode, shifted: shifted,
+                       from: ranked, precedingWords: precedingWords, cancellation: nil)
+    }
+    func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
+                        from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
+                        cancellation: PredictionCancellationToken?) -> [String: Double] {
+        let interval = KeyboardPerformance.begin("NextKeyWeights")
+        defer { KeyboardPerformance.end(interval) }
+        guard cancellation?.isCancelled != true, mode != .sls, !latinBuffer.isEmpty, !ranked.isEmpty else { return [:] }
         modelLock.lock()
         defer { modelLock.unlock() }
         synchronizeLearningResetLocked()
@@ -432,6 +532,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         let currentRendered = SinhalaEngine.transliterate(latinBuffer, mode: mode)
         var rewriteCache: [String: Double] = [:]
         for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+            guard cancellation?.isCancelled != true else { return [:] }
             let lower = String(UnicodeScalar(scalar)!)
             let source = shifted ? lower.uppercased() : lower
             let nextRendered = Self.strippingTrailingVirama(
@@ -450,7 +551,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
                 if let cached = rewriteCache[nextRendered] {
                     score = cached
                 } else {
-                    score = lightweightCompletionScore(for: nextRendered)
+                    score = lightweightCompletionScore(for: nextRendered, cancellation: cancellation)
                     rewriteCache[nextRendered] = score
                 }
             }
@@ -458,11 +559,11 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
                 scores[lower, default: 0] += score
             }
         }
-        guard let maximum = scores.values.max(), maximum > 0 else { return [:] }
+        guard cancellation?.isCancelled != true, let maximum = scores.values.max(), maximum > 0 else { return [:] }
         return scores.mapValues { $0 / maximum }
     }
 
-    private func lightweightCompletionScore(for prefix: String) -> Double {
+    private func lightweightCompletionScore(for prefix: String, cancellation: PredictionCancellationToken?) -> Double {
         let start = firstIndex(atOrAfter: prefix)
         var score = 0.0
         var matches = 0
@@ -474,7 +575,10 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             if matches == 8 { break }
         }
         if matches < 8 {
-            for (word, count) in learnedWords where hasUnicodeScalarPrefix(word, prefix) {
+            for (offset, entry) in learnedWords.enumerated() {
+                if offset & 63 == 0, cancellation?.isCancelled == true { return 0 }
+                let (word, count) = entry
+                guard hasUnicodeScalarPrefix(word, prefix) else { continue }
                 score += log(Double(max(count, 1)) + 1)
                 matches += 1
                 if matches == 8 { break }
@@ -500,6 +604,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     private func record(_ word: String, after precedingWord: String?, selectionBoost: Int, persistImmediately: Bool) {
         guard isSinhalaWord(word) else { return }
         hasUnsavedLearning = true
+        learningRevision += 1
         candidateCache.removeAll(keepingCapacity: true)
         cachedRequests.removeAll(keepingCapacity: true)
         learnedWords[word, default: 0] += selectionBoost
@@ -519,14 +624,15 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             }
             learnedBigrams[precedingWord] = followers
         }
-        if persistImmediately { persistLocked() }
-        else { schedulePersistence() }
+        schedulePersistence(delay: persistImmediately ? 0 : 3)
     }
 
     private func synchronizeLearningResetLocked() {
         let generation = defaults.string(forKey: KeyboardPreferences.learningResetKey)
         guard generation != learningGeneration else { return }
         learningGeneration = generation
+        learningRevision += 1
+        persistedRevision = -1
         persistenceWorkItem?.cancel()
         persistenceWorkItem = nil
         learnedWords.removeAll()
@@ -540,32 +646,43 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     func flushPendingPersistence() {
         modelLock.lock()
-        defer { modelLock.unlock() }
         synchronizeLearningResetLocked()
-        persistLocked()
-    }
-
-    private func persistLocked() {
         persistenceWorkItem?.cancel()
         persistenceWorkItem = nil
-        guard hasUnsavedLearning else { return }
-        KeyboardPreferences.withLearningPersistenceLock {
-            defaults.synchronize()
-            synchronizeLearningResetLocked()
-            guard hasUnsavedLearning else { return }
-            defaults.set(learnedWords, forKey: learnedWordsKey)
-            defaults.set(recency, forKey: recencyKey)
-            defaults.set(learnedBigrams, forKey: learnedBigramsKey)
-            defaults.synchronize()
-            hasUnsavedLearning = false
+        guard hasUnsavedLearning else { modelLock.unlock(); return }
+        let words = learnedWords, bigrams = learnedBigrams, recent = recency
+        let generation = learningGeneration, revision = learningRevision
+        modelLock.unlock()
+        // The serial writer owns disk and interprocess waits, never modelLock.
+        _ = persistenceQueue.sync {
+            KeyboardPerformance.measure("SinhalaPersistence") {
+                KeyboardPreferences.withLearningPersistenceLock {
+                    defaults.synchronize()
+                    guard defaults.string(forKey: KeyboardPreferences.learningResetKey) == generation else { return }
+                    modelLock.lock()
+                    let superseded = revision <= persistedRevision
+                    modelLock.unlock()
+                    guard !superseded else { return }
+                    defaults.set(words, forKey: learnedWordsKey)
+                    defaults.set(recent, forKey: recencyKey)
+                    defaults.set(bigrams, forKey: learnedBigramsKey)
+                    defaults.synchronize()
+                    modelLock.lock()
+                    if learningGeneration == generation {
+                        persistedRevision = revision
+                        if learningRevision == revision { hasUnsavedLearning = false }
+                    }
+                    modelLock.unlock()
+                }
+            }
         }
     }
 
-    private func schedulePersistence() {
+    private func schedulePersistence(delay: TimeInterval) {
         persistenceWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.flushPendingPersistence() }
         persistenceWorkItem = work
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3, execute: work)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func recencyScore(for word: String) -> Double {

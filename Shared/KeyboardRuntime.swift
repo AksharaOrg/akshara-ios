@@ -13,9 +13,9 @@ enum KeyboardPerformance {
         let name: StaticString
         let state: OSSignpostIntervalState
     }
-    static func begin(_ name: StaticString) -> Interval? {
+    static func begin(_ name: StaticString, mode: Int = -1, generation: Int = 0, count: Int = 0) -> Interval? {
         guard enabled else { return nil }
-        return Interval(name: name, state: signposter.beginInterval(name, id: signposter.makeSignpostID()))
+        return Interval(name: name, state: signposter.beginInterval(name, id: signposter.makeSignpostID(), "mode=\(mode, privacy: .public) generation=\(generation, privacy: .public) count=\(count, privacy: .public)"))
     }
     static func end(_ interval: Interval?) {
         guard let interval else { return }
@@ -23,7 +23,7 @@ enum KeyboardPerformance {
     }
 #else
     struct Interval {}
-    static func begin(_ name: StaticString) -> Interval? { nil }
+    static func begin(_ name: StaticString, mode: Int = -1, generation: Int = 0, count: Int = 0) -> Interval? { nil }
     static func end(_ interval: Interval?) {}
 #endif
     static func measure<T>(_ name: StaticString, _ body: () throws -> T) rethrows -> T {
@@ -114,10 +114,11 @@ struct PredictionIndexReader {
     init?(url: URL?, magic: String, source: Data) {
         guard let url, let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
         let header = Array(magic.utf8)
-        guard data.count >= header.count + 32,
+        guard data.count >= header.count + 64,
               data.prefix(header.count).elementsEqual(header),
-              data[header.count..<(header.count + 32)].elementsEqual(SHA256.hash(data: source)) else { return nil }
-        self.data = data; offset = header.count + 32
+              data[header.count..<(header.count + 32)].elementsEqual(SHA256.hash(data: source)),
+              data[(header.count + 32)..<(header.count + 64)].elementsEqual(SHA256.hash(data: data.suffix(from: header.count + 64))) else { return nil }
+        self.data = data; offset = header.count + 64
     }
 
     var isAtEnd: Bool { offset == data.count }
@@ -130,5 +131,62 @@ struct PredictionIndexReader {
         guard let count = uint32(), count <= data.count - offset else { return nil }
         defer { offset += count }
         return String(data: data[offset..<(offset + count)], encoding: .utf8)
+    }
+}
+
+/// Immutable search data can be prepared and queried entirely off the UI thread.
+struct EmojiKeywordSearchIndex {
+    private let entries: [(emoji: String, terms: Set<String>)]
+    private let locale: Locale
+
+    init(index: [String: [String]], locale: Locale = .current) {
+        self.locale = locale
+        entries = index.map { emoji, terms in
+            (emoji, Set(terms.flatMap { Self.tokens($0, locale: locale) }))
+        }
+    }
+    private static func tokens(_ query: String, locale: Locale) -> [String] {
+        query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+            .lowercased(with: locale)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+    }
+    func search(_ query: String, cancellation: PredictionCancellationToken? = nil) -> [String] {
+        let interval = KeyboardPerformance.begin("EmojiSearch")
+        defer { KeyboardPerformance.end(interval) }
+        let tokens = Self.tokens(query, locale: locale)
+        guard !tokens.isEmpty else { return ["😐", "😀", "😃", "😁", "😄", "😆", "🥹", "😅"] }
+        var matches: [(String, Int)] = []
+        for (offset, entry) in entries.enumerated() {
+            if offset & 63 == 0, cancellation?.isCancelled == true { return [] }
+            guard tokens.allSatisfy({ token in entry.terms.contains {
+                $0.hasPrefix(token) || ($0.count >= 3 && token.hasPrefix($0))
+            } }) else { continue }
+            let score = tokens.reduce(0) { $0 + (entry.terms.contains($1) ? 2 : 1) }
+            matches.append((entry.emoji, score))
+        }
+        guard cancellation?.isCancelled != true else { return [] }
+        var seen = Set<String>(), result: [String] = []
+        for (emoji, _) in matches.sorted(by: { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }) {
+            if seen.insert(EmojiSkinToneApplicator.skinToneFreeKey(for: emoji)).inserted { result.append(emoji) }
+            if result.count == 40 { break }
+        }
+        return result
+    }
+}
+
+/// A result is usable only in the exact composing session that requested it.
+struct SinhalaCorrectionIdentity: Equatable {
+    let document: UUID
+    let generation: Int
+    let word: String
+    let mode: SinhalaEngine.Mode
+    let language: KeyboardLanguage
+    let protectionRevision: Int
+}
+struct ReadySinhalaCorrection {
+    let identity: SinhalaCorrectionIdentity
+    let result: SinhalaAutocorrectionService.CorrectionEvaluation
+    func replacement(for current: SinhalaCorrectionIdentity) -> String? {
+        identity == current ? result.replacement : nil
     }
 }

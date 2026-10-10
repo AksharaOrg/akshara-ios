@@ -40,6 +40,28 @@ do {
 }
 print("Document snapshots and bounded latest-request worker passed")
 
+do {
+    let document = UUID()
+    let identity = SinhalaCorrectionIdentity(document: document, generation: 1, word: "වරද",
+        mode: .smartPhonetic, language: .sinhala, protectionRevision: 0)
+    let ready = ReadySinhalaCorrection(identity: identity,
+        result: .init(suggestions: [], replacement: "නිවැරදි"))
+    precondition(ready.replacement(for: identity) == "නිවැරදි")
+    let stale = [
+        SinhalaCorrectionIdentity(document: UUID(), generation: 1, word: "වරද", mode: .smartPhonetic, language: .sinhala, protectionRevision: 0),
+        .init(document: document, generation: 2, word: "වරද", mode: .smartPhonetic, language: .sinhala, protectionRevision: 0),
+        .init(document: document, generation: 1, word: "වචනය", mode: .smartPhonetic, language: .sinhala, protectionRevision: 0),
+        .init(document: document, generation: 1, word: "වරද", mode: .sls, language: .sinhala, protectionRevision: 0),
+        .init(document: document, generation: 1, word: "වරද", mode: .smartPhonetic, language: .english, protectionRevision: 0),
+        .init(document: document, generation: 1, word: "වරද", mode: .smartPhonetic, language: .sinhala, protectionRevision: 1)
+    ]
+    precondition(stale.allSatisfy { ready.replacement(for: $0) == nil })
+    let unavailable: ReadySinhalaCorrection? = nil
+    precondition(unavailable?.replacement(for: identity) == nil)
+    // Rail visibility is deliberately absent from correction eligibility.
+}
+print("Ready-only correction rejects stale sessions and works independently of rail visibility")
+
 let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let fixtureURL = root.appendingPathComponent("Scripts/SinhalaPredictionFixture.tsv")
 let frequencyURL = root.appendingPathComponent("AksharaKeyboard/Resources/SinhalaFrequencyModel.tsv")
@@ -1325,3 +1347,196 @@ precondition(rejectedCorrections.contains("ගෙදරා"))
 rejectedCorrections.reset()
 precondition(!rejectedCorrections.contains("ගෙදරා") && !rejectedCorrections.contains("teh"))
 print("Literal suggestion slots and immediate autocorrection rejection passed")
+
+// Sidecars must preserve the runtime fallback exactly, and corrupted/stale
+// artifacts must never change rankings or correction decisions.
+do {
+    let resources = root.appendingPathComponent("AksharaKeyboard/Resources")
+    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("akshara-sidecars-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+    let suite = "lk.org.akshara.sidecar-tests.\(UUID().uuidString)"
+    let store = UserDefaults(suiteName: suite)!
+    defer { try? FileManager.default.removeItem(at: temporary); store.removePersistentDomain(forName: suite) }
+    let source = resources.appendingPathComponent("SinhalaNextWordModel.tsv")
+    let fallbackSource = temporary.appendingPathComponent("SinhalaNextWordModel.tsv")
+    try FileManager.default.copyItem(at: source, to: fallbackSource)
+    func makeProvider(_ next: URL) -> SinhalaFrequencyListPredictionProvider {
+        .init(modelURL: frequencyURL, nextWordURL: next, trigramURL: trigramURL,
+              sentenceStartURL: sentenceStartURL, defaults: store)
+    }
+    let indexed = makeProvider(source), fallback = makeProvider(fallbackSource)
+    indexed.prepareBundledModelsIfNeeded(); fallback.prepareBundledModelsIfNeeded()
+    precondition(indexed.usesPrebuiltBigramIndex && !fallback.usesPrebuiltBigramIndex)
+    for line in fixture.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+        let request = SinhalaPredictionRequest(composingText: String(fields[0]),
+            precedingWords: fields[1].split(separator: " ").map(String.init), maximumResults: 24)
+        precondition(indexed.candidates(for: request) == fallback.candidates(for: request))
+    }
+    let cancelled = PredictionCancellationToken(); cancelled.cancel()
+    let request = SinhalaPredictionRequest(composingText: "ක", precedingWords: ["එය"], maximumResults: 24)
+    precondition(indexed.candidates(for: request, cancellation: cancelled).isEmpty)
+    precondition(indexed.candidates(for: request) == fallback.candidates(for: request))
+    precondition(indexed.nextKeyWeights(latinBuffer: "s", mode: .smartPhonetic, shifted: false,
+        from: indexed.candidates(for: request), precedingWords: [], cancellation: cancelled).isEmpty)
+
+    var broken = try Data(contentsOf: resources.appendingPathComponent("SinhalaNextWordModel.offsets"))
+    broken[broken.count - 1] ^= 1
+    let offsets = temporary.appendingPathComponent("SinhalaNextWordModel.offsets")
+    try broken.write(to: offsets)
+    let corrupted = makeProvider(fallbackSource)
+    corrupted.prepareBundledModelsIfNeeded()
+    precondition(!corrupted.usesPrebuiltBigramIndex && corrupted.candidates(for: request) == fallback.candidates(for: request))
+    try Data(contentsOf: resources.appendingPathComponent("SinhalaNextWordModel.offsets")).write(to: offsets)
+    var staleSource = try Data(contentsOf: fallbackSource); staleSource.append(10); try staleSource.write(to: fallbackSource)
+    let stale = makeProvider(fallbackSource); stale.prepareBundledModelsIfNeeded()
+    precondition(!stale.usesPrebuiltBigramIndex && stale.candidates(for: request) == fallback.candidates(for: request))
+
+    let lexiconURL = resources.appendingPathComponent("SinhalaAutocorrect.lexicon")
+    let fallbackLexicon = temporary.appendingPathComponent("SinhalaAutocorrect.lexicon")
+    try FileManager.default.copyItem(at: lexiconURL, to: fallbackLexicon)
+    let indexedCorrection = SinhalaAutocorrectionService(artifactURL: lexiconURL)
+    let fallbackCorrection = SinhalaAutocorrectionService(artifactURL: fallbackLexicon)
+    indexedCorrection.prepareIfNeeded(); fallbackCorrection.prepareIfNeeded()
+    precondition(indexedCorrection.usesPrebuiltDeletionIndex && !fallbackCorrection.usesPrebuiltDeletionIndex)
+    let lexicon = try Data(contentsOf: lexiconURL)
+    var cursor = "AKSHARA_AUTOCORRECT_V1\0".utf8.count
+    func integer(_ bytes: Int) -> Int {
+        defer { cursor += bytes }
+        return (0..<bytes).reduce(0) { $0 | (Int(lexicon[cursor + $1]) << (8 * $1)) }
+    }
+    let count = integer(4)
+    var checked = 0
+    for _ in 0..<count {
+        let size = integer(2)
+        let word = String(decoding: lexicon[cursor..<(cursor + size)], as: UTF8.self)
+        cursor += size; _ = integer(4)
+        if word.count >= 4, checked < 512 {
+            for query in [String(word.dropLast()), String(word.dropFirst()), word + "ක"] {
+                precondition(indexedCorrection.evaluate(query) == fallbackCorrection.evaluate(query))
+            }
+            checked += 1
+        }
+    }
+    var damagedPostings = try Data(contentsOf: resources.appendingPathComponent("SinhalaAutocorrect.postings"))
+    damagedPostings[damagedPostings.count - 1] ^= 1
+    try damagedPostings.write(to: temporary.appendingPathComponent("SinhalaAutocorrect.postings"))
+    let damagedCorrection = SinhalaAutocorrectionService(artifactURL: fallbackLexicon)
+    damagedCorrection.prepareIfNeeded()
+    precondition(!damagedCorrection.usesPrebuiltDeletionIndex)
+}
+print("Indexed/fallback rankings, correction postings, corruption, source hashes and cancellation passed")
+
+do {
+    let table = SinhalaEmojiSuggestions.loadIndex(from: root.appendingPathComponent("AksharaKeyboard/Resources/SinhalaEmojiIndex.json"))!
+    let indexed = SinhalaEmojiPrefixIndex(index: table)
+    func scanned(_ query: String) -> [String]? {
+        if let hit = table[query], !hit.isEmpty { return hit }
+        let scalars = Array(query.unicodeScalars)
+        guard scalars.count >= 2 else { return nil }
+        return table.filter { !$0.value.isEmpty && Array($0.key.unicodeScalars).starts(with: scalars) }
+            .sorted { lhs, rhs in
+                lhs.key.unicodeScalars.count == rhs.key.unicodeScalars.count
+                    ? lhs.key < rhs.key : lhs.key.unicodeScalars.count < rhs.key.unicodeScalars.count
+            }.first?.value
+    }
+    for token in table.keys.sorted().prefix(200) {
+        for length in [2, 3, token.unicodeScalars.count] {
+            let query = String(String.UnicodeScalarView(token.unicodeScalars.prefix(length)))
+            precondition(indexed.lookup(query) == scanned(query))
+        }
+    }
+    let search = EmojiKeywordSearchIndex(index: ["❤️": ["red heart"], "😂": ["face crying"],
+        "🙏": ["pray"], "👍": ["thumbs up"], "👍🏽": ["thumbs up"]], locale: Locale(identifier: "en_US"))
+    precondition(search.search("heart!") == ["❤️"])
+    precondition(search.search("face/crying") == ["😂"])
+    precondition(search.search("prayer") == ["🙏"])
+    precondition(search.search("thumbs").count == 1)
+    let token = PredictionCancellationToken(); token.cancel()
+    precondition(search.search("heart", cancellation: token).isEmpty)
+}
+print("Indexed Sinhala emoji matches scanner; asynchronous keyword search semantics passed")
+
+// Cancel at the first scan checkpoint, rather than before lookup starts.
+do {
+    let suite = "lk.org.akshara.mid-scan-test"
+    let store = UserDefaults(suiteName: suite)!
+    store.removePersistentDomain(forName: suite)
+    defer { store.removePersistentDomain(forName: suite) }
+    let provider = SinhalaFrequencyListPredictionProvider(modelURL: frequencyURL, nextWordURL: nextWordURL,
+        trigramURL: trigramURL, sentenceStartURL: sentenceStartURL, defaults: store)
+    provider.prepareBundledModelsIfNeeded()
+    var checks = 0
+    var token: PredictionCancellationToken!
+    token = PredictionCancellationToken(onCheck: { checks += 1; if checks == 3 { token.cancel() } })
+    let request = SinhalaPredictionRequest(composingText: "ක", precedingWords: [], maximumResults: 24)
+    precondition(provider.candidates(for: request, cancellation: token).isEmpty && checks == 3)
+    let expected = provider.candidates(for: request)
+    precondition(expected.count == 24, "Cancelled results must not enter the cache")
+    var weightChecks = 0
+    var weightToken: PredictionCancellationToken!
+    weightToken = PredictionCancellationToken(onCheck: { weightChecks += 1; if weightChecks == 3 { weightToken.cancel() } })
+    precondition(provider.nextKeyWeights(latinBuffer: "k", mode: .smartPhonetic, shifted: false,
+        from: expected, precedingWords: [], cancellation: weightToken).isEmpty)
+    precondition(!provider.nextKeyWeights(latinBuffer: "k", mode: .smartPhonetic, shifted: false,
+        from: expected, precedingWords: []).isEmpty)
+}
+print("Mid-scan cancellation and subsequent complete cache entries passed")
+
+// A writer blocked on the interprocess lock must not block ranking or learning.
+// New revisions remain dirty; reset generations reject snapshots captured earlier.
+for englishMode in [false, true] {
+    let suite = "lk.org.akshara.persistence-race-test.\(englishMode)"
+    let store = UserDefaults(suiteName: suite)!
+    store.removePersistentDomain(forName: suite)
+    let englishProvider = EnglishPredictionProvider(defaults: store)
+    let sinhalaProvider = SinhalaFrequencyListPredictionProvider(modelURL: frequencyURL, nextWordURL: nextWordURL,
+        trigramURL: trigramURL, sentenceStartURL: sentenceStartURL, defaults: store)
+    sinhalaProvider.prepareBundledModelsIfNeeded()
+    let provider: SinhalaPredictionProviding = englishMode ? englishProvider : sinhalaProvider
+    let initial = englishMode ? "aksharafirst" : "අක්ෂරමුල"
+    let newer = englishMode ? "aksharanewer" : "අක්ෂරඅලුත්"
+    let wordsKey = englishMode ? "prediction.english.words.v1" : "prediction.learnedWords.v1"
+    func flush() {
+        if englishMode { englishProvider.flushPendingPersistence() }
+        else { sinhalaProvider.flushPendingPersistence() }
+    }
+    for reset in [false, true] {
+        let locked = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let unlocked = DispatchSemaphore(value: 0), flushed = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            precondition(KeyboardPreferences.withLearningPersistenceLock {
+                locked.signal(); release.wait()
+            })
+            unlocked.signal()
+        }
+        precondition(locked.wait(timeout: .now() + 5) == .success)
+        provider.recordCommittedWord(initial, after: nil)
+        DispatchQueue.global(qos: .utility).async { flush(); flushed.signal() }
+        // Allow the worker to reach the held disk lock; do not time disk speed.
+        precondition(flushed.wait(timeout: .now() + 0.1) == .timedOut)
+        let responsive = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            provider.recordCommittedWord(newer, after: nil)
+            let request = SinhalaPredictionRequest(composingText: newer, precedingWords: [], maximumResults: 24)
+            _ = provider.candidates(for: request)
+            responsive.signal()
+        }
+        precondition(responsive.wait(timeout: .now() + 2) == .success, "Disk waits held the model lock")
+        if reset {
+            // Simulate the containing app resetting under the same held lock.
+            store.set(UUID().uuidString, forKey: KeyboardPreferences.learningResetKey)
+            for key in KeyboardPreferences.learnedDataKeys { store.removeObject(forKey: key) }
+            store.synchronize()
+        }
+        release.signal()
+        precondition(unlocked.wait(timeout: .now() + 5) == .success)
+        precondition(flushed.wait(timeout: .now() + 5) == .success)
+        flush()
+        let saved = store.dictionary(forKey: wordsKey) ?? [:]
+        if reset { precondition(saved.isEmpty, "A stale snapshot resurrected reset learning") }
+        else { precondition(saved[newer] != nil, "A save cleared the dirty state of a newer revision") }
+    }
+    store.removePersistentDomain(forName: suite)
+}
+print("Sinhala/English persistence lock responsiveness, newer revisions and reset races passed")

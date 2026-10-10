@@ -926,44 +926,14 @@ private enum EmojiCatalog {
 
     /// Normalize the bundled CLDR index once. Normalizing thousands of terms
     /// for every typed search character made the Emoji search feel sluggish.
-    private static let normalizedSearchIndex: [(emoji: String, terms: Set<String>)] = {
-        searchIndex.map { emoji, terms in
-            let normalizedTerms = terms.flatMap { term in
-                term.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-                    .lowercased(with: .current)
-                    .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                    .filter { !$0.isEmpty }
-            }
-            return (emoji, Set(normalizedTerms))
-        }
-    }()
+    private static let normalizedSearchIndex = EmojiKeywordSearchIndex(index: searchIndex)
 
-    static func search(_ query: String) -> [String] {
-        let tokens = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased(with: .current)
-            // Apply the same tokenisation used for the CLDR keywords.  The
-            // previous query path only split spaces and hyphens, so searches
-            // such as "heart!" or "face/crying" could never match.
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-        guard !tokens.isEmpty else { return ["😐", "😀", "😃", "😁", "😄", "😆", "🥹", "😅"] }
-        let matches = normalizedSearchIndex.compactMap { entry -> (String, Int)? in
-            guard tokens.allSatisfy({ token in
-                // Prefix matching makes natural variants work: "prayer"
-                // finds CLDR's "pray", while exact terms rank above prefixes.
-                entry.terms.contains {
-                    $0.hasPrefix(token) || ($0.count >= 3 && token.hasPrefix($0))
-                }
-            }) else { return nil }
-            let score = tokens.reduce(0) { partial, token in
-                partial + (entry.terms.contains(token) ? 2 : 1)
-            }
-            return (entry.emoji, score)
+    static func search(_ query: String, tone: KeyboardPreferences.EmojiSkinTone, cancellation: PredictionCancellationToken?) -> [String] {
+        normalizedSearchIndex.search(query, cancellation: cancellation).map {
+            EmojiSkinToneApplicator.withPreferredSkinTone($0, tone: tone)
         }
-        return Array(applyingPreferredSkinTone(to: matches.sorted { lhs, rhs in
-            lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1
-        }.map(\.0)).prefix(40))
     }
+
 }
 
 /// A horizontal emoji catalogue that always has exactly five rows. UIKit's
@@ -1100,6 +1070,10 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
     private let emojiSuggestionRow = UIStackView()
     private let searchKeyboard = KeyboardGridView()
     private var searchQuery = ""
+    private let searchWorker = LatestRequestWorker(label: "lk.org.akshara.emoji-search")
+    private var searchGeneration = 0
+    private var searchToken: PredictionCancellationToken?
+    private var pendingSearchWork: DispatchWorkItem?
     private var emojiSuggestionButtons: [UIButton] = []
     private enum SearchLayer { case letters, numbers, symbols }
     private var searchLayer: SearchLayer = .letters
@@ -1320,6 +1294,9 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
 
     required init?(coder: NSCoder) { nil }
     deinit {
+        searchToken?.cancel()
+        pendingSearchWork?.cancel()
+        searchWorker.cancelPending()
         searchDeleteRepeater?.invalidate()
         onDeleteHoldEnded?()
     }
@@ -1456,15 +1433,42 @@ private final class EmojiPickerView: UIView, UICollectionViewDataSource, UIColle
         searchDeleteRepeater = nil
     }
 
+    private func invalidateEmojiSearch() {
+        searchGeneration += 1
+        searchToken?.cancel()
+        pendingSearchWork?.cancel()
+        pendingSearchWork = nil
+        searchWorker.cancelPending()
+    }
     private func updateEmojiSearchResults() {
-        let matches = EmojiCatalog.search(searchQuery)
-        for (index, button) in emojiSuggestionButtons.enumerated() {
-            button.setTitle(index < matches.count ? matches[index] : nil, for: .normal)
-            button.isEnabled = index < matches.count
+        invalidateEmojiSearch()
+        let query = searchQuery, generation = searchGeneration
+        let tone = KeyboardPreferences.hotPath.emojiSkinTone
+        let token = PredictionCancellationToken()
+        searchToken = token
+        let worker = searchWorker
+        let work = DispatchWorkItem { [weak self] in
+            guard self != nil, !token.isCancelled else { return }
+            worker.submit { [weak self] in
+                guard !token.isCancelled else { return }
+                let matches = EmojiCatalog.search(query, tone: tone, cancellation: token)
+                guard !token.isCancelled else { return }
+                DispatchQueue.main.async {
+                    guard let self, generation == self.searchGeneration,
+                          query == self.searchQuery, !self.searchKeyboard.isHidden else { return }
+                    for (index, button) in self.emojiSuggestionButtons.enumerated() {
+                        button.setTitle(index < matches.count ? matches[index] : nil, for: .normal)
+                        button.isEnabled = index < matches.count
+                    }
+                }
+            }
         }
+        pendingSearchWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025, execute: work)
     }
 
     private func endEmojiSearch() {
+        invalidateEmojiSearch()
         stopSearchDeleteRepeat()
         searchQuery = ""
         searchField.text = nil
@@ -1909,12 +1913,7 @@ private final class SinhalaKeyLabel: UILabel {
     }
 }
 
-/// Treats the rail as three generous, unbroken selection zones. UIKit can
-/// otherwise return the stack view or a divider for a touch landing in the
-/// small visual gutters beside a candidate title.
-/// QuickType-style suggestion morph. Matching grapheme clusters stay on
-/// screen; outgoing clusters fade; new clusters scale-and-fade in from left
-/// to right. "good" → "give" therefore keeps `g` still and only animates `ood`.
+/// One retained label per suggestion, with a brief whole-label idle fade.
 private final class CandidateMorphLabel: UIView {
     private let label = UILabel()
     var font: UIFont = .systemFont(ofSize: 18) {
@@ -2609,6 +2608,7 @@ private final class KeyboardGridView: UIStackView {
     /// Key frames change only during layout. Reusing this map removes all
     /// frame conversions and slot allocations from the touch-down hot path.
     private var cachedHitSlots: [HitSlot]?
+    private var hitGeometrySignature: [CGFloat] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -2638,6 +2638,7 @@ private final class KeyboardGridView: UIStackView {
     /// Drop any cached overlay bitmap before the key rows are replaced.
     /// iOS 26 otherwise composites the previous leftover rails onto the new layer.
     func prepareForKeyRebuild() {
+        hitGeometrySignature = []
         cachedHitSlots = nil
         touchOverlay.slots = []
         touchOverlay.layer.contents = nil
@@ -2727,7 +2728,21 @@ private final class KeyboardGridView: UIStackView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        cachedHitSlots = nil
+        var geometry: [CGFloat] = [bounds.minX, bounds.minY, bounds.width, bounds.height,
+            horizontalGap, spacing, expandsToRowEdges ? 1 : 0,
+            hitExpansion.top, hitExpansion.left, hitExpansion.bottom, hitExpansion.right]
+        for row in arrangedSubviews {
+            geometry += [row.frame.minX, row.frame.minY, row.frame.width, row.frame.height, row.isHidden ? 1 : 0]
+            for button in (row as? UIStackView)?.arrangedSubviews.compactMap({ $0 as? NativeKeyButton }) ?? [] {
+                geometry += [button.frame.minX, button.frame.minY, button.frame.width, button.frame.height,
+                    button.capInsets.top, button.capInsets.left, button.capInsets.bottom, button.capInsets.right,
+                    button.isHidden ? 1 : 0, button.isEnabled ? 1 : 0, button.alpha]
+            }
+        }
+        if geometry != hitGeometrySignature {
+            hitGeometrySignature = geometry
+            cachedHitSlots = nil
+        }
         sendSubviewToBack(hitFillView)
         hitFillView.frame = expandedHitBounds
         let debug = KeyboardPreferences.hotPath.showTouchAreas
@@ -3605,15 +3620,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private let correctionWorker = LatestRequestWorker(label: "lk.org.akshara.correction")
     private var correctionGeneration = 0
     private var pendingCorrectionToken: PredictionCancellationToken?
-    private struct CorrectionIdentity: Equatable {
-        let document: UUID
-        let generation: Int
-        let word: String
-        let mode: SinhalaEngine.Mode
-        let protectionRevision: Int
-    }
-    private var requestedCorrection: CorrectionIdentity?
-    private var readyCorrection: (identity: CorrectionIdentity, result: SinhalaAutocorrectionService.CorrectionEvaluation)?
+    private var requestedCorrection: SinhalaCorrectionIdentity?
+    private var readyCorrection: ReadySinhalaCorrection?
 
     private func invalidateSinhalaCorrection() {
         correctionGeneration += 1
@@ -3628,8 +3636,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
               inputFieldAllowsPredictions, !isDeleteRepeatActive else { return }
         let word = activeRenderedWord()
         guard !word.isEmpty else { invalidateSinhalaCorrection(); return }
-        let identity = CorrectionIdentity(document: textDocumentProxy.documentIdentifier,
-            generation: correctionGeneration, word: word, mode: mode,
+        let identity = SinhalaCorrectionIdentity(document: textDocumentProxy.documentIdentifier,
+            generation: correctionGeneration, word: word, mode: mode, language: language,
             protectionRevision: KeyboardPreferences.protectedWordRevision)
         guard requestedCorrection != identity else { return }
         pendingCorrectionToken?.cancel()
@@ -3646,11 +3654,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                       self.requestedCorrection == identity, self.activeRenderedWord() == word,
                       self.textDocumentProxy.documentIdentifier == identity.document,
                       KeyboardPreferences.protectedWordRevision == identity.protectionRevision else { return }
-                self.readyCorrection = (identity, result)
+                self.readyCorrection = ReadySinhalaCorrection(identity: identity, result: result)
             }
         }
     }
 
+    private let rankingWorker = LatestRequestWorker(label: "lk.org.akshara.ranking")
     private var predictionGeneration = 0
     private var pendingPredictionToken: PredictionCancellationToken?
     /// Set by UIKit when the host editor can have changed independently of
@@ -3672,6 +3681,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var emojiPicker: EmojiPickerView?
     private var clipboardHistoryPanel: ClipboardHistoryView?
     private var clipboardRefreshTimer: Timer?
+    private var clipboardCaptureWork: DispatchWorkItem?
     private let clipboardButton = UIButton(type: .system)
     private var candidateSegmentsLeading: NSLayoutConstraint!
     private var pasteboardObserver: NSObjectProtocol?
@@ -4503,6 +4513,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         pendingPredictionToken?.cancel()
+        rankingWorker.cancelPending()
         cancelSpaceSignatureHold()
         spaceSignatureRestoreWork?.cancel()
         spaceSignatureRestoreWork = nil
@@ -4535,8 +4546,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         super.textWillChange(textInput)
         invalidateDocumentSnapshot()
         invalidateSinhalaCorrection()
-        guard !isApplyingOwnEdit else { return }
+        cancelDeferredClipboardCapture()
         invalidateInputTraits()
+        guard !isApplyingOwnEdit else { return }
         documentStateMayHaveChanged = true
         updateInputTraitsIfNeeded()
     }
@@ -4545,9 +4557,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         super.textDidChange(textInput)
         invalidateDocumentSnapshot()
         invalidateSinhalaCorrection()
+        cancelDeferredClipboardCapture()
         refreshInputModeSwitchKeyWhenConnected()
-        guard !isApplyingOwnEdit else { return }
         invalidateInputTraits()
+        guard !isApplyingOwnEdit else { return }
         // Host-originated edits only. Own inserts also notify some editors;
         // treating those as host changes forces a proxy-context read on the
         // next keystroke.
@@ -4563,8 +4576,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         super.selectionDidChange(textInput)
         invalidateDocumentSnapshot()
         invalidateSinhalaCorrection()
-        guard !isApplyingOwnEdit else { return }
+        cancelDeferredClipboardCapture()
         invalidateInputTraits()
+        guard !isApplyingOwnEdit else { return }
         documentStateMayHaveChanged = true
         pendingAutocorrection = nil
         collapseSpaceAfterOpeningPunctuation = false
@@ -5757,8 +5771,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             )
         } else {
             changes()
-            preview.removeFromSuperview()
-            keyPreview = nil
+            remove()
         }
     }
 
@@ -5827,7 +5840,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func press(_ key: String) {
-        let interval = KeyboardPerformance.begin("KeyHandling")
+        let interval = KeyboardPerformance.begin("KeyHandling", mode: language == .english ? 3 : (mode == .sls ? 0 : (mode == .phonetic ? 1 : 2)), generation: predictionGeneration)
         beginInputOperation()
         defer { endInputOperation(); KeyboardPerformance.end(interval) }
         if KeyboardHitTrace.isTraced(key) {
@@ -5843,6 +5856,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         defer {
             if key != "shift", key != "delete" { syncEnglishCapitalization() }
         }
+        lastInputTimestamp = CACurrentMediaTime()
         let prefs = KeyboardPreferences.hotPath
         if prefs.keyClicksEnabled {
             if prefs.hapticsEnabled {
@@ -6122,13 +6136,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func startClipboardCaptureIfNeeded() {
         stopClipboardCapture()
         guard KeyboardPreferences.hotPath.clipboardHistoryEnabled else { return }
-        refreshClipboardHistoryIfNeeded()
+        requestClipboardCapture()
         pasteboardObserver = NotificationCenter.default.addObserver(
             forName: UIPasteboard.changedNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.refreshClipboardHistoryIfNeeded()
+            self?.requestClipboardCapture()
         }
 
         // General-pasteboard notifications are not delivered reliably to every
@@ -6136,13 +6150,37 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         // is onscreen provides the same live update without re-reading text
         // unless the board actually changed.
         let timer = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in
-            self?.refreshClipboardHistoryIfNeeded()
+            self?.requestClipboardCapture()
         }
         clipboardRefreshTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    private func cancelDeferredClipboardCapture() {
+        clipboardCaptureWork?.cancel()
+        clipboardCaptureWork = nil
+    }
+    private func requestClipboardCapture() {
+        cancelDeferredClipboardCapture()
+        guard hasPresentedKeyboard, KeyboardPreferences.hotPath.clipboardHistoryEnabled else { return }
+        let document = textDocumentProxy.documentIdentifier
+        let delay = max(0, 0.25 - (CACurrentMediaTime() - lastInputTimestamp))
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.hasPresentedKeyboard,
+                  self.textDocumentProxy.documentIdentifier == document else { return }
+            self.clipboardCaptureWork = nil
+            if CACurrentMediaTime() - self.lastInputTimestamp < 0.25 {
+                self.requestClipboardCapture()
+                return
+            }
+            _ = self.refreshClipboardHistoryIfNeeded()
+        }
+        clipboardCaptureWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     private func stopClipboardCapture() {
+        cancelDeferredClipboardCapture()
         clipboardRefreshTimer?.invalidate()
         clipboardRefreshTimer = nil
         if let pasteboardObserver {
@@ -6152,11 +6190,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func captureClipboardIfNeeded() {
+        cancelDeferredClipboardCapture()
         _ = refreshClipboardHistoryIfNeeded()
     }
 
     @discardableResult
     private func refreshClipboardHistoryIfNeeded() -> Bool {
+        let interval = KeyboardPerformance.begin("ClipboardCapture")
+        defer { KeyboardPerformance.end(interval) }
         let secure = textDocumentProxy.isSecureTextEntry == true
         let changed = ClipboardHistoryStore.captureFromPasteboardIfNeeded(
             hasFullAccess: hasFullAccess,
@@ -6389,6 +6430,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         guard !isDeleteRepeatActive else { return }
         pendingPredictionUpdate?.cancel()
         pendingPredictionToken?.cancel()
+        rankingWorker.cancelPending()
         predictionGeneration += 1
         let generation = predictionGeneration
         englishCorrection = nil
@@ -6416,12 +6458,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let shifted = shift
         let token = PredictionCancellationToken()
         pendingPredictionToken = token
-        let queue = predictionQueue
+        let worker = rankingWorker
         let work = DispatchWorkItem { [weak self] in
             guard self != nil, !token.isCancelled else { return }
-            queue.async {
+            worker.submit {
                 guard !token.isCancelled else { return }
-                let ranked = showRail ? provider.candidates(for: request) : []
+                let ranked = showRail ? provider.candidates(for: request, cancellation: token) : []
                 guard !token.isCancelled else { return }
                 let correction = correct && context.canAutocorrectAtBoundary ? provider.correction(for: prefix) : nil
                 let emoji = emojis ? provider.emoji(for: prefix, bestWord: ranked.first?.text).map {
@@ -6429,7 +6471,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 } : []
                 guard !token.isCancelled else { return }
                 let weights = inflate ? provider.nextKeyWeights(latinBuffer: prefix, mode: .smartPhonetic,
-                    shifted: shifted, from: ranked, precedingWords: context.preceding) : [:]
+                    shifted: shifted, from: ranked, precedingWords: context.preceding, cancellation: token) : [:]
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !token.isCancelled, self.language == .english,
                           self.predictionGeneration == generation, self.englishContext() == context else { return }
@@ -6574,6 +6616,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         pendingPredictionToken?.cancel()
+        rankingWorker.cancelPending()
         predictionGeneration += 1
         let generation = predictionGeneration
         guard showsCandidateBar else {
@@ -6623,7 +6666,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         let preferredEmojiSkinTone = KeyboardPreferences.hotPath.emojiSkinTone
         let token = PredictionCancellationToken()
         pendingPredictionToken = token
-        let queue = predictionQueue
+        let worker = rankingWorker
         let work = DispatchWorkItem { [weak self] in
             guard let self, !token.isCancelled else { return }
             let currentMode = self.mode
@@ -6632,9 +6675,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 && self.layer == .letters
                 && currentMode != .sls
                 && !self.phoneticBuffer.isEmpty
-            queue.async {
+            worker.submit {
                 guard !token.isCancelled else { return }
-                let ranked = provider.candidates(for: request)
+                let ranked = provider.candidates(for: request, cancellation: token)
                 guard !token.isCancelled else { return }
                 let correctionCandidates = prefix.isEmpty
                     ? []
@@ -6659,7 +6702,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                         mode: currentMode,
                         shifted: isShifted,
                         from: ranked,
-                        precedingWords: request.precedingWords
+                        precedingWords: request.precedingWords,
+                        cancellation: token
                     )
                     : [:]
                 DispatchQueue.main.async { [weak self] in
@@ -6693,7 +6737,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func applyPredictionsNow(
         _ ranked: [String], emoji: [String], weights: [String: Double], for prefix: String, generation: Int
     ) {
-        let interval = KeyboardPerformance.begin("RailRendering")
+        let interval = KeyboardPerformance.begin("RailRendering", generation: predictionGeneration, count: candidateButtons.count)
         defer { KeyboardPerformance.end(interval) }
         guard generation == predictionGeneration, showsCandidateBar else { return }
         pendingPredictionUpdate = nil
@@ -6851,6 +6895,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
 
     private func selectPrediction(_ sender: UIButton, selectedText: String, acceptedBySpace: Bool = false, keepsTypedWord: Bool = false) {
+        beginInputOperation()
+        defer { endInputOperation() }
         guard !isSpaceTrackpadActive, !numberDragActive else {
             KeyboardHitTrace.logSuggestion("candidate select blocked trackpad=\(isSpaceTrackpadActive) numberDrag=\(numberDragActive)")
             return
@@ -6894,6 +6940,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         pendingPredictionToken?.cancel()
+        rankingWorker.cancelPending()
         predictionGeneration += 1
 
         let isTrueName = candidate == AksharaEasterEgg.trueNameDisplay
@@ -7193,12 +7240,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func cancelLocalCompositionWithoutCommit(refreshingPredictions: Bool = false) {
         invalidateDocumentSnapshot()
         invalidateSinhalaCorrection()
+        cancelDeferredClipboardCapture()
         englishOwnedWord = ""
         englishCanLearnWord = false
         englishCorrection = nil
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         pendingPredictionToken?.cancel()
+        rankingWorker.cancelPending()
         predictionGeneration += 1
         rawBuffer = ""
         visibleEntries.removeAll()
@@ -7339,6 +7388,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         pendingPredictionUpdate?.cancel()
         pendingPredictionUpdate = nil
         pendingPredictionToken?.cancel()
+        rankingWorker.cancelPending()
         predictionGeneration += 1
         if deleteRepeatBeganAt == 0 {
             deleteRepeatBeganAt = CACurrentMediaTime()
@@ -7609,12 +7659,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if isAutocorrectionBoundary(formattedSuffix),
            KeyboardPreferences.hotPath.autocorrectEnabled, inputFieldAllowsPredictions,
            !autocorrectionRejection.contains(committedWord),
-           let ready = readyCorrection,
-           ready.identity.generation == correctionGeneration,
-           ready.identity.word == committedWord, ready.identity.mode == mode,
-           ready.identity.document == textDocumentProxy.documentIdentifier,
-           ready.identity.protectionRevision == KeyboardPreferences.protectedWordRevision,
-           let replacement = ready.result.replacement {
+           let replacement = readyCorrection?.replacement(for: SinhalaCorrectionIdentity(
+               document: textDocumentProxy.documentIdentifier, generation: correctionGeneration,
+               word: committedWord, mode: mode, language: language,
+               protectionRevision: KeyboardPreferences.protectedWordRevision)) {
             applyAutocorrection(from: committedWord, to: replacement, suffix: formattedSuffix)
             return
         }

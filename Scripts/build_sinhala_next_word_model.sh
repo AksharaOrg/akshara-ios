@@ -187,3 +187,6 @@ print(f"files: {os.path.getsize(bigram_path)} {os.path.getsize(trigram_path)} {o
 if len(words) < 30000:
     print(f"warning: unique next-word vocabulary is {len(words)} (< 30000)", file=sys.stderr)
 PY
+
+# Uses the same Unicode segmentation as the runtime correction index.
+swift "$root/Scripts/build_prediction_sidecars.swift" "$root/AksharaKeyboard/Resources"

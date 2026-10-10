@@ -14,6 +14,8 @@ enum SinhalaEmojiSuggestions {
         return loaded
     }()
 
+    private static let prefixIndex = SinhalaEmojiPrefixIndex(index: index)
+
     /// Test / script entry point that bypasses the extension bundle.
     static func loadIndex(from url: URL) -> [String: [String]]? {
         guard let data = try? Data(contentsOf: url),
@@ -28,10 +30,10 @@ enum SinhalaEmojiSuggestions {
         bestWord: String?,
         index: [String: [String]]? = nil
     ) -> [String] {
-        let table = index ?? Self.index
-        guard !composing.isEmpty, !table.isEmpty else { return [] }
+        let lookupIndex = index.map { SinhalaEmojiPrefixIndex(index: $0) } ?? Self.prefixIndex
+        guard !composing.isEmpty else { return [] }
 
-        if let exact = lookup(composing, in: table), !exact.isEmpty {
+        if let exact = lookupIndex.lookup(composing), !exact.isEmpty {
             return Array(exact.prefix(maximumResults))
         }
 
@@ -41,7 +43,7 @@ enum SinhalaEmojiSuggestions {
            !bestWord.isEmpty,
            bestWord != composing,
            bestWord.unicodeScalars.starts(with: composing.unicodeScalars),
-           let fromBest = lookup(bestWord, in: table),
+           let fromBest = lookupIndex.lookup(bestWord),
            !fromBest.isEmpty {
             return Array(fromBest.prefix(maximumResults))
         }
@@ -49,38 +51,40 @@ enum SinhalaEmojiSuggestions {
         return []
     }
 
-    private static func lookup(_ query: String, in table: [String: [String]]) -> [String]? {
-        if let exact = table[query], !exact.isEmpty {
-            return exact
-        }
-        // Prefix match mirrors emoji-picker search: "හින" finds "හිනා".
-        // Compare Unicode scalars — not Characters — because Sinhala vowel
-        // signs fold into grapheme clusters (හර vs හරි would otherwise miss).
-        let queryScalars = Array(query.unicodeScalars)
-        guard queryScalars.count >= 2 else { return nil }
-        var bestKey: String?
-        var bestValues: [String] = []
-        var bestLength = Int.max
-        for (token, values) in table {
-            guard !values.isEmpty else { continue }
-            let tokenScalars = Array(token.unicodeScalars)
-            guard tokenScalars.count >= queryScalars.count,
-                  tokenScalars.starts(with: queryScalars) else { continue }
-            let length = tokenScalars.count
-            if bestKey == nil
-                || length < bestLength
-                || (length == bestLength && token < bestKey!) {
-                bestKey = token
-                bestValues = values
-                bestLength = length
-            }
-        }
-        return bestValues.isEmpty ? nil : bestValues
-    }
-
     /// Unique emoji count in the active index (for tests / diagnostics).
     static func uniqueEmojiCount(index: [String: [String]]? = nil) -> Int {
         let table = index ?? Self.index
         return Set(table.values.flatMap { $0 }).count
+    }
+}
+
+/// Sort by raw Unicode scalars to preserve the old prefix-matching semantics.
+struct SinhalaEmojiPrefixIndex {
+    private struct Entry { let token: String; let scalars: [UInt32]; let values: [String] }
+    private let exact: [String: [String]]
+    private let entries: [Entry]
+    init(index: [String: [String]]) {
+        exact = index
+        entries = index.filter { !$0.value.isEmpty }.map { token, values in
+            Entry(token: token, scalars: token.unicodeScalars.map(\.value), values: values)
+        }.sorted { $0.scalars.lexicographicallyPrecedes($1.scalars) }
+    }
+    func lookup(_ query: String) -> [String]? {
+        if let hit = exact[query], !hit.isEmpty { return hit }
+        let prefix = query.unicodeScalars.map(\.value)
+        guard prefix.count >= 2 else { return nil }
+        var low = 0, high = entries.count
+        while low < high {
+            let middle = (low + high) / 2
+            if entries[middle].scalars.lexicographicallyPrecedes(prefix) { low = middle + 1 }
+            else { high = middle }
+        }
+        var best: Entry?
+        for entry in entries[low...] {
+            guard entry.scalars.starts(with: prefix) else { break }
+            if best == nil || entry.scalars.count < best!.scalars.count
+                || (entry.scalars.count == best!.scalars.count && entry.token < best!.token) { best = entry }
+        }
+        return best?.values
     }
 }

@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        B10000000000000000000003 /* SinhalaNextWordModel.offsets in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003; };
+        B10000000000000000000004 /* SinhalaAutocorrect.postings in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004; };
 		B10000000000000000000001 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
 		B10000000000000000000002 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
 		A10000000000000000000001 /* AksharaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AksharaApp.swift */; };
@@ -75,6 +77,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+        B20000000000000000000003 /* SinhalaNextWordModel.offsets */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaNextWordModel.offsets; sourceTree = "<group>"; };
+        B20000000000000000000004 /* SinhalaAutocorrect.postings */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaAutocorrect.postings; sourceTree = "<group>"; };
 		B20000000000000000000001 /* KeyboardRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRuntime.swift; sourceTree = "<group>"; };
 		A20000000000000000000001 /* AksharaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AksharaApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -168,6 +172,8 @@
 		A40000000000000000000003 /* AksharaKeyboard */ = {
 			isa = PBXGroup;
 			children = (
+                B20000000000000000000003 /* SinhalaNextWordModel.offsets */,
+                B20000000000000000000004 /* SinhalaAutocorrect.postings */,
 				A20000000000000000000004 /* KeyboardViewController.swift */,
 				A20000000000000000000013 /* EmojiSearchIndex.json */,
 				A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */,
@@ -312,6 +318,8 @@
 				E10000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md in Resources */,
 				E10000000000000000000011 /* Resources/EnglishPrediction.sqlite3 in Resources */,
 				A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */,
+                B10000000000000000000003 /* SinhalaNextWordModel.offsets in Resources */,
+                B10000000000000000000004 /* SinhalaAutocorrect.postings in Resources */,
 				A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */,
 				A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */,
 				A1000000000000000000001B /* Resources/SinhalaEmojiIndex.json in Resources */,

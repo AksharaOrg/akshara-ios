@@ -16,3 +16,6 @@ python3 "$root/Scripts/build_sinhala_autocorrect_index.py" \
   --lock "$root/Scripts/SinhalaDictionary.lock" \
   --output "$root/AksharaKeyboard/Resources/SinhalaAutocorrect.lexicon" \
   --metadata "$root/AksharaKeyboard/Resources/SinhalaAutocorrectMetadata.json"
+
+# Uses the same Unicode segmentation as the runtime correction index.
+swift "$root/Scripts/build_prediction_sidecars.swift" "$root/AksharaKeyboard/Resources"

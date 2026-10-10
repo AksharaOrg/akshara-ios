@@ -219,6 +219,9 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     private var cacheOrder: [SinhalaPredictionRequest] = []
     private var persistence: DispatchWorkItem?
     private var hasUnsavedLearning = false
+    private var learningRevision = 0
+    private var persistedRevision = -1
+    private let persistenceQueue = DispatchQueue(label: "lk.org.akshara.english.persistence", qos: .utility)
     private var learningGeneration: String?
     private static let wordsKey = "prediction.english.words.v1"
     private static let nextKey = "prediction.english.followers.v1"
@@ -242,9 +245,19 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         return word == "i" ? "I" : word
     }
 
-    func prepareIfNeeded() { lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked(); database?.prepare() }
+    func prepareIfNeeded() {
+        let interval = KeyboardPerformance.begin("EnglishModelPreparation")
+        defer { KeyboardPerformance.end(interval) }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked(); database?.prepare()
+    }
 
     func candidates(for request: SinhalaPredictionRequest) -> [SinhalaPredictionCandidate] {
+        candidates(for: request, cancellation: nil)
+    }
+    func candidates(for request: SinhalaPredictionRequest, cancellation: PredictionCancellationToken?) -> [SinhalaPredictionCandidate] {
+        let interval = KeyboardPerformance.begin("EnglishRanking")
+        defer { KeyboardPerformance.end(interval) }
+        guard cancellation?.isCancelled != true else { return [] }
         lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         guard request.maximumResults > 0 else { return [] }
         if let cached = cache[request] { return cached }
@@ -266,7 +279,9 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
             pool = Set(localNext.keys).union(bundledNext.keys)
         }
         var ranked: [SinhalaPredictionCandidate] = []
-        for word in pool where word.hasPrefix(prefix) {
+        for word in pool {
+            guard cancellation?.isCancelled != true else { return [] }
+            guard word.hasPrefix(prefix) else { continue }
             let personalContext = Double(localNext[word, default: 0]) * 100_000_000.0
             // A learned word may rank above the SQL shortlist. Preserve its
             // corpus score even if it was outside the first 48 followers.
@@ -280,6 +295,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         }
         ranked.sort { $0.score == $1.score ? $0.text < $1.text : $0.score > $1.score }
         let result = Array(ranked.prefix(min(request.maximumResults, 24)))
+        guard cancellation?.isCancelled != true else { return [] }
         if cacheOrder.count == 32 { cache.removeValue(forKey: cacheOrder.removeFirst()) }
         cacheOrder.append(request); cache[request] = result
         return result
@@ -344,6 +360,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         let word = source.lowercased()
         guard Self.isWord(word) else { return }
         hasUnsavedLearning = true
+        learningRevision += 1
         learned[word] = min(10000, learned[word, default: 0] + boost)
         if let previous = previous?.lowercased(), Self.isWord(previous) {
             learnedNext[previous, default: [:]][word] = min(10000, (learnedNext[previous]?[word] ?? 0) + boost)
@@ -368,6 +385,8 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         let generation = defaults.string(forKey: KeyboardPreferences.learningResetKey)
         guard generation != learningGeneration else { return }
         learningGeneration = generation
+        learningRevision += 1
+        persistedRevision = -1
         persistence?.cancel()
         persistence = nil
         learned.removeAll()
@@ -378,17 +397,32 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     }
 
     func flushPendingPersistence() {
-        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
+        lock.lock()
+        synchronizeLearningResetLocked()
         persistence?.cancel(); persistence = nil
-        guard hasUnsavedLearning else { return }
-        KeyboardPreferences.withLearningPersistenceLock {
-            defaults.synchronize()
-            synchronizeLearningResetLocked()
-            guard hasUnsavedLearning else { return }
-            defaults.set(learned, forKey: Self.wordsKey)
-            defaults.set(learnedNext, forKey: Self.nextKey)
-            defaults.synchronize()
-            hasUnsavedLearning = false
+        guard hasUnsavedLearning else { lock.unlock(); return }
+        let words = learned, followers = learnedNext
+        let generation = learningGeneration, revision = learningRevision
+        lock.unlock()
+        _ = persistenceQueue.sync {
+            KeyboardPerformance.measure("EnglishPersistence") {
+                KeyboardPreferences.withLearningPersistenceLock {
+                    defaults.synchronize()
+                    guard defaults.string(forKey: KeyboardPreferences.learningResetKey) == generation else { return }
+                    lock.lock(); let superseded = revision <= persistedRevision; lock.unlock()
+                    guard !superseded else { return }
+                    defaults.set(words, forKey: Self.wordsKey)
+                    defaults.set(followers, forKey: Self.nextKey)
+                    defaults.synchronize()
+                    lock.lock()
+                    if learningGeneration == generation {
+                        persistedRevision = revision
+                        if learningRevision == revision { hasUnsavedLearning = false }
+                    }
+                    lock.unlock()
+                }
+            }
         }
     }
+
 }

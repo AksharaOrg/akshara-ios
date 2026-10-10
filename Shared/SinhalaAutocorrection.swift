@@ -20,11 +20,14 @@ final class SinhalaAutocorrectionService {
     private let artifactURL: URL?
     private let lock = NSLock()
     private var didLoad = false
+    private var evaluationCache: [String: (revision: Int, result: CorrectionEvaluation)] = [:]
+    private var cachedWords: [String] = []
     private var entries: [Entry] = []
     private var exact: [String: Int] = [:]
     /// A delete key represents every word one grapheme away. The index is
     /// intentionally built during warm-up, never on a key press.
     private var deletionIndex: [String: [Int]] = [:]
+    private(set) var usesPrebuiltDeletionIndex = false
 
     init(artifactURL: URL? = Bundle.main.url(forResource: "SinhalaAutocorrect", withExtension: "lexicon")) {
         self.artifactURL = artifactURL
@@ -55,14 +58,24 @@ final class SinhalaAutocorrectionService {
         lock.lock(); defer { lock.unlock() }
         loadLocked()
         let normalized = Self.normalized(word)
+        let revision = KeyboardPreferences.protectedWordRevision
+        if let cached = evaluationCache[normalized], cached.revision == revision {
+            return .init(suggestions: Array(cached.result.suggestions.prefix(max(0, maximumResults))), replacement: cached.result.replacement)
+        }
         guard isEligible(normalized), exact[normalized] == nil,
               !KeyboardPreferences.isAutocorrectProtected(normalized) else {
             return .init(suggestions: [], replacement: nil)
         }
         let ranked = rankedCandidatesLocked(for: normalized)
-        return .init(suggestions: ranked.prefix(max(0, maximumResults)).map {
+        let result = CorrectionEvaluation(suggestions: ranked.map {
             Candidate(text: $0.word, frequency: $0.frequency)
         }, replacement: ranked.count == 1 ? ranked[0].word : nil)
+        if evaluationCache[normalized] == nil {
+            if cachedWords.count == 64 { evaluationCache.removeValue(forKey: cachedWords.removeFirst()) }
+            cachedWords.append(normalized)
+        }
+        evaluationCache[normalized] = (revision, result)
+        return .init(suggestions: Array(result.suggestions.prefix(max(0, maximumResults))), replacement: result.replacement)
     }
 
     func suggestions(for word: String, maximumResults: Int = 3) -> [Candidate] {
@@ -103,6 +116,11 @@ final class SinhalaAutocorrectionService {
             exact[word] = entries.count
             entries.append(.init(word: word, frequency: Int(frequency)))
         }
+        if let indexed = loadDeletionIndex(source: data) {
+            deletionIndex = indexed
+            usesPrebuiltDeletionIndex = true
+            return
+        }
         deletionIndex.reserveCapacity(entries.count * 3)
         for (index, entry) in entries.enumerated() {
             for key in Self.deletionKeys(for: entry.word) {
@@ -111,6 +129,26 @@ final class SinhalaAutocorrectionService {
                 deletionIndex[key] = values
             }
         }
+    }
+
+    private func loadDeletionIndex(source: Data) -> [String: [Int]]? {
+        let url = artifactURL?.deletingPathExtension().appendingPathExtension("postings")
+        guard var reader = PredictionIndexReader(url: url, magic: "AKSHARA_CORRECTION_INDEX_V1\0", source: source),
+              let entryCount = reader.uint32(), entryCount == entries.count,
+              let count = reader.uint32(), count <= source.count else { return nil }
+        var index: [String: [Int]] = [:]
+        index.reserveCapacity(count)
+        for _ in 0..<count {
+            guard let key = reader.string(), !key.isEmpty, index[key] == nil,
+                  let length = reader.uint32(), length > 0, length <= 12 else { return nil }
+            var ids: [Int] = []
+            for _ in 0..<length {
+                guard let id = reader.uint32(), entries.indices.contains(id) else { return nil }
+                ids.append(id)
+            }
+            index[key] = ids
+        }
+        return reader.isAtEnd ? index : nil
     }
 
     private func rankedCandidatesLocked(for word: String) -> [Entry] {
