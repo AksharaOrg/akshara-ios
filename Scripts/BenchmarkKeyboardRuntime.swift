@@ -57,6 +57,13 @@ report("Two-scalar prefix cache misses", prefixes.map { prefix in
 let request = SinhalaPredictionRequest(composingText: "ක", precedingWords: ["එය"], maximumResults: 24)
 _ = model.candidates(for: request)
 report("Candidate cache hits", (0..<500).map { _ in measure { _ = model.candidates(for: request) } })
+let phoneticWords = ["honda", "sinhala", "karanawa", "thaththa", "kazda", "kruura", "karma", "vidyaava"]
+report("Smart Phonetic v2 sound-index preparation", [measure { model.prepareBundledModelsIfNeeded(phonetic: true) }])
+report("Smart Phonetic v2 whole-word choices", phoneticWords.map { roman in measure {
+    _ = model.candidates(for: .init(composingText: SmartPhoneticV2.transliterate(roman),
+        precedingWords: ["මම"], maximumResults: 3, phoneticSource: roman,
+        phoneticConfiguration: .init(), exactPhoneticOnly: true))
+} })
 let ranked = model.candidates(for: request)
 report("Next-key weights", (0..<100).map { _ in measure {
     _ = model.nextKeyWeights(latinBuffer: "k", mode: .smartPhonetic, shifted: false, from: ranked, precedingWords: ["එය"])
@@ -86,6 +93,9 @@ report("English construction and preparation", (0..<3).map { _ in measure {
 } })
 let english = EnglishPredictionProvider(databaseURL: englishURL, defaults: store)
 english.prepareIfNeeded()
+report("English swap suggestion lookup", (0..<120).map { index in measure {
+    _ = english.transpositionSuggestions(for: ["teh", "hte", "hlelo", "recieve"][index % 4])
+} })
 let englishPrefixes = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
 report("English broad prefix cache misses", englishPrefixes.map { prefix in measure {
     _ = english.candidates(for: .init(composingText: prefix, precedingWords: ["the"], maximumResults: 24))

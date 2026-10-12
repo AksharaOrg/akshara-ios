@@ -1,5 +1,105 @@
 import Foundation
+import CoreGraphics
 import SQLite3
+
+// Existing composition fixtures describe the classic engine. Restore the user's choice afterwards.
+let originalPhoneticV2 = KeyboardPreferences.defaults.object(forKey: KeyboardPreferences.smartPhoneticV2Key)
+KeyboardPreferences.defaults.set(false, forKey: KeyboardPreferences.smartPhoneticV2Key)
+KeyboardPreferences.reload()
+defer {
+    if let originalPhoneticV2 { KeyboardPreferences.defaults.set(originalPhoneticV2, forKey: KeyboardPreferences.smartPhoneticV2Key) }
+    else { KeyboardPreferences.defaults.removeObject(forKey: KeyboardPreferences.smartPhoneticV2Key) }
+    KeyboardPreferences.reload()
+}
+
+// Overlapping keys share a preview, but only its current owner can hide it.
+do {
+    let first = NSObject(), second = NSObject()
+    var owner = KeyboardPressOwner()
+    owner.claim(ObjectIdentifier(first))
+    owner.claim(ObjectIdentifier(second))
+    precondition(!owner.release(ObjectIdentifier(first)))
+    precondition(owner.release(ObjectIdentifier(second)))
+    precondition(!owner.release(ObjectIdentifier(second)))
+    owner.claim(ObjectIdentifier(first))
+    owner.reset() // Layout teardown/dismissal invalidates both lifts.
+    precondition(!owner.release(ObjectIdentifier(first)))
+}
+
+// Exercise actual pending-action state across overlapping input callbacks,
+// obsolete queue closures, field changes, callbacks with nil IDs and teardown.
+do {
+    struct Context: Equatable { var document: UUID?; var edit = 0; var layout = 0 }
+    var context = Context(document: UUID())
+    var pending = DeferredKeyboardAction<Context>()
+    var text = "ab"
+    func drain(_ token: UInt64? = nil) {
+        if pending.take(token: token, context: context) {
+            text.removeLast()
+            context.edit += 1
+        }
+    }
+    let first = pending.enqueue(context: context)
+    drain() // New letter begins before the first queued closure runs.
+    text += "c"; context.edit += 1
+    drain(first)
+    precondition(text == "ac")
+    let second = pending.enqueue(context: context)
+    drain() // A second Delete must preserve the first deletion.
+    let third = pending.enqueue(context: context)
+    drain(second) // Old closure must leave the new action pending.
+    precondition(pending.hasPending && text == "a")
+    drain(third)
+    precondition(text.isEmpty && !pending.hasPending)
+    text = "new field"
+    let previousField = pending.enqueue(context: context)
+    context.document = UUID()
+    drain(previousField)
+    precondition(text == "new field")
+    let previousLayout = pending.enqueue(context: context)
+    context.layout += 1
+    drain(previousLayout)
+    precondition(text == "new field")
+    context.document = nil
+    let reset = pending.enqueue(context: context)
+    pending.cancel() // Host callback or dismissal with no document identifier.
+    drain(reset)
+    precondition(text == "new field")
+    let interveningEdit = pending.enqueue(context: context)
+    context.edit += 1
+    drain(interveningEdit)
+    precondition(text == "new field")
+}
+
+do {
+    let bounds = CGRect(x: 0, y: 0, width: 228, height: 52)
+    let anchor = CGRect(x: 4, y: 59, width: 44, height: 44)
+    var picker = AlternatePickerSelection(count: 5)
+    picker.update(at: CGPoint(x: 49, y: 25), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == 0, "Small boundary drift changed the alternate")
+    picker.update(at: CGPoint(x: 56, y: 25), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == 1)
+    picker.update(at: CGPoint(x: 47, y: 25), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == 1, "Reverse drift flickered across the boundary")
+    picker.update(at: CGPoint(x: 40, y: 75), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == 0, "The held key/corridor must stay usable")
+    picker.update(at: CGPoint(x: 500, y: 25), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == nil, "A distant release selected an end alternate")
+    picker.update(at: CGPoint(x: 116, y: 25), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == 2, "Returning to the popup must restore selection")
+    picker.update(at: CGPoint(x: 116, y: 220), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == nil)
+    picker.update(at: CGPoint(x: CGFloat.nan, y: 25), bounds: bounds, anchor: anchor)
+    precondition(picker.selectedIndex == nil)
+    var empty = AlternatePickerSelection(count: 0)
+    empty.update(at: .zero, bounds: .zero, anchor: .zero)
+    precondition(empty.selectedIndex == nil)
+    var clamped = AlternatePickerSelection(count: 8, selectedIndex: 7)
+    clamped.update(at: CGPoint(x: 120, y: 75), bounds: CGRect(x: 0, y: 0, width: 340, height: 52),
+                   anchor: CGRect(x: 100, y: 59, width: 44, height: 44))
+    precondition(clamped.selectedIndex == 7, "A stationary hold selected an accent after screen clamping")
+}
+print("Overlapping preview ownership, deferred Delete ordering/invalidation and alternate intent passed")
 
 // Operation-scoped snapshots reuse nil as well as text; every mutation or
 // callback must invalidate before a subsequent authoritative read.
@@ -135,6 +235,29 @@ guard !secondHop.contains(firstHop[0]) else {
 }
 print("Sinhala chained next-word predictions passed (\(firstHop[0]) → \(secondHop.joined(separator: ",")))")
 
+// Exercise the controller's request gate as well as the provider. Empty
+// composition is a valid next-word request after Space or a candidate tap.
+do {
+    let blank = SinhalaPredictionRequest(composingText: "", precedingWords: [], maximumResults: 3)
+    precondition(!blank.hasInputContext, "Blank fields must not show sentence openers")
+    precondition(SinhalaPredictionRequest(composingText: "පො", precedingWords: [], maximumResults: 3).hasInputContext)
+    for preceding in [["අතර"], ["එක"], ["එක", "පොඩියට"]] {
+        let request = SinhalaPredictionRequest(composingText: "", precedingWords: preceding, maximumResults: 3)
+        precondition(request.hasInputContext, "Next-word request blocked after \(preceding)")
+        let ranked = provider.candidates(for: request).map(\.text)
+        precondition(!ranked.isEmpty && !ranked.contains(preceding.last!))
+        let displayed = SinhalaCandidateRanking.words(composingText: "", ranked: ranked, corrections: [])
+        precondition(CandidateRailLayout.words(typed: "", ranked: displayed)[1] == ranked.first,
+            "Next-word centre slot lost its first bigram/trigram result")
+        let nextRequest = SinhalaPredictionRequest(composingText: "",
+            precedingWords: Array((preceding + [ranked[0]]).suffix(2)), maximumResults: 3)
+        precondition(nextRequest.hasInputContext && !provider.candidates(for: nextRequest).isEmpty,
+            "Next-word suggestion chain stopped after a selection")
+    }
+    precondition(!blank.hasInputContext, "New empty-field request reused preceding context")
+    print("Empty-field suppression, next-word request eligibility and contextual rail chains passed")
+}
+
 var autocorrectPassed = true
 func expectAutocorrect(_ condition: Bool, label: String) {
     guard condition else {
@@ -151,8 +274,115 @@ expectAutocorrect(autocorrect.correction(for: "ගෙදරා") == "ගෙද�
 expectAutocorrect(autocorrect.correction(for: "ගෙදර") == nil, label: "verified word unchanged")
 expectAutocorrect(autocorrect.correction(for: "abc") == nil, label: "Latin excluded")
 expectAutocorrect(autocorrect.suggestions(for: "ගෙදරා").first?.text == "ගෙදර", label: "correction suggestion")
+for word in ["විද්‍යාව", "ක්‍රියා", "ක්‍රමයේ", "අධ්‍යාපන", "ප්‍රශ්න", "ශ්‍රී"] {
+    expectAutocorrect(autocorrect.isVerified(word), label: "joined verified spelling \(word)")
+    expectAutocorrect(autocorrect.correction(for: word) == nil, label: "joined spelling retained \(word)")
+}
+expectAutocorrect(autocorrect.correction(for: "විද්යාව") == "විද්‍යාව", label: "missing yansaya join")
+expectAutocorrect(autocorrect.correction(for: "ක්රියා") == "ක්‍රියා", label: "missing rakaransaya join")
+expectAutocorrect(autocorrect.correction(for: "කර්‍මයේ") == nil, label: "optional repaya retained")
+expectAutocorrect(autocorrect.correction(for: "අක්‍ෂර") == nil, label: "classical conjunct retained")
 guard autocorrectPassed else { exit(1) }
 print("Sinhala autocorrect fixtures passed")
+
+// A live prefix is not yet a misspelling. The old controller put every
+// correction before completions, and learned one-edit words could also evict
+// them from the provider's bounded result set.
+do {
+    func display(_ prefix: String, after context: [String] = ["එක"], limit: Int = 3) -> [String] {
+        SinhalaCandidateRanking.words(composingText: prefix,
+            ranked: provider.candidates(for: .init(composingText: prefix, precedingWords: context,
+                maximumResults: limit)).map(\.text),
+            corrections: autocorrect.suggestions(for: prefix).map(\.text), maximumResults: limit)
+    }
+    precondition(autocorrect.suggestions(for: "පොඩිය").first?.text == "වැඩිය",
+        "The reported spelling-correction collision was not reproduced")
+    for prefix in ["පොඩි", "පොඩිය"] {
+        precondition(display(prefix).first == "පොඩියට", "Reported prefix \(prefix): \(display(prefix))")
+        for context in [[], ["එක"], ["මම", "එක"]] {
+            let ranked = provider.candidates(for: .init(composingText: prefix, precedingWords: context,
+                maximumResults: 3)).map(\.text)
+            precondition(display(prefix, after: context).first == ranked.first,
+                "Contextual completion displaced by a correction")
+        }
+    }
+    let suite = "lk.org.akshara.prefix-priority.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    // Force the unrelated near-match to have a much higher personal/context score.
+    defaults.set(["වැඩිය": 1000], forKey: "prediction.learnedWords.v1")
+    defaults.set(["එක": ["වැඩිය": 1000]], forKey: "prediction.learnedBigrams.v1")
+    let learnedProvider = SinhalaFrequencyListPredictionProvider(modelURL: frequencyURL,
+        nextWordURL: nextWordURL, trigramURL: trigramURL, sentenceStartURL: nil, defaults: defaults)
+    for limit in [1, 2, 3, 24] {
+        let ranked = learnedProvider.candidates(for: .init(composingText: "පොඩිය",
+            precedingWords: ["එක"], maximumResults: limit)).map(\.text)
+        precondition(ranked.first == "පොඩියට", "Learned near-match displaced a completion at limit \(limit)")
+        var reachedFallback = false
+        for word in ranked {
+            if !SinhalaEngine.hasUnicodeScalarPrefix(word, "පොඩිය") { reachedFallback = true }
+            else { precondition(!reachedFallback, "Completions must precede every fuzzy learned match") }
+        }
+    }
+    precondition(display("ගෙදරා").first == "ගෙදර", "Typo correction without completions regressed")
+    precondition(display("විද්යාව").first == "විද්‍යාව", "Joined-letter correction regressed")
+    precondition(SinhalaCandidateRanking.words(composingText: "ක", ranked: ["කා", "කාරය"],
+        corrections: ["ගා", "කා"]) == ["කා", "කාරය", "ගා"], "Scalar prefix/deduplication regressed")
+    precondition(SinhalaCandidateRanking.words(composingText: "ක්‍", ranked: ["ක්‍ෂර"],
+        corrections: ["අක්‍ෂර"]).first == "ක්‍ෂර", "Partial conjunct lost its completion")
+    precondition(SinhalaCandidateRanking.words(composingText: "පොඩිය", ranked: ["පොඩියට"],
+        corrections: ["වැඩිය"], maximumResults: 0).isEmpty)
+    // Audit every proper grapheme prefix (three or more letters) in the
+    // bundled corpus, covering where spelling suggestions first become eligible.
+    let rows = try String(contentsOf: frequencyURL, encoding: .utf8)
+    var prefixes = Set<String>()
+    for row in rows.split(whereSeparator: \.isNewline) where !row.hasPrefix("#") {
+        let word = String(row.split(separator: "\t")[0])
+        let letters = Array(word)
+        guard letters.count > 3 else { continue }
+        for length in 3..<letters.count { prefixes.insert(String(letters.prefix(length))) }
+    }
+    var collisions = 0
+    for prefix in prefixes.sorted() {
+        let ranked = provider.candidates(for: .init(composingText: prefix, precedingWords: ["එක"], maximumResults: 3)).map(\.text)
+        precondition(!ranked.isEmpty && ranked.allSatisfy { SinhalaEngine.hasUnicodeScalarPrefix($0, prefix) },
+            "Corpus completion missing for \(prefix)")
+        let corrections = autocorrect.suggestions(for: prefix).map(\.text)
+        let merged = SinhalaCandidateRanking.words(composingText: prefix, ranked: ranked, corrections: corrections)
+        precondition(merged.first == ranked.first, "Correction displaced corpus completion for \(prefix)")
+        if corrections.contains(where: { !SinhalaEngine.hasUnicodeScalarPrefix($0, prefix) }) { collisions += 1 }
+    }
+    print("Sinhala prefix priority passed: \(prefixes.count) corpus prefixes, \(collisions) spelling collisions, bounded learned rankings and correction fallbacks")
+}
+
+// A swap of complete Sinhala graphemes may be suggested, but never expands
+// automatic correction. Include a conjunct containing a joiner.
+do {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".lexicon")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let verified = ["ගෙදර", "ක්‍රමයේ"]
+    var data = Data("AKSHARA_AUTOCORRECT_V1\0".utf8)
+    func appendInteger(_ value: Int, bytes: Int) {
+        for index in 0..<bytes { data.append(UInt8((value >> (index * 8)) & 0xff)) }
+    }
+    appendInteger(verified.count, bytes: 4)
+    for word in verified {
+        appendInteger(word.utf8.count, bytes: 2)
+        data.append(contentsOf: word.utf8)
+        appendInteger(100, bytes: 4)
+    }
+    try data.write(to: url)
+    let service = SinhalaAutocorrectionService(artifactURL: url)
+    for word in verified {
+        var graphemes = Array(word)
+        precondition(graphemes.count >= 3)
+        graphemes.swapAt(0, 1)
+        let typo = String(graphemes)
+        precondition(service.suggestions(for: typo).contains { $0.text == word })
+        precondition(service.correction(for: typo) == nil)
+        precondition(service.suggestions(for: word).isEmpty)
+    }
+}
 
 var easterEggPassed = true
 func expectTrueName(rendered: String, phonetic: String, expected: Bool, label: String) {
@@ -214,6 +444,19 @@ let yansaya = "\u{E005}"
 expectRendered("ෙප\(rakaranshaya)්", "ප්‍රේ", label: "kombuwa pa rakaranshaya virama")
 expectRendered("ෙප\(rakaranshaya)", "ප්‍රෙ", label: "kombuwa pa rakaranshaya")
 expectRendered("ෙක\(yansaya)්", "ක්‍යේ", label: "kombuwa ka yansaya virama")
+expectRendered("ක්\(yansaya)", "ක්‍ය", label: "yansaya after hal")
+expectRendered("ක්‍\(rakaranshaya)", "ක්‍ර", label: "rakaransaya after hal and joiner")
+expectRendered("කි\(rakaranshaya)", "ක්‍රි", label: "rakaransaya after vowel")
+expectRendered("ක්\u{E000}ෂ", "ක්‍ෂ", label: "conjunct after existing hal")
+expectRendered("ක\u{E001}ෂ", "ක්‍ෂ", label: "touching conjunct")
+expectRendered("කි\u{E000}ෂ", "ක්‍ෂි", label: "late conjunct before vowel")
+expectRendered("කි\u{E000}", "කි", label: "pending late conjunct retains finished vowel")
+let joinedEdit = SinhalaEngine.slsClusterEdit(entries: ["වි", "ද", "්"], sources: ["වි", "ද", "්"], adding: yansaya)!
+precondition(joinedEdit.start == 1 && joinedEdit.rendered == "ද්‍ය")
+precondition(SinhalaEngine.slsClusterEdit(entries: ["කෙ"], sources: ["ෙක"], adding: rakaranshaya)?.rendered == "ක්‍රෙ")
+precondition(SinhalaEngine.slsClusterEdit(entries: ["කි"], sources: ["කි"], adding: "\u{E002}")?.rendered == "ර්‍කි")
+precondition(SinhalaEngine.slsClusterEdit(entries: [], sources: [], adding: yansaya) == nil)
+precondition(SinhalaEngine.slsClusterEdit(entries: ["ක", "."], sources: ["ක", "."], adding: yansaya) == nil)
 expectComposition(SinhalaEngine.canExtendPrebase("ෙප", with: rakaranshaya), true, label: "ke pa plus rakaranshaya")
 expectComposition(SinhalaEngine.canExtendPrebase("ෙප" + rakaranshaya, with: "්"), true, label: "pre plus virama")
 
@@ -1059,6 +1302,9 @@ precondition(english.correction(for: "the") == nil)
 precondition(english.correction(for: "don't") == nil)
 precondition(english.correction(for: "userName") == nil)
 precondition(english.correction(for: "ab") == nil)
+precondition(english.transpositionSuggestions(for: "hte").contains("the"))
+// The corpus contains "teh"; a known word must retain literal treatment.
+precondition(english.transpositionSuggestions(for: "teh").isEmpty)
 let weights = english.nextKeyWeights(latinBuffer: "he", mode: .sls, shifted: false,
     from: [.init(text: "hello", score: 1)], precedingWords: [])
 precondition(weights == ["l": 1])
@@ -1100,6 +1346,17 @@ precondition(tiny.correction(for: "HELLLO") == "HELLO")
 precondition(tiny.correction(for: "hElllo") == nil)
 precondition(tiny.correction(for: "cut") == nil, "Ambiguous typo was corrected")
 precondition(tiny.correction(for: "he-lo") == nil)
+precondition(tiny.transpositionSuggestions(for: "hlelo") == ["hello"])
+precondition(tiny.transpositionSuggestions(for: "Helol") == ["Hello"])
+precondition(tiny.transpositionSuggestions(for: "HLELO") == ["HELLO"])
+precondition(tiny.transpositionSuggestions(for: "hLelo").isEmpty)
+precondition(tiny.transpositionSuggestions(for: "hello").isEmpty)
+precondition(tiny.transpositionSuggestions(for: "hel-ol").isEmpty)
+precondition(tiny.transpositionSuggestions(for: "hlelo", maximumResults: 0).isEmpty)
+precondition(tiny.correction(for: "hlelo") == nil, "Swap suggestions broadened automatic replacement")
+let cancelledSwapLookup = PredictionCancellationToken()
+cancelledSwapLookup.cancel()
+precondition(tiny.transpositionSuggestions(for: "hlelo", cancellation: cancelledSwapLookup).isEmpty)
 let learnedRequest = SinhalaPredictionRequest(composingText: "z", precedingWords: [], maximumResults: 3)
 precondition(tiny.candidates(for: learnedRequest).isEmpty)
 tiny.recordCommittedWord("zorb", after: "hello")
@@ -1188,6 +1445,53 @@ for _ in 0..<1000 { _ = englishCandidates("hel", after: ["say"]) }
 let warmMS = Double(DispatchTime.now().uptimeNanoseconds - warmStart) / 1_000_000 / 1000
 print(String(format: "English desktop timing: construction %.3f ms, cold load %.3f ms, repeated lookup %.4f ms", constructionMS, coldMS, warmMS))
 print("English resources, correction, context, casing, learning isolation, preferences and protection passed")
+
+// Inject spelling decisions to exercise UK behavior independently of the
+// desktop's lack of UIKit. The simulator exercises the real UITextChecker.
+struct BritishSpellingFixture: EnglishSpellingChecking {
+    let words: Set<String> = ["the", "hello", "don't", "i'm", "colour", "colourful", "color", "café", "cat", "cot"]
+    func isCorrect(_ word: String) -> Bool { words.contains(word.lowercased()) }
+    func guesses(for word: String) -> [String] {
+        ["teh": ["the"], "hlelo": ["hello"], "dont": ["don't"], "im": ["I'm"],
+         "colourr": ["colour"], "zzzzz": ["hello"]][word.lowercased()] ?? []
+    }
+    func completions(for prefix: String) -> [String] { words.filter { $0.hasPrefix(prefix.lowercased()) }.sorted() }
+}
+let ukDefaults = UserDefaults(suiteName: englishSuite + ".uk")!
+defer { ukDefaults.removePersistentDomain(forName: englishSuite + ".uk") }
+let uk = EnglishPredictionProvider(databaseURL: root.appendingPathComponent("AksharaKeyboard/Resources/EnglishPrediction.sqlite3"),
+    defaults: ukDefaults, spellingChecker: BritishSpellingFixture())
+for (source, expected) in [("teh", "the"), ("Teh", "The"), ("TEH", "THE"), ("hlelo", "hello"),
+                           ("dont", "don't"), ("im", "I'm"), ("i", "I"), ("colourr", "colour")] {
+    precondition(uk.correction(for: source) == expected, "UK correction failed: \(source)")
+}
+for source in ["colour", "color", "don't", "café", "userName", "zzzzz", "foo_bar", "සිංහල"] {
+    precondition(uk.correction(for: source) == nil, "UK correction changed literal: \(source)")
+}
+precondition(uk.candidates(for: .init(composingText: "don't", precedingWords: [], maximumResults: 3)).contains { $0.text == "don't" })
+uk.recordCommittedWord("teh", after: nil)
+precondition(uk.correction(for: "teh") == "the", "Natural learning promoted a misspelling")
+KeyboardPreferences.protectFromAutocorrect("teh")
+precondition(uk.correction(for: "teh") == nil)
+KeyboardPreferences.removeAutocorrectProtection("teh")
+var englishShift = EnglishShiftState()
+englishShift.tap(at: 1, currentlyShifted: false)
+precondition(englishShift.shifted(automatic: false))
+englishShift.consumeLetter()
+precondition(!englishShift.shifted(automatic: false))
+englishShift.tap(at: 2, currentlyShifted: false)
+englishShift.tap(at: 2.2, currentlyShifted: true)
+precondition(englishShift.capsLocked)
+englishShift.consumeLetter()
+precondition(englishShift.shifted(automatic: false))
+englishShift.tap(at: 3, currentlyShifted: true)
+precondition(!englishShift.capsLocked && !englishShift.shifted(automatic: false))
+englishShift.tap(at: 4, currentlyShifted: false)
+englishShift.interruptDoubleTap()
+englishShift.tap(at: 4.1, currentlyShifted: true)
+precondition(!englishShift.capsLocked)
+precondition(EnglishKeyAlternates.letters["e"]!.contains("é"))
+print("UK spelling authority, contractions, swaps, pronoun, literal protection and caps lock passed")
 tiny.flushPendingPersistence()
 englishDefaults.removePersistentDomain(forName: englishSuite)
 unavailableDefaults.removePersistentDomain(forName: englishSuite + ".empty")

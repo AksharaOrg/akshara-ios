@@ -114,8 +114,10 @@ struct KeyboardCompositionSession {
     }
 
     /// Preview that would be written if `source` were typed in this session.
-    func phoneticPreviewIfTyping(_ source: String, mode: SinhalaEngine.Mode) -> String {
-        SinhalaEngine.transliterate(phoneticBuffer + source, mode: mode)
+    func phoneticPreviewIfTyping(_ source: String, mode: SinhalaEngine.Mode,
+                                configuration: SmartPhoneticConfiguration = KeyboardPreferences.hotPath.smartPhonetic) -> String {
+        SinhalaEngine.transliterate(committedPhoneticSegments.map(\.source).joined() + phoneticBuffer + source,
+                                   mode: mode, configuration: configuration)
     }
 
     /// Leave already-written glyphs in the host and keep only a short live
@@ -130,6 +132,7 @@ struct KeyboardCompositionSession {
             source: phoneticBuffer,
             anchor: phoneticCompositionAnchor,
             mode: mode,
+            currentLiveRendered: lastPhoneticRendered,
             maximumLiveSourceLength: maximumLiveSourceLength
         ) else { return false }
         committedPhoneticSegments.append(
@@ -146,6 +149,15 @@ struct KeyboardCompositionSession {
 enum PhoneticLiveWindow {
     static let defaultMaximumSourceLength = 8
 
+    /// Retain the full word's converter state when rendering a short live suffix.
+    /// Nil means a later token changed committed glyphs and the caller must reopen them.
+    static func liveRendering(source: String, committedRendered: String, mode: SinhalaEngine.Mode,
+                              configuration: SmartPhoneticConfiguration) -> String? {
+        let full = SinhalaEngine.transliterate(source, mode: mode, configuration: configuration)
+        guard SinhalaEngine.hasUnicodeScalarPrefix(full, committedRendered) else { return nil }
+        return UnmarkedCompositionRewrite.unicodeScalarSuffix(full, afterPrefix: committedRendered)
+    }
+
     struct PrefixCommit: Equatable {
         var liveSource: String
         var liveRendered: String
@@ -161,18 +173,24 @@ enum PhoneticLiveWindow {
         source: String,
         anchor: String?,
         mode: SinhalaEngine.Mode,
+        configuration: SmartPhoneticConfiguration = KeyboardPreferences.hotPath.smartPhonetic,
+        currentLiveRendered: String? = nil,
         maximumLiveSourceLength: Int = defaultMaximumSourceLength
     ) -> PrefixCommit? {
         let sourceLength = source.count
         guard sourceLength > maximumLiveSourceLength else { return nil }
-        let fullRendered = SinhalaEngine.transliterate(source, mode: mode)
+        let fullRendered = SinhalaEngine.transliterate(source, mode: mode, configuration: configuration)
+        // A suffix can render differently at word start. Never commit its standalone rendering
+        // when the full word's preceding converter state produced different live glyphs.
+        if let currentLiveRendered,
+           !fullRendered.unicodeScalars.elementsEqual(currentLiveRendered.unicodeScalars) { return nil }
         let latestPrefixLength = sourceLength - maximumLiveSourceLength
         for prefixLength in stride(from: latestPrefixLength, through: 1, by: -1) {
             let split = source.index(source.startIndex, offsetBy: prefixLength)
             let prefix = String(source[..<split])
             let suffix = String(source[split...])
-            let renderedPrefix = SinhalaEngine.transliterate(prefix, mode: mode)
-            let renderedSuffix = SinhalaEngine.transliterate(suffix, mode: mode)
+            let renderedPrefix = SinhalaEngine.transliterate(prefix, mode: mode, configuration: configuration)
+            let renderedSuffix = SinhalaEngine.transliterate(suffix, mode: mode, configuration: configuration)
             guard renderedPrefix + renderedSuffix == fullRendered else { continue }
             let liveAnchor = anchor.map { $0 + renderedPrefix }
             return PrefixCommit(
@@ -317,9 +335,7 @@ enum SpaceSuggestionEligibility {
         guard let candidate, let displayedPrefix, let displayedGeneration,
               !currentPrefix.isEmpty, displayedPrefix == currentPrefix,
               displayedGeneration == currentGeneration else { return false }
-        return !candidate.isEmpty && candidate.unicodeScalars.allSatisfy {
-            (0x0D80...0x0DFF).contains($0.value)
-        }
+        return SinhalaEngine.isSinhalaWord(candidate)
     }
 }
 
@@ -350,6 +366,34 @@ struct AutocorrectionRejection {
     }
 
     mutating func reset() { words.removeAll() }
+}
+
+struct EnglishShiftState {
+    private(set) var capsLocked = false
+    private var oneShot: Bool?
+    private var lastTap: TimeInterval?
+    func shifted(automatic: Bool) -> Bool { capsLocked || (oneShot ?? automatic) }
+    mutating func tap(at time: TimeInterval, currentlyShifted: Bool) {
+        if capsLocked {
+            capsLocked = false; oneShot = false; lastTap = nil
+        } else if let lastTap, time - lastTap >= 0, time - lastTap <= 0.3 {
+            capsLocked = true; oneShot = nil; self.lastTap = nil
+        } else { oneShot = !currentlyShifted; lastTap = time }
+    }
+    mutating func consumeLetter() { oneShot = nil; lastTap = nil }
+    mutating func interruptDoubleTap() { lastTap = nil }
+}
+
+enum EnglishKeyAlternates {
+    static let letters: [String: [String]] = [
+        "a": ["a", "à", "á", "â", "ä", "æ", "ã", "å", "ā"],
+        "e": ["e", "è", "é", "ê", "ë", "ē", "ė", "ę"],
+        "i": ["i", "ì", "í", "î", "ï", "ī", "į"],
+        "o": ["o", "ò", "ó", "ô", "ö", "œ", "õ", "ø", "ō"],
+        "u": ["u", "ù", "ú", "û", "ü", "ū"],
+        "c": ["c", "ç", "ć", "č"], "n": ["n", "ñ", "ń"],
+        "s": ["s", "ß", "ś", "š"], "l": ["l", "ł"], "z": ["z", "ž", "ź", "ż"]
+    ]
 }
 
 enum EnglishCapitalization {

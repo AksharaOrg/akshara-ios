@@ -74,7 +74,7 @@ export BLOCKED_WORDS="$root/Scripts/SinhalaBlockedWords.txt"
   open my $bigrams, ">:encoding(UTF-8)", $ENV{RAW_BIGRAMS} or die $!;
   open my $trigrams, ">:encoding(UTF-8)", $ENV{RAW_TRIGRAMS} or die $!;
   while (my $line = <STDIN>) {
-    my @words = grep { length($_) <= 24 && !$blocked{$_} } $line =~ /[\x{0D80}-\x{0DFF}]+/g;
+    my @words = grep { length($_) <= 24 && !$blocked{$_} } $line =~ /[\x{0D80}-\x{0DFF}\x{200D}\x{200C}]+/g;
     next unless @words;
     my $spoken = (
       $line =~ /තියෙනවා|තියෙන්නේ|තිබුණා|නේද|ඕනේ|ඔයා|ඒක|මං|කරන්න|කියන්න|බලන්න|දෙන්න|ගන්න|එන්න|යන්න|වගේ|කොහොමද|මොකද|කියලා|හරි|දැන්/
@@ -152,6 +152,8 @@ mv "$trigram_output.tmp" "$trigram_output"
 # Line-initial words in this corpus are dominated by exam templates, so empty
 # context uses a curated spoken-opener list instead of raw first-of-line counts.
 grep -v '^#' "$root/Scripts/SinhalaSentenceStartSeeds.tsv" | grep -v '^$' > "$sentence_output"
+
+python3 "$root/Scripts/normalize_sinhala_prediction_models.py" "$output_dir"
 
 python3 - "$bigram_output" "$trigram_output" "$sentence_output" <<'PY'
 import os

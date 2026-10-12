@@ -79,15 +79,16 @@ for _ in 0..<count {
     let word = String(decoding: lexicon[cursor..<(cursor + size)], as: UTF8.self).precomposedStringWithCanonicalMapping
     cursor += size
     _ = integer(4)
-    if word.count >= 3, word.unicodeScalars.allSatisfy({ (0x0D80...0x0DFF).contains($0.value) || $0.value == 0x200C || $0.value == 0x200D }),
+    if !word.isEmpty, word.unicodeScalars.allSatisfy({ (0x0D80...0x0DFF).contains($0.value) || $0.value == 0x200C || $0.value == 0x200D }),
        seen.insert(word).inserted { words.append(word) }
 }
 var postings: [String: [Int]] = [:]
 for (id, word) in words.enumerated() {
+    guard word.count >= 3 else { continue }
     let graphemes = Array(word)
     for dropped in graphemes.indices {
         let key = graphemes.enumerated().compactMap { $0.offset == dropped ? nil : String($0.element) }.joined(separator: "\u{1F}")
-        if postings[key, default: []].count < 12 { postings[key, default: []].append(id) }
+        if !postings[key, default: []].contains(id) { postings[key, default: []].append(id) }
     }
 }
 var correctionIndex = header("AKSHARA_CORRECTION_INDEX_V1\0", source: lexicon)

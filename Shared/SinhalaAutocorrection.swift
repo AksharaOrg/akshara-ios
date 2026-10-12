@@ -24,6 +24,7 @@ final class SinhalaAutocorrectionService {
     private var cachedWords: [String] = []
     private var entries: [Entry] = []
     private var exact: [String: Int] = [:]
+    private var joinerEquivalents: [String: [Int]] = [:]
     /// A delete key represents every word one grapheme away. The index is
     /// intentionally built during warm-up, never on a key press.
     private var deletionIndex: [String: [Int]] = [:]
@@ -43,7 +44,9 @@ final class SinhalaAutocorrectionService {
         lock.lock()
         defer { lock.unlock() }
         loadLocked()
-        return exact[Self.normalized(word)] != nil
+        let normalized = Self.normalized(word)
+        return exact[normalized] != nil ||
+            (Self.hasValidJoins(normalized) && joinerEquivalents[Self.withoutJoiners(normalized)] != nil)
     }
 
     struct CorrectionEvaluation: Equatable {
@@ -66,10 +69,33 @@ final class SinhalaAutocorrectionService {
               !KeyboardPreferences.isAutocorrectProtected(normalized) else {
             return .init(suggestions: [], replacement: nil)
         }
-        let ranked = rankedCandidatesLocked(for: normalized)
-        let result = CorrectionEvaluation(suggestions: ranked.map {
+        let equivalent = joinerEquivalents[Self.withoutJoiners(normalized)] ?? []
+        // Repaya and classical/touching variants may add optional joiners.
+        // A verified letter sequence must never lose a deliberate join.
+        if Self.hasValidJoins(normalized), !equivalent.isEmpty {
+            return .init(suggestions: [], replacement: nil)
+        }
+        if equivalent.count == 1, let id = equivalent.first {
+            let candidate = Candidate(text: entries[id].word, frequency: entries[id].frequency)
+            return .init(suggestions: maximumResults > 0 ? [candidate] : [], replacement: candidate.text)
+        }
+        let conservative = rankedCandidatesLocked(for: normalized)
+        var suggestions = conservative
+        var seen = Set(conservative.map(\.word))
+        // Swap complete graphemes only. These are explicit suggestions;
+        // automatic replacement retains the existing one-edit policy.
+        let graphemes = Array(normalized)
+        for index in 0..<(graphemes.count - 1) where graphemes[index] != graphemes[index + 1] {
+            var swapped = graphemes
+            swapped.swapAt(index, index + 1)
+            if let id = exact[Self.normalized(String(swapped))], seen.insert(entries[id].word).inserted {
+                suggestions.append(entries[id])
+            }
+        }
+        suggestions.sort { $0.frequency == $1.frequency ? $0.word < $1.word : $0.frequency > $1.frequency }
+        let result = CorrectionEvaluation(suggestions: suggestions.map {
             Candidate(text: $0.word, frequency: $0.frequency)
-        }, replacement: ranked.count == 1 ? ranked[0].word : nil)
+        }, replacement: conservative.count == 1 ? conservative[0].word : nil)
         if evaluationCache[normalized] == nil {
             if cachedWords.count == 64 { evaluationCache.removeValue(forKey: cachedWords.removeFirst()) }
             cachedWords.append(normalized)
@@ -86,6 +112,21 @@ final class SinhalaAutocorrectionService {
 
     static func normalized(_ text: String) -> String {
         text.precomposedStringWithCanonicalMapping
+    }
+
+    private static func hasValidJoins(_ text: String) -> Bool {
+        let scalars = Array(text.unicodeScalars)
+        let joins = scalars.indices.filter { scalars[$0].value == 0x200D || scalars[$0].value == 0x200C }
+        return !joins.isEmpty && joins.allSatisfy { index in
+            guard index > 0, index + 1 < scalars.count else { return false }
+            let previous = scalars[index - 1].value, next = scalars[index + 1].value
+            return previous == 0x0DCA && (0x0D9A...0x0DC6).contains(next) ||
+                (0x0D9A...0x0DC6).contains(previous) && next == 0x0DCA && index + 2 < scalars.count &&
+                    (0x0D9A...0x0DC6).contains(scalars[index + 2].value)
+        }
+    }
+    private static func withoutJoiners(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.filter { $0.value != 0x200C && $0.value != 0x200D }))
     }
 
     private func loadLocked() {
@@ -112,9 +153,12 @@ final class SinhalaAutocorrectionService {
                 entries.removeAll(); exact.removeAll(); return
             }
             let word = Self.normalized(String(decoding: wordData, as: UTF8.self))
-            guard isEligible(word), exact[word] == nil else { continue }
+            guard SinhalaEngine.isSinhalaWord(word), exact[word] == nil else { continue }
             exact[word] = entries.count
             entries.append(.init(word: word, frequency: Int(frequency)))
+        }
+        for (id, entry) in entries.enumerated() {
+            joinerEquivalents[Self.withoutJoiners(entry.word), default: []].append(id)
         }
         if let indexed = loadDeletionIndex(source: data) {
             deletionIndex = indexed
@@ -123,9 +167,10 @@ final class SinhalaAutocorrectionService {
         }
         deletionIndex.reserveCapacity(entries.count * 3)
         for (index, entry) in entries.enumerated() {
+            guard isEligible(entry.word) else { continue }
             for key in Self.deletionKeys(for: entry.word) {
                 var values = deletionIndex[key, default: []]
-                if values.count < 12 { values.append(index) }
+                if !values.contains(index) { values.append(index) }
                 deletionIndex[key] = values
             }
         }
@@ -140,7 +185,7 @@ final class SinhalaAutocorrectionService {
         index.reserveCapacity(count)
         for _ in 0..<count {
             guard let key = reader.string(), !key.isEmpty, index[key] == nil,
-                  let length = reader.uint32(), length > 0, length <= 12 else { return nil }
+                  let length = reader.uint32(), length > 0, length <= entries.count else { return nil }
             var ids: [Int] = []
             for _ in 0..<length {
                 guard let id = reader.uint32(), entries.indices.contains(id) else { return nil }
@@ -167,7 +212,7 @@ final class SinhalaAutocorrectionService {
         return ids.compactMap { index -> Entry? in
             guard entries.indices.contains(index) else { return nil }
             let entry = entries[index]
-            return Self.editDistanceAtMostOne(graphemes, Array(entry.word)) ? entry : nil
+            return isEligible(entry.word) && Self.editDistanceAtMostOne(graphemes, Array(entry.word)) ? entry : nil
         }.sorted {
             $0.frequency == $1.frequency ? $0.word < $1.word : $0.frequency > $1.frequency
         }

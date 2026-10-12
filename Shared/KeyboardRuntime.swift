@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import CryptoKit
 #if os(iOS)
 import os
@@ -110,6 +111,89 @@ final class DocumentContextSnapshot {
     }
 }
 
+/// A shared callout belongs to the most recently displayed press. An older
+/// key's lift or cancellation must not dismiss the newer key's feedback.
+struct KeyboardPressOwner {
+    private var owner: ObjectIdentifier?
+
+    mutating func claim(_ identifier: ObjectIdentifier) { owner = identifier }
+    mutating func release(_ identifier: ObjectIdentifier) -> Bool {
+        guard owner == identifier else { return false }
+        owner = nil
+        return true
+    }
+    mutating func reset() { owner = nil }
+}
+
+/// Main-thread state for an action deferred until UIKit finishes touch-down.
+/// Drain before accepting newer input; invalidate on host/layout changes.
+/// An obsolete closure cannot consume a newer pending action.
+struct DeferredKeyboardAction<Context: Equatable> {
+    private var nextToken: UInt64 = 0
+    private var pending: (token: UInt64, context: Context)?
+    var hasPending: Bool { pending != nil }
+    func contains(token: UInt64?) -> Bool {
+        guard let pending else { return false }
+        return token == nil || pending.token == token
+    }
+
+    mutating func enqueue(context: Context) -> UInt64 {
+        nextToken &+= 1
+        pending = (nextToken, context)
+        return nextToken
+    }
+    mutating func take(token: UInt64? = nil, context: Context) -> Bool {
+        guard let action = pending, token == nil || token == action.token else { return false }
+        pending = nil
+        return action.context == context
+    }
+    mutating func cancel() { pending = nil }
+}
+
+/// Selection stays stable near a slot boundary, and leaving the popup/key
+/// corridor cancels rather than clamping a distant finger to an end choice.
+struct AlternatePickerSelection {
+    let count: Int
+    private let anchorIndex: Int
+    private var lastIndex: Int
+    private(set) var selectedIndex: Int?
+
+    init(count: Int, selectedIndex: Int = 0) {
+        self.count = max(0, count)
+        lastIndex = min(max(0, selectedIndex), max(0, count - 1))
+        anchorIndex = lastIndex
+        self.selectedIndex = count > 0 ? lastIndex : nil
+    }
+
+    mutating func update(at point: CGPoint, bounds: CGRect, anchor: CGRect) {
+        guard count > 0, bounds.width > 8, bounds.height > 0 else {
+            selectedIndex = nil
+            return
+        }
+        let width = (bounds.width - 8) / CGFloat(count)
+        // Wide accent menus must be clamped to the screen, so their base
+        // slot may no longer line up with the held key. A stationary hold
+        // still means the base letter; selecting an accent requires movement.
+        if anchor.contains(point), !bounds.contains(point) {
+            lastIndex = anchorIndex
+            selectedIndex = anchorIndex
+            return
+        }
+        let tolerance = min(18, max(12, width * 0.3))
+        guard bounds.union(anchor).insetBy(dx: -tolerance, dy: -tolerance).contains(point) else {
+            selectedIndex = nil
+            return
+        }
+        let hysteresis = min(8, width * 0.15)
+        let left = 4 + CGFloat(lastIndex) * width
+        if selectedIndex != nil, point.x >= left - hysteresis, point.x <= left + width + hysteresis {
+            return
+        }
+        lastIndex = min(max(Int(floor((point.x - 4) / width)), 0), count - 1)
+        selectedIndex = lastIndex
+    }
+}
+
 /// Hash-paired sidecar reader. Truncated, stale, and unsupported files fall back
 /// to rebuilding from the source. Integer reads are alignment independent.
 struct PredictionIndexReader {
@@ -194,4 +278,13 @@ struct ReadySinhalaCorrection {
     func replacement(for current: SinhalaCorrectionIdentity) -> String? {
         identity == current ? result.replacement : nil
     }
+}
+
+struct PhoneticChoiceIdentity: Equatable {
+    let document: UUID
+    let generation: Int
+    let source: String
+    let word: String
+    let configuration: SmartPhoneticConfiguration
+    let protectionRevision: Int
 }

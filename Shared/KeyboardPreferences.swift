@@ -130,6 +130,11 @@ enum KeyboardPreferences {
 
     static let appGroupIdentifier = "group.lk.org.akshara.keyboard"
     static let layoutKey = "selectedKeyboardLayout"
+    static let smartPhoneticV2Key = "smart_phonetic_v2"
+    static let v2ArchaicKey = "smart_phonetic_v2_archaic"
+    static let v2RepayaKey = "smart_phonetic_v2_repaya_zwj"
+    static let v2ClassicalKey = "smart_phonetic_v2_classical"
+    static let v2RakaransayaKey = "smart_phonetic_v2_rakaransaya_u"
     static let emojiKey = "emojiPickerEnabled"
     static let hapticsKey = "keyboardHapticsEnabled"
     static let fullAccessKey = "keyboardFullAccessConfirmed"
@@ -170,6 +175,7 @@ enum KeyboardPreferences {
     /// Values read on every keypress / hit-test. `reload()` refreshes this
     /// snapshot so the typing path never opens the App Group suite mid-tap.
     struct HotPathCache {
+        var smartPhonetic = SmartPhoneticConfiguration()
         var hapticsEnabled = false
         var hapticIntensity = 0.75
         var keyClicksEnabled = true
@@ -220,6 +226,7 @@ enum KeyboardPreferences {
         let spacing = keySpacing()
         let strength = hapticStrength()
         hotPath = HotPathCache(
+            smartPhonetic: smartPhoneticConfiguration(),
             hapticsEnabled: hapticsEnabled(),
             hapticIntensity: strength.intensity,
             keyClicksEnabled: keyClicksEnabled(),
@@ -264,6 +271,24 @@ enum KeyboardPreferences {
         guard let rawValue = defaults.string(forKey: layoutKey),
               let mode = SinhalaEngine.Mode(rawValue: rawValue) else { return .sls }
         return mode
+    }
+
+    static func smartPhoneticConfiguration() -> SmartPhoneticConfiguration {
+        .init(enabled: defaults.object(forKey: smartPhoneticV2Key) as? Bool ?? true,
+              options: .init(archaic: defaults.bool(forKey: v2ArchaicKey),
+                             repayaZwj: defaults.bool(forKey: v2RepayaKey),
+                             classical: defaults.bool(forKey: v2ClassicalKey),
+                             rakaransayaU: defaults.bool(forKey: v2RakaransayaKey)))
+    }
+
+    static func setSmartPhoneticConfiguration(_ value: SmartPhoneticConfiguration) {
+        let store = defaults
+        store.set(value.enabled, forKey: smartPhoneticV2Key)
+        store.set(value.options.archaic, forKey: v2ArchaicKey)
+        store.set(value.options.repayaZwj, forKey: v2RepayaKey)
+        store.set(value.options.classical, forKey: v2ClassicalKey)
+        store.set(value.options.rakaransayaU, forKey: v2RakaransayaKey)
+        refreshHotPathCache()
     }
 
     static func setSelectedMode(_ mode: SinhalaEngine.Mode) {
@@ -625,6 +650,7 @@ enum KeyboardPreferences {
     static func resetToDefaults() {
         let store = defaults
         let keys = [
+            smartPhoneticV2Key, v2ArchaicKey, v2RepayaKey, v2ClassicalKey, v2RakaransayaKey,
             layoutKey, emojiKey, hapticsKey, suggestionsKey, spaceAcceptsSuggestionKey, autocorrectKey, autocorrectProtectedWordsKey, autocorrectReversalCountsKey, emojiSuggestionsKey,
             clipboardHistoryKey,
             predictionProviderKey, doubleSpacePeriodKey, numberRowKey, topRowKey,

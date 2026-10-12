@@ -4,6 +4,10 @@ Native iOS host app and system-wide Custom Keyboard Extension. The keyboard proc
 
 ## Prediction data
 
+Smart Phonetic uses grammar-correct v2 by default, with classic typing and four
+spelling options available in Keyboard Settings. See
+[the implementation and validation notes](Docs/Smart-Phonetic-V2.md).
+
 The bundled next-word, trigram, and sentence-start models contain aggregate
 Sinhala counts derived from
 [Remeinium CleanSinhalaTextCorpus](https://huggingface.co/datasets/Remeinium/CleanSinhalaTextCorpus),

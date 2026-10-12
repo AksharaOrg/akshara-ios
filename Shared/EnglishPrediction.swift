@@ -1,5 +1,56 @@
 import Foundation
 import SQLite3
+#if canImport(UIKit)
+import UIKit
+#endif
+
+/// Frequency is useful for ranking, but corpus words (including "teh") are
+/// not a spelling authority. The extension uses the public UK system checker.
+protocol EnglishSpellingChecking {
+    func isCorrect(_ word: String) -> Bool
+    func guesses(for word: String) -> [String]
+    func completions(for prefix: String) -> [String]
+}
+
+enum EnglishSpelling {
+    static func systemBritishChecker() -> EnglishSpellingChecking? {
+        #if canImport(UIKit)
+        return UITextChecker.availableLanguages.contains("en_GB") ? BritishEnglishSpellingChecker() : nil
+        #else
+        return nil
+        #endif
+    }
+}
+
+#if canImport(UIKit)
+private final class BritishEnglishSpellingChecker: EnglishSpellingChecking {
+    private let checker = UITextChecker()
+    private var valid: [String: Bool] = [:]
+    private var corrections: [String: [String]] = [:]
+    // Access is serialized by EnglishPredictionProvider's lock.
+    func isCorrect(_ word: String) -> Bool {
+        if let cached = valid[word] { return cached }
+        let range = NSRange(location: 0, length: word.utf16.count)
+        let result = checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0,
+            wrap: false, language: "en_GB").location == NSNotFound
+        if valid.count >= 128 { valid.removeAll(keepingCapacity: true) }
+        valid[word] = result
+        return result
+    }
+    func guesses(for word: String) -> [String] {
+        if let cached = corrections[word] { return cached }
+        let result = Array((checker.guesses(forWordRange: NSRange(location: 0, length: word.utf16.count),
+            in: word, language: "en_GB") ?? []).prefix(8))
+        if corrections.count >= 64 { corrections.removeAll(keepingCapacity: true) }
+        corrections[word] = result
+        return result
+    }
+    func completions(for prefix: String) -> [String] {
+        Array((checker.completions(forPartialWordRange: NSRange(location: 0, length: prefix.utf16.count),
+            in: prefix, language: "en_GB") ?? []).prefix(24))
+    }
+}
+#endif
 
 enum KeyboardLanguage: String { case sinhala, english }
 
@@ -212,6 +263,7 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     let identifier = "english-wordfreq-v1"
     private let lock = NSLock()
     private let database: EnglishPredictionDatabase?
+    private let spellingChecker: EnglishSpellingChecking?
     private let defaults: UserDefaults
     private var learned: [String: Int]
     private var learnedNext: [String: [String: Int]]
@@ -227,8 +279,10 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     private static let nextKey = "prediction.english.followers.v1"
 
     init(databaseURL: URL? = Bundle.main.url(forResource: "EnglishPrediction", withExtension: "sqlite3"),
-         defaults: UserDefaults = KeyboardPreferences.defaults) {
+         defaults: UserDefaults = KeyboardPreferences.defaults,
+         spellingChecker: EnglishSpellingChecking? = EnglishSpelling.systemBritishChecker()) {
         database = EnglishPredictionDatabase(url: databaseURL)
+        self.spellingChecker = spellingChecker
         self.defaults = defaults
         learningGeneration = defaults.string(forKey: KeyboardPreferences.learningResetKey)
         learned = defaults.dictionary(forKey: Self.wordsKey) as? [String: Int] ?? [:]
@@ -236,13 +290,22 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     }
 
     static func isWord(_ word: String) -> Bool {
-        !word.isEmpty && word.utf8.allSatisfy { (65...90).contains($0) || (97...122).contains($0) }
+        guard let first = word.first, let last = word.last, first.isLetter, last.isLetter else { return false }
+        return word.unicodeScalars.allSatisfy {
+            (0x41...0x5A).contains($0.value) || (0x61...0x7A).contains($0.value) ||
+            (0xC0...0x24F).contains($0.value) && $0.properties.isAlphabetic ||
+            (0x300...0x36F).contains($0.value) || $0 == "'" || $0 == "’"
+        } && !word.contains("''") && !word.contains("’’")
+    }
+
+    private static func lookupWord(_ word: String) -> String {
+        word.lowercased().replacingOccurrences(of: "’", with: "'").precomposedStringWithCanonicalMapping
     }
 
     static func cased(_ word: String, like source: String) -> String {
         if !source.isEmpty, source.count > 1, source == source.uppercased() { return word.uppercased() }
         if source.first?.isUppercase == true { return word.prefix(1).uppercased() + word.dropFirst() }
-        return word == "i" ? "I" : word
+        return word == "i" || word.hasPrefix("i'") ? "I" + word.dropFirst() : word
     }
 
     func prepareIfNeeded() {
@@ -261,9 +324,9 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
         guard request.maximumResults > 0 else { return [] }
         if let cached = cache[request] { return cached }
-        let prefix = request.composingText.lowercased()
+        let prefix = Self.lookupWord(request.composingText)
         guard prefix.isEmpty || Self.isWord(prefix) else { return [] }
-        let previous = request.precedingWords.last?.lowercased() ?? ""
+        let previous = request.precedingWords.last.map(Self.lookupWord) ?? ""
         let localNext = learnedNext[previous] ?? [:]
         let bundled = database?.followers(after: previous, prefix: prefix, limit: 48) ?? []
         let bundledNext = Dictionary(uniqueKeysWithValues: bundled.map { ($0.word, $0.count) })
@@ -274,6 +337,10 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
                 pool.insert(completion.word)
                 bundledRanks[completion.word] = completion.rank
             }
+            for word in spellingChecker?.completions(for: prefix) ?? [] {
+                let word = Self.lookupWord(word)
+                if Self.isWord(word) { pool.insert(word) }
+            }
         } else {
             // No generic opener rail. Empty-prefix results require context.
             pool = Set(localNext.keys).union(bundledNext.keys)
@@ -282,6 +349,9 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         for word in pool {
             guard cancellation?.isCancelled != true else { return [] }
             guard word.hasPrefix(prefix) else { continue }
+            // Explicitly learned names remain available. Ordinary corpus
+            // mistakes must not appear as recommended UK spellings.
+            if learned[word] == nil, spellingChecker?.isCorrect(word) == false { continue }
             let personalContext = Double(localNext[word, default: 0]) * 100_000_000.0
             // A learned word may rank above the SQL shortlist. Preserve its
             // corpus score even if it was outside the first 48 followers.
@@ -303,10 +373,23 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
 
     func correction(for source: String) -> String? {
         lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
-        let word = source.lowercased()
-        guard word.count >= 3, Self.isWord(word), database?.rank(of: word) == nil, learned[word] == nil,
-              source == word || source == source.uppercased() || source == Self.cased(word, like: "A"),
+        let word = Self.lookupWord(source)
+        guard Self.isWord(word),
+              source == source.lowercased() || source == source.uppercased() || source == Self.cased(source.lowercased(), like: "A"),
               !KeyboardPreferences.isAutocorrectProtected(word) else { return nil }
+        if word == "i" { return source == "i" ? "I" : nil }
+        if let spellingChecker {
+            guard word.count >= 2, !spellingChecker.isCorrect(source) else { return nil }
+            // Native ordering supplies the preferred UK guess, but only a
+            // nearby spelling can replace automatically. Names, distant
+            // guesses and multiword replacements stay literal.
+            guard let guess = spellingChecker.guesses(for: source).first else { return nil }
+            let match = Self.lookupWord(guess)
+            guard Self.isWord(match), Self.oneEdit(word, match) || Self.adjacentSwap(word, match),
+                  spellingChecker.isCorrect(guess) else { return nil }
+            return Self.cased(match, like: source)
+        }
+        guard word.count >= 3, database?.rank(of: word) == nil, learned[word] == nil else { return nil }
         let pool = Set(database?.correctionCandidates(for: word) ?? [])
         // Never truncate the index before counting: that can make an ambiguous
         // typo appear to have a unique correction.
@@ -315,12 +398,37 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
         return Self.cased(match, like: source)
     }
 
+    /// The corpus fallback offers swaps for explicit selection. On iOS,
+    /// automatic swaps require the British system checker's preferred guess.
+    func transpositionSuggestions(for source: String, maximumResults: Int = 3,
+                                  cancellation: PredictionCancellationToken? = nil) -> [String] {
+        guard maximumResults > 0, cancellation?.isCancelled != true else { return [] }
+        lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
+        let word = source.lowercased()
+        if spellingChecker?.isCorrect(source) == true { return [] }
+        guard word.count >= 3, Self.isWord(word), database?.rank(of: word) == nil, learned[word] == nil,
+              source == word || source == source.uppercased() || source == Self.cased(word, like: "A"),
+              !KeyboardPreferences.isAutocorrectProtected(word) else { return [] }
+        let chars = Array(word)
+        var matches: [String: Int] = [:]
+        for index in 0..<(chars.count - 1) where chars[index] != chars[index + 1] {
+            guard cancellation?.isCancelled != true else { return [] }
+            var swapped = chars
+            swapped.swapAt(index, index + 1)
+            let candidate = String(swapped)
+            if let rank = database?.rank(of: candidate), spellingChecker?.isCorrect(candidate) != false { matches[candidate] = rank }
+        }
+        guard cancellation?.isCancelled != true else { return [] }
+        return matches.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value }
+            .prefix(maximumResults).map { Self.cased($0.key, like: source) }
+    }
+
     fileprivate static func deletionKeys(_ word: String) -> [String] {
         let chars = Array(word)
         return chars.indices.map { index in String(chars[..<index] + chars[(index + 1)...]) }
     }
     private static func oneEdit(_ a: String, _ b: String) -> Bool {
-        let a = Array(a.utf8), b = Array(b.utf8)
+        let a = Array(a), b = Array(b)
         guard abs(a.count - b.count) <= 1 else { return false }
         var i = 0, j = 0, edits = 0
         while i < a.count && j < b.count {
@@ -329,6 +437,14 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
             if a.count >= b.count { i += 1 }; if b.count >= a.count { j += 1 }
         }
         return edits + a.count - i + b.count - j == 1
+    }
+
+    private static func adjacentSwap(_ a: String, _ b: String) -> Bool {
+        let a = Array(a), b = Array(b)
+        guard a.count == b.count else { return false }
+        let differences = a.indices.filter { a[$0] != b[$0] }
+        guard differences.count == 2, differences[1] == differences[0] + 1 else { return false }
+        return a[differences[0]] == b[differences[1]] && a[differences[1]] == b[differences[0]]
     }
 
     func emoji(for prefix: String, bestWord: String?) -> [String] {
@@ -357,12 +473,13 @@ final class EnglishPredictionProvider: SinhalaPredictionProviding {
     func recordCommittedWord(_ word: String, after precedingWord: String?) { record(word, after: precedingWord, boost: 1) }
     private func record(_ source: String, after previous: String?, boost: Int) {
         lock.lock(); defer { lock.unlock() }; synchronizeLearningResetLocked()
-        let word = source.lowercased()
+        let word = Self.lookupWord(source)
         guard Self.isWord(word) else { return }
+        if boost == 1, spellingChecker?.isCorrect(source) == false { return }
         hasUnsavedLearning = true
         learningRevision += 1
         learned[word] = min(10000, learned[word, default: 0] + boost)
-        if let previous = previous?.lowercased(), Self.isWord(previous) {
+        if let previous = previous.map(Self.lookupWord), Self.isWord(previous) {
             learnedNext[previous, default: [:]][word] = min(10000, (learnedNext[previous]?[word] ?? 0) + boost)
             if let values = learnedNext[previous], values.count > 48 {
                 learnedNext[previous] = Dictionary(uniqueKeysWithValues: values.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(48).map { ($0.key, $0.value) })

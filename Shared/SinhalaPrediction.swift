@@ -29,11 +29,39 @@ struct SinhalaPredictionRequest: Hashable {
     let composingText: String
     let precedingWords: [String]
     let maximumResults: Int
+    var phoneticSource: String? = nil
+    var phoneticConfiguration: SmartPhoneticConfiguration = .classic
+    var exactPhoneticOnly = false
+
+    /// An empty composing word still has input after a committed word.
+    /// Empty fields have neither and should not display sentence openers.
+    var hasInputContext: Bool { !composingText.isEmpty || !precedingWords.isEmpty }
 }
 
 struct SinhalaPredictionCandidate: Equatable {
     let text: String
     let score: Double
+}
+
+/// While a word is being composed, continuing its spelling takes precedence
+/// over changing letters already typed. Corrections remain available afterwards.
+enum SinhalaCandidateRanking {
+    static func words(composingText: String, ranked: [String], corrections: [String], maximumResults: Int = 3) -> [String] {
+        guard maximumResults > 0 else { return [] }
+        guard !composingText.isEmpty else { return Array(ranked.prefix(maximumResults)) }
+        func continues(_ word: String) -> Bool {
+            SinhalaEngine.hasUnicodeScalarPrefix(word, composingText)
+        }
+        let ordered = ranked.filter(continues) + corrections.filter(continues)
+            + corrections.filter { !continues($0) } + ranked.filter { !continues($0) }
+        var seen = Set<String>()
+        var result: [String] = []
+        for word in ordered where !word.isEmpty && seen.insert(word).inserted {
+            result.append(word)
+            if result.count == maximumResults { break }
+        }
+        return result
+    }
 }
 
 /// The seam for an offline trie model, an eventual Core ML model, or a model
@@ -47,6 +75,10 @@ protocol SinhalaPredictionProviding: AnyObject {
                         from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
                         cancellation: PredictionCancellationToken?) -> [String: Double]
     func recordSelection(_ word: String, after precedingWord: String?)
+    func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
+                        from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
+                        configuration: SmartPhoneticConfiguration,
+                        cancellation: PredictionCancellationToken?) -> [String: Double]
     /// Called for words the keyboard itself commits, not text merely observed
     /// in the host field. This lets the personal model learn naturally while
     /// keeping the extension's privacy boundary intact.
@@ -64,6 +96,13 @@ protocol SinhalaPredictionProviding: AnyObject {
 }
 
 extension SinhalaPredictionProviding {
+    func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
+                        from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
+                        configuration: SmartPhoneticConfiguration,
+                        cancellation: PredictionCancellationToken?) -> [String: Double] {
+        nextKeyWeights(latinBuffer: latinBuffer, mode: mode, shifted: shifted,
+                       from: ranked, precedingWords: precedingWords, cancellation: cancellation)
+    }
     func candidates(for request: SinhalaPredictionRequest, cancellation: PredictionCancellationToken?) -> [SinhalaPredictionCandidate] {
         guard cancellation?.isCancelled != true else { return [] }
         let result = candidates(for: request)
@@ -132,10 +171,10 @@ final class SinhalaPredictionProviderRegistry {
 
     /// Prefetch the bundled dictionary off the main thread so the first
     /// keystroke does not pay the TSV parse cost.
-    func prepareBundledModelsInBackground() {
+    func prepareBundledModelsInBackground(phonetic: Bool = false) {
         let provider = activeProvider as? SinhalaFrequencyListPredictionProvider
         DispatchQueue.global(qos: .utility).async {
-            provider?.prepareBundledModelsIfNeeded()
+            provider?.prepareBundledModelsIfNeeded(phonetic: phonetic)
         }
     }
 }
@@ -271,6 +310,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     /// learned model is small but mutable, so guard it when a selection and a
     /// background lookup happen at the same time.
     private let modelLock = NSLock()
+    private var soundLexicon: SinhalaSoundLexicon?
     // UserDefaults is relatively expensive in an input extension. Keep the
     // small personal model in memory and write it only after an intentional
     // candidate selection.
@@ -315,11 +355,17 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     /// Loads the bundled frequency and bigram tables once. Safe to call from
     /// the prediction queue; no-ops after the first successful load.
-    func prepareBundledModelsIfNeeded() {
+    func prepareBundledModelsIfNeeded(phonetic: Bool = false) {
         modelLock.lock()
         defer { modelLock.unlock() }
         synchronizeLearningResetLocked()
         loadBundledModelsLocked()
+        if phonetic { prepareSoundLexiconLocked() }
+    }
+
+    private func prepareSoundLexiconLocked() {
+        guard soundLexicon == nil else { return }
+        soundLexicon = SinhalaSoundLexicon(rows: entries.map { ($0.word, $0.frequency) })
     }
 
     private func loadBundledModelsLocked() {
@@ -358,6 +404,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         synchronizeLearningResetLocked()
         loadBundledModelsLocked()
         guard cancellation?.isCancelled != true else { return [] }
+        if request.phoneticSource != nil, request.phoneticConfiguration.enabled { prepareSoundLexiconLocked() }
         var processed = 0
         func shouldCancel() -> Bool {
             processed += 1
@@ -367,11 +414,20 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         let prefix = request.composingText
         let maximumResults = max(request.maximumResults, 0)
         guard maximumResults > 0 else { return [] }
-        let previous = request.precedingWords.last
+        let observedPrevious = request.precedingWords.last
+        func dictionaryContext(_ word: String) -> String {
+            request.phoneticConfiguration.enabled
+                ? soundLexicon?.dictionaryWord(for: word, options: request.phoneticConfiguration.options) ?? word
+                : word
+        }
+        let previous = observedPrevious.map(dictionaryContext)
         let earlier = request.precedingWords.count >= 2
-            ? request.precedingWords[request.precedingWords.count - 2]
+            ? dictionaryContext(request.precedingWords[request.precedingWords.count - 2])
             : nil
-        let learnedNext = previous.flatMap { learnedBigrams[$0] } ?? [:]
+        var learnedNext = previous.flatMap { learnedBigrams[$0] } ?? [:]
+        if let observedPrevious, observedPrevious != previous {
+            learnedNext.merge(learnedBigrams[observedPrevious] ?? [:], uniquingKeysWith: max)
+        }
         let bundledNext = previous.flatMap { bundledBigrams?.followers(for: $0, cancellation: cancellation) } ?? []
         let trigramNext: [NextWord]
         if let earlier, let previous {
@@ -392,6 +448,20 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         let hasContinuations = previous != nil && (
             !bundledNext.isEmpty || !learnedNext.isEmpty || !trigramNext.isEmpty
         )
+        let phonetic = request.phoneticSource.flatMap { source -> (String, SmartPhoneticV2.Options)? in
+            request.phoneticConfiguration.enabled && !source.isEmpty ? (source, request.phoneticConfiguration.options) : nil
+        }
+        var pinnedWord: String?
+        if let (source, options) = phonetic, let lexicon = soundLexicon {
+            let spelled = SmartPhoneticV2.transliterate(source, options: options)
+            if SinhalaSoundLexicon.isExplicit(source),
+               (SinhalaSoundLexicon.isLoneVowel(spelled) || learnedWords[spelled] != nil
+                || lexicon.exact(SinhalaSoundLexicon.soundKey(spelled)).contains(where: {
+                    SinhalaSoundLexicon.restyle($0, options: options) == spelled
+                })) {
+                pinnedWord = spelled
+            }
+        }
 
         // Keep only the requested winners while scanning. The old path built
         // and sorted up to 4,096 temporary candidates on every keypress.
@@ -400,23 +470,32 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         var considered = Set<String>()
         considered.reserveCapacity(maximumResults * 16)
 
-        func consider(word: String, frequency: Int, unigramWeight: Double) {
-            guard word != prefix else { return }
+        func consider(word: String, frequency: Int, unigramWeight: Double, canonicalWord: String? = nil) {
+            guard word != prefix || phonetic != nil else { return }
             // Next-word ranking should move forward. Repeating the word that
             // was just committed makes a suggestion chain look stuck.
             if prefix.isEmpty, word == previous { return }
             guard considered.insert(word).inserted else { return }
-            let score = unigramWeight * log(Double(max(frequency, 1)) + 1)
-                + Double(learnedWords[word, default: 0]) * 1.00
-                + Double(learnedNext[word, default: 0]) * 1.80
+            let canonical = canonicalWord ?? word
+            let baseScore = unigramWeight * log(Double(max(frequency, 1)) + 1)
+                + Double(max(learnedWords[canonical, default: 0], learnedWords[word, default: 0])) * 1.00
+                + Double(max(learnedNext[canonical, default: 0], learnedNext[word, default: 0])) * 1.80
                 // Corpus context is a stronger next-word signal than global
                 // word frequency, while local choices still adapt the result.
-                + log(Double(bundledCounts[word, default: 0]) + 1) * 1.70
-                + log(Double(trigramCounts[word, default: 0]) + 1) * 2.20
-                + recencyScore(for: word)
+                + log(Double(bundledCounts[canonical, default: 0]) + 1) * 1.70
+                + log(Double(trigramCounts[canonical, default: 0]) + 1) * 2.20
+                + max(recencyScore(for: canonical), recencyScore(for: word))
+            let score = word == pinnedWord ? Double.greatestFiniteMagnitude : baseScore
             let candidate = SinhalaPredictionCandidate(text: word, score: score)
             let insertionIndex = ranked.firstIndex {
-                candidate.score > $0.score
+                // Keep this priority inside the bounded ranking, otherwise a
+                // frequent learned near-match can evict a completion entirely.
+                if phonetic == nil, !prefix.isEmpty {
+                    let candidateContinues = hasUnicodeScalarPrefix(candidate.text, prefix)
+                    let currentContinues = hasUnicodeScalarPrefix($0.text, prefix)
+                    if candidateContinues != currentContinues { return candidateContinues }
+                }
+                return candidate.score > $0.score
                     || (candidate.score == $0.score && candidate.text < $0.text)
             } ?? ranked.endIndex
             guard insertionIndex < maximumResults || ranked.count < maximumResults else { return }
@@ -424,7 +503,40 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             if ranked.count > maximumResults { ranked.removeLast() }
         }
 
-        if prefix.isEmpty {
+        if let (source, options) = phonetic, let lexicon = soundLexicon {
+            let spelled = SmartPhoneticV2.transliterate(source, options: options)
+            let key = SinhalaSoundLexicon.soundKey(spelled)
+            // Whole-word sound matches are eligible for Space. Completions are suggestions only.
+            for word in lexicon.exact(key) {
+                if shouldCancel() { return [] }
+                consider(word: SinhalaSoundLexicon.restyle(word, options: options),
+                         frequency: lexicon.counts[word, default: 0], unigramWeight: 1.0, canonicalWord: word)
+            }
+            if let pinnedWord {
+                consider(word: pinnedWord, frequency: lexicon.counts[pinnedWord, default: 0], unigramWeight: 1.0)
+            }
+            for (word, count) in learnedWords where SinhalaSoundLexicon.soundKey(word) == key {
+                if shouldCancel() { return [] }
+                consider(word: SinhalaSoundLexicon.restyle(word, options: options),
+                         frequency: unigramFrequency[word, default: count], unigramWeight: 1.0, canonicalWord: word)
+            }
+            if !request.exactPhoneticOnly {
+                // Rank completions separately: an exact sound match must always precede them.
+                let exactRanked = ranked
+                ranked = []
+                for word in lexicon.prefix(SinhalaSoundLexicon.withoutTrailingHal(key)) {
+                    if shouldCancel() { return [] }
+                    consider(word: SinhalaSoundLexicon.restyle(word, options: options),
+                             frequency: lexicon.counts[word, default: 0], unigramWeight: 1.0, canonicalWord: word)
+                }
+                for (word, count) in learnedWords where SinhalaEngine.hasUnicodeScalarPrefix(
+                    SinhalaSoundLexicon.soundKey(word), SinhalaSoundLexicon.withoutTrailingHal(key)) {
+                    if shouldCancel() { return [] }
+                    consider(word: SinhalaSoundLexicon.restyle(word, options: options), frequency: count, unigramWeight: 1.0, canonicalWord: word)
+                }
+                ranked = Array((exactRanked + ranked).prefix(maximumResults))
+            }
+        } else if prefix.isEmpty {
             if hasContinuations {
                 // Contextual next-word should stay on actual followers. Mixing
                 // in globally common words made the rail stall on ඇති / වන.
@@ -474,6 +586,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         // corpus's initial frequency slice. Include them without a full sort.
         let continuationUnigramWeight: Double = prefix.isEmpty && hasContinuations ? 0.20 : 1.0
         for (word, count) in learnedNext {
+            if phonetic != nil { break }
             if shouldCancel() { return [] }
             guard prefix.isEmpty || hasUnicodeScalarPrefix(word, prefix) else { continue }
             consider(
@@ -483,6 +596,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             )
         }
         for next in bundledNext {
+            if phonetic != nil { break }
             if shouldCancel() { return [] }
             guard prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) else { continue }
             consider(
@@ -492,6 +606,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
             )
         }
         for next in trigramNext {
+            if phonetic != nil { break }
             if shouldCancel() { return [] }
             guard prefix.isEmpty || hasUnicodeScalarPrefix(next.word, prefix) else { continue }
             consider(
@@ -522,6 +637,15 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
                         from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
                         cancellation: PredictionCancellationToken?) -> [String: Double] {
+        nextKeyWeights(latinBuffer: latinBuffer, mode: mode, shifted: shifted,
+                       from: ranked, precedingWords: precedingWords,
+                       configuration: KeyboardPreferences.hotPath.smartPhonetic, cancellation: cancellation)
+    }
+
+    func nextKeyWeights(latinBuffer: String, mode: SinhalaEngine.Mode, shifted: Bool,
+                        from ranked: [SinhalaPredictionCandidate], precedingWords: [String],
+                        configuration: SmartPhoneticConfiguration,
+                        cancellation: PredictionCancellationToken?) -> [String: Double] {
         let interval = KeyboardPerformance.begin("NextKeyWeights")
         defer { KeyboardPerformance.end(interval) }
         guard cancellation?.isCancelled != true, mode != .sls, !latinBuffer.isEmpty, !ranked.isEmpty else { return [:] }
@@ -529,19 +653,21 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
         defer { modelLock.unlock() }
         synchronizeLearningResetLocked()
         var scores: [String: Double] = [:]
-        let currentRendered = SinhalaEngine.transliterate(latinBuffer, mode: mode)
+        let currentRendered = SinhalaEngine.transliterate(latinBuffer, mode: mode, configuration: configuration)
         var rewriteCache: [String: Double] = [:]
         for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
             guard cancellation?.isCancelled != true else { return [:] }
             let lower = String(UnicodeScalar(scalar)!)
             let source = shifted ? lower.uppercased() : lower
             let nextRendered = Self.strippingTrailingVirama(
-                SinhalaEngine.transliterate(latinBuffer + source, mode: mode)
+                SinhalaEngine.transliterate(latinBuffer + source, mode: mode, configuration: configuration)
             )
             guard !nextRendered.isEmpty, nextRendered != currentRendered else { continue }
             var score = 0.0
-            for candidate in ranked where SinhalaEngine.hasUnicodeScalarPrefix(candidate.text, nextRendered) {
-                score += candidate.score
+            for candidate in ranked where SinhalaEngine.hasUnicodeScalarPrefix(
+                mode == .smartPhonetic && configuration.enabled ? SinhalaSoundLexicon.soundKey(candidate.text) : candidate.text,
+                mode == .smartPhonetic && configuration.enabled ? SinhalaSoundLexicon.soundKey(nextRendered) : nextRendered) {
+                score += min(candidate.score, 100)
             }
             // Some roman sequences rewrite the rendered prefix completely
             // (`s` + `h` is the common case). A tiny binary-search probe keeps
@@ -551,7 +677,14 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
                 if let cached = rewriteCache[nextRendered] {
                     score = cached
                 } else {
-                    score = lightweightCompletionScore(for: nextRendered, cancellation: cancellation)
+                    if mode == .smartPhonetic, configuration.enabled, let lexicon = soundLexicon {
+                        let key = SinhalaSoundLexicon.soundKey(nextRendered)
+                        let exact = lexicon.exact(key).map { lexicon.counts[$0, default: 0] }.max()
+                        let partial = lexicon.prefix(key, limit: 8).map { lexicon.counts[$0, default: 0] }.max() ?? 0
+                        score = exact.map { log(Double($0) + 1) } ?? log(Double(partial) + 1) * 0.4
+                    } else {
+                        score = lightweightCompletionScore(for: nextRendered, cancellation: cancellation)
+                    }
                     rewriteCache[nextRendered] = score
                 }
             }
@@ -718,7 +851,7 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
     }
 
     private func isSinhalaWord(_ text: String) -> Bool {
-        !text.isEmpty && text.unicodeScalars.allSatisfy { (0x0D80...0x0DFF).contains($0.value) }
+        SinhalaEngine.isSinhalaWord(text)
     }
 
     private func firstIndex(atOrAfter prefix: String) -> Int {
@@ -810,8 +943,8 @@ final class SinhalaFrequencyListPredictionProvider: SinhalaPredictionProviding {
 
     private static func isValidModelWord(_ value: Substring) -> Bool {
         let scalars = value.unicodeScalars
-        return !scalars.isEmpty && scalars.count <= 24
-            && scalars.allSatisfy { (0x0D80...0x0DFF).contains($0.value) }
+        return !scalars.isEmpty && scalars.filter { $0.value != 0x200D && $0.value != 0x200C }.count <= 24
+            && SinhalaEngine.isSinhalaWord(String(value))
     }
 
     private static func mostFrequentEntries(from values: [Entry], maximum: Int) -> [Entry] {

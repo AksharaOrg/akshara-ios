@@ -11,9 +11,11 @@ enum ClipboardHistoryStore {
 }
 EOF
 
-swiftc -O \
+swiftc -module-cache-path "$temporary_directory/module-cache" -O \
   "$root/Shared/KeyboardRuntime.swift" \
   "$root/Shared/SinhalaEngine.swift" \
+  "$root/Shared/SmartPhoneticV2.swift" \
+  "$root/Shared/SinhalaSoundLexicon.swift" \
   "$root/Shared/KeyboardPreferences.swift" \
   "$root/Shared/SinhalaPrediction.swift" \
   "$root/Shared/EnglishPrediction.swift" \

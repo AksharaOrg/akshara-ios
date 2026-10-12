@@ -16,7 +16,9 @@ enum SinhalaEngine {
             case .phonetic:
                 return "Latin converts to Sinhala as you type."
             case .smartPhonetic:
-                return "Looser phonetic spelling with suggestions."
+                return KeyboardPreferences.hotPath.smartPhonetic.enabled
+                    ? "Grammar-correct Sinhala spelling with suggestions."
+                    : "Classic phonetic spelling with suggestions."
             }
         }
     }
@@ -157,14 +159,69 @@ enum SinhalaEngine {
                 continue
             }
             // Direct combining marks follow their base in the output.
-            if scalar.value == 0xE004 { output += "්‍ර"; i += 1; continue }
-            if scalar.value == 0xE005 { output += "්‍ය"; i += 1; continue }
+            if scalar.value == 0xE004 { appendSLSJoin("ර", to: &output); i += 1; continue }
+            if scalar.value == 0xE005 { appendSLSJoin("ය", to: &output); i += 1; continue }
             if scalar.value == 0xE002 { output += "ර්‍"; i += 1; continue }
-            if scalar.value == 0xE000 || scalar.value == 0xE001 || scalar.value == 0xE003 { i += 1; continue }
+            if scalar.value == 0xE000 || scalar.value == 0xE001 {
+                if i + 1 < scalars.count, isConsonant(scalars[i + 1]) {
+                    appendSLSJoin(String(scalars[i + 1]), to: &output); i += 2
+                } else {
+                    // Retain a finished vowel until the join's following
+                    // consonant arrives; otherwise it would sit between the
+                    // hal/joiner and the second consonant in the live text.
+                    if output.unicodeScalars.last.map({ !(0x0DCF...0x0DDF).contains($0.value) }) ?? true {
+                        appendSLSJoin("", to: &output)
+                    }
+                    i += 1
+                }
+                continue
+            }
+            if scalar.value == 0xE003 { i += 1; continue }
             output.unicodeScalars.append(scalar)
             i += 1
         }
         return output.precomposedStringWithCanonicalMapping
+    }
+
+    /// A join may be selected after a hal or vowel. Attach it to the base
+    /// without duplicating the hal, and keep vowel signs on the whole cluster.
+    private static func appendSLSJoin(_ consonant: String, to output: inout String) {
+        var scalars = Array(output.unicodeScalars)
+        var vowels: [UnicodeScalar] = []
+        while let last = scalars.last, (0x0DCF...0x0DDF).contains(last.value) || last.value == 0x0DF2 || last.value == 0x0DF3 {
+            vowels.insert(scalars.removeLast(), at: 0)
+        }
+        if scalars.last?.value == 0x200D { scalars.removeLast() }
+        if scalars.last?.value == 0x0DCA { scalars.removeLast() }
+        output = String(String.UnicodeScalarView(scalars)) + "්‍" + consonant
+        output.unicodeScalars.append(contentsOf: vowels)
+    }
+
+    struct SLSClusterEdit {
+        let start: Int
+        let source: String
+        let rendered: String
+    }
+
+    /// Recompose only the last syllable owned by this keyboard. Never reach
+    /// across a host edit or an earlier word to find a base for a join key.
+    static func slsClusterEdit(entries: [String], sources: [String], adding suffix: String) -> SLSClusterEdit? {
+        guard !entries.isEmpty, entries.count == sources.count else { return nil }
+        let join = ["\u{E000}", "\u{E001}", "\u{E002}", "\u{E004}", "\u{E005}"].contains(suffix)
+        let completingTouch = isSinhalaConsonant(suffix) &&
+            (sources.last?.hasSuffix("\u{E000}") == true || sources.last?.hasSuffix("\u{E001}") == true)
+        guard join || completingTouch else { return nil }
+        for index in entries.indices.reversed() {
+            if entries[index].unicodeScalars.contains(where: { (0x0D9A...0x0DC6).contains($0.value) }) {
+                let previous = sources[index...].joined()
+                let source = suffix == "\u{E002}" ? suffix + previous : previous + suffix
+                return .init(start: index, source: source, rendered: normalizeSLS(source))
+            }
+            guard entries[index].unicodeScalars.allSatisfy({
+                $0.value == 0x0DCA || $0.value == 0x200D || (0x0DCF...0x0DDF).contains($0.value)
+            }) else { return nil }
+        }
+        return nil
     }
 
     /// Rakaranshaya / yansaya / touching letters belong on the consonant before ෙ becomes ේ.
@@ -174,12 +231,12 @@ enum SinhalaEngine {
         while i < scalars.count {
             switch scalars[i].value {
             case 0xE004:
-                output += "්‍ර"; i += 1
+                appendSLSJoin("ර", to: &output); i += 1
             case 0xE005:
-                output += "්‍ය"; i += 1
+                appendSLSJoin("ය", to: &output); i += 1
             case 0xE000, 0xE001:
                 if i + 1 < scalars.count, isConsonant(scalars[i + 1]) {
-                    output += "්‍"
+                    appendSLSJoin("", to: &output)
                     output.unicodeScalars.append(scalars[i + 1])
                     i += 2
                 } else {
@@ -194,6 +251,13 @@ enum SinhalaEngine {
 
     static func isSinhalaConsonant(_ text: String) -> Bool {
         text.unicodeScalars.first.map { (0x0D9A...0x0DC6).contains($0.value) } ?? false
+    }
+
+    static func isSinhalaWord(_ text: String) -> Bool {
+        text.unicodeScalars.contains { (0x0D80...0x0DFF).contains($0.value) }
+            && text.unicodeScalars.allSatisfy {
+                (0x0D80...0x0DFF).contains($0.value) || $0.value == 0x200D || $0.value == 0x200C
+            }
     }
 
     static func isIndependentVowel(_ text: String) -> Bool {
@@ -247,8 +311,12 @@ enum SinhalaEngine {
         return true
     }
 
-    static func transliterate(_ source: String, mode: Mode) -> String {
+    static func transliterate(_ source: String, mode: Mode,
+                              configuration: SmartPhoneticConfiguration = KeyboardPreferences.hotPath.smartPhonetic) -> String {
         if mode == .sls { return normalizeSLS(source) }
+        if mode == .smartPhonetic, configuration.enabled {
+            return SmartPhoneticV2.transliterate(source, options: configuration.options)
+        }
         if mode == .smartPhonetic { return transliterateSmartPhonetic(source) }
         var output = ""
         var index = source.startIndex

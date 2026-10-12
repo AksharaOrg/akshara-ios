@@ -432,13 +432,186 @@ private struct SettingLabel: View {
     }
 }
 
+/// Names and descriptions are shared by the settings rows and their search index.
+private enum KeyboardSetting: String, CaseIterable, Identifiable {
+    case layout
+    case englishKeyboard
+    case smartPhonetic
+    case emojiKey
+    case emojiSkinTone
+    case suggestions
+    case autocorrect
+    case savedWords
+    case emojiSuggestions
+    case clipboard
+    case haptics
+    case clearLearnedWords
+    case spaceAcceptsSuggestion
+    case characterPreview
+    case topRow
+    case doubleSpacePeriod
+    case longPressPunctuation
+    case smartQuotes
+    case smartPunctuation
+    case englishOneWord
+    case deleteRepeat
+    case keySpacing
+    case oneHanded
+    case predictiveTouchAreas
+    case theme
+    case highContrast
+    case hideDottedCircles
+    case developer
+
+    var id: String { rawValue }
+
+    enum Group: String, CaseIterable, Identifiable {
+        case mode, features, typing, layout, appearance, developer
+        var id: String { rawValue }
+        var title: String? {
+            switch self {
+            case .mode: return nil
+            case .features: return "Keyboard Features"
+            case .typing: return "Typing"
+            case .layout: return "Layout"
+            case .appearance: return "Appearance"
+            case .developer: return nil
+            }
+        }
+    }
+
+    var group: Group {
+        switch self {
+        case .layout, .smartPhonetic: return .mode
+        case .englishKeyboard, .emojiKey, .emojiSkinTone, .suggestions, .autocorrect, .savedWords, .emojiSuggestions, .clipboard, .haptics: return .features
+        case .clearLearnedWords, .spaceAcceptsSuggestion, .characterPreview, .topRow, .doubleSpacePeriod, .longPressPunctuation, .smartQuotes, .smartPunctuation, .englishOneWord, .deleteRepeat: return .typing
+        case .keySpacing, .oneHanded, .predictiveTouchAreas: return .layout
+        case .theme, .highContrast, .hideDottedCircles: return .appearance
+        case .developer: return .developer
+        }
+    }
+
+    private var info: (title: String, detail: String, icon: String, color: UIColor, keywords: String) {
+        switch self {
+        case .layout:
+            return ("Layout", "Choose a Sinhala typing layout", "keyboard.fill", .systemBlue, "Sinhala සිංහල Wijesekara SLS Phonetic Smart Phonetic transliteration typing mode")
+        case .smartPhonetic:
+            return ("Smart Phonetic Spelling", "Grammar-correct typing and spelling options", "character.cursor.ibeam", .systemBlue, "grammar spelling phonetic classic rakaransaya repaya classical archaic")
+        case .englishKeyboard:
+            return ("English Keyboard", "English (UK) spelling; switch beside the emoji key", "character.bubble.fill", .systemCyan, "English UK British Sinhala සිංහල language switch bilingual Latin")
+        case .emojiKey:
+            return ("Emoji Key", "Shows the emoji picker", "face.smiling.fill", .systemOrange, "emoji picker smiley")
+        case .emojiSkinTone:
+            return ("Emoji Skin Tone", "Default tone for compatible emoji", "hand.thumbsup.fill", .systemBrown, "emoji skin tone colour color default hands")
+        case .suggestions:
+            return ("Suggestions", "Shows word completions", "text.badge.plus", .systemIndigo, "prediction predictions completion dictionary words")
+        case .autocorrect:
+            return ("Autocorrect", "Corrects likely misspellings when you finish a word", "text.badge.checkmark", .systemTeal, "auto correct correction spelling typo misspelling")
+        case .savedWords:
+            return ("Saved Autocorrect Words", "Never correct these words; add your own", "bookmark.fill", .systemTeal, "dictionary protected protection exceptions names never correct add remove saved words")
+        case .emojiSuggestions:
+            return ("Emoji Suggestions", "Shows matching emoji in the third suggestion", "face.smiling", .systemOrange, "emoji predictions suggestions smiley")
+        case .clipboard:
+            return ("Clipboard History", "Shows a clipboard icon on the suggestion bar", "doc.on.clipboard", .systemCyan, "copy paste pinned clips history Full Access Allow Paste permission clear history")
+        case .haptics:
+            return ("Haptics", "Sound and haptic feedback", "waveform", .systemRed, "sound sounds click clicks feedback vibration vibrate haptic strength test Full Access")
+        case .clearLearnedWords:
+            return ("Clear Learned Words", "Deletes words and word pairs learned in Sinhala and English", "trash.fill", .systemRed, "reset forget learning learned dictionary personal words word pairs")
+        case .spaceAcceptsSuggestion:
+            return ("Space Accepts Suggestion", "Press Space to use the centre suggestion while typing.", "text.badge.plus", .systemIndigo, "space center centre suggestion accept prediction")
+        case .characterPreview:
+            return ("Character Preview", "Enlarges the pressed key", "textformat.size", .systemBlue, "bubble popup callout character preview enlarged")
+        case .topRow:
+            return ("Keyboard Top Row", "Above the letter keys", "rectangle.topthird.inset.filled", .systemGreen, "top row number numbers emoji none")
+        case .doubleSpacePeriod:
+            return ("Double-Space Period", "Inserts a period with two spaces", "textformat", .systemGray, "double space period full stop punctuation")
+        case .longPressPunctuation:
+            return ("Long-Press Punctuation", "Hold keys for related marks", "ellipsis.circle.fill", .systemPurple, "hold long press punctuation alternates marks")
+        case .smartQuotes:
+            return ("Smart Quotes", "Curly quotes while typing", "quote.closing", .systemMint, "curly straight quotes quotation apostrophe")
+        case .smartPunctuation:
+            return ("Smart Punctuation", "Trims spaces around marks; adds a space after . ? !", "textformat.abc", .systemPink, "spacing space punctuation automatic period")
+        case .englishOneWord:
+            return ("English for One Word", "Swipe up on Space for one Latin word", "character.bubble.fill", .systemCyan, "Smart Phonetic swipe space one English Latin word")
+        case .deleteRepeat:
+            return ("Delete Repeat", "Speed while holding Delete", "delete.left.fill", .systemRed, "backspace delete repeat speed hold slow standard fast")
+        case .keySpacing:
+            return ("Key Spacing", "Space between the keys", "arrow.left.and.right", .systemTeal, "spacing compact standard relaxed gaps width")
+        case .oneHanded:
+            return ("One-Handed", "Move the keyboard to one side", "hand.tap.fill", .systemPurple, "one handed onehanded left right centre center thumb position")
+        case .predictiveTouchAreas:
+            return ("Predictive Touch Areas", "Grow likely next letters; off keeps A, L, Z, M expansion", "sparkles", .systemOrange, "prediction touch areas hit targets mistouch accuracy")
+        case .theme:
+            return ("Theme", "System, light, or dark", "circle.lefthalf.filled", .systemGray, "appearance system light dark theme")
+        case .highContrast:
+            return ("Higher Key Contrast", "Stronger key borders and fills", "circle.lefthalf.striped.horizontal.inverse", .systemBrown, "higher high contrast accessibility borders fills visibility")
+        case .hideDottedCircles:
+            return ("Hide Dotted Circles", "Use clean Sinhala mark icons on keys and previews", "circle.dotted", .systemBlue, "dotted circles Sinhala සිංහල marks glyphs icons preview")
+        case .developer:
+            return ("Developer", "Touch areas, chrome, and try fields", "ladybug.fill", .systemMint, "developer debug touch areas chrome try fields Classic Liquid Glass")
+        }
+    }
+
+    func label(detail: String? = nil) -> SettingLabel {
+        SettingLabel(title: info.title, detail: detail ?? info.detail, icon: info.icon, color: info.color)
+    }
+
+    static func tokens(in query: String) -> [String] {
+        normalized(query).split(whereSeparator: \.isWhitespace).map(String.init)
+    }
+
+    func matches(_ tokens: [String]) -> Bool {
+        let text = Self.normalized([info.title, info.detail, info.keywords, group.title ?? ""].joined(separator: " "))
+        return tokens.allSatisfy { text.contains($0) }
+    }
+
+    private static func normalized(_ text: String) -> String {
+        String(text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " })
+    }
+}
+
+private struct SmartPhoneticSettingsView: View {
+    @Binding var configuration: SmartPhoneticConfiguration
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Grammar-correct Smart Phonetic", isOn: $configuration.enabled)
+                    .accessibilityIdentifier("smartPhoneticV2")
+            } footer: {
+                Text("Uses Sinhala spelling rules while you type, then chooses a sound-alike dictionary spelling on Space. Turn off to use classic Smart Phonetic. Your selected layout stays the same.")
+            }
+            if configuration.enabled {
+                Section("Spelling options") {
+                    Toggle("Write kruura as ක්‍රූර", isOn: $configuration.options.rakaransayaU)
+                        .accessibilityIdentifier("v2RakaransayaU")
+                    Toggle("Joined repaya · කර්‍ම", isOn: $configuration.options.repayaZwj)
+                        .accessibilityIdentifier("v2RepayaZwj")
+                    Toggle("Classical conjuncts · අක්‍ෂර", isOn: $configuration.options.classical)
+                        .accessibilityIdentifier("v2Classical")
+                    Toggle("Archaic letters", isOn: $configuration.options.archaic)
+                        .accessibilityIdentifier("v2Archaic")
+                }
+            }
+            Section {
+                Link("How grammar-correct spelling works", destination: URL(string: "https://srilals.github.io/Sinhala-Phonetic-Orthography/")!)
+            }
+        }
+        .navigationTitle("Smart Phonetic")
+        .aksharaFormChrome()
+    }
+}
+
 private struct KeyboardSettingsView: View {
+    @State private var searchText = ""
     @State private var confirmClearLearnedWords = false
     @State private var clearingLearnedWords = false
     @State private var clearLearningFailed = false
     @State private var showsDeveloperSettings = KeyboardPreferences.developerModeUnlocked()
     @State private var mode = KeyboardPreferences.selectedMode()
     @State private var emojiEnabled = KeyboardPreferences.emojiEnabled()
+    @State private var smartPhonetic = KeyboardPreferences.smartPhoneticConfiguration()
     @State private var emojiSkinTone = KeyboardPreferences.emojiSkinTone()
     @State private var suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
     @State private var spaceAcceptsSuggestionEnabled = KeyboardPreferences.spaceAcceptsSuggestionEnabled()
@@ -462,15 +635,37 @@ private struct KeyboardSettingsView: View {
 
     var body: some View {
         Form {
-            layoutModeSection
-            featuresSection
-            typingSection
-            layoutMetricsSection
-            appearanceSection
-            if showsDeveloperSettings {
-                developerSection
+            let settings = visibleSettings
+            ForEach(KeyboardSetting.Group.allCases) { group in
+                let rows = settings.filter { $0.group == group }
+                if !rows.isEmpty {
+                    Section {
+                        ForEach(rows) { setting in
+                            settingRow(setting)
+                        }
+                    } header: {
+                        if let title = group.title { Text(title) }
+                    }
+                }
+            }
+            if settings.isEmpty {
+                Section {
+                    VStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                        Text("No Settings Found").font(.headline)
+                        Text("Try a different name or keyword.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                    .accessibilityElement(children: .combine)
+                }
             }
         }
+        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search settings")
         .confirmationDialog("Clear Learned Words?", isPresented: $confirmClearLearnedWords, titleVisibility: .visible) {
             Button("Clear Learned Words", role: .destructive) {
                 clearingLearnedWords = true
@@ -497,6 +692,7 @@ private struct KeyboardSettingsView: View {
             KeyboardPreferences.reload()
             mode = KeyboardPreferences.selectedMode()
             emojiEnabled = KeyboardPreferences.emojiEnabled()
+            smartPhonetic = KeyboardPreferences.smartPhoneticConfiguration()
             emojiSkinTone = KeyboardPreferences.emojiSkinTone()
             suggestionsEnabled = KeyboardPreferences.suggestionsEnabled()
             spaceAcceptsSuggestionEnabled = KeyboardPreferences.spaceAcceptsSuggestionEnabled()
@@ -507,6 +703,7 @@ private struct KeyboardSettingsView: View {
         }
         .onChange(of: mode) { KeyboardPreferences.setSelectedMode($0) }
         .onChange(of: emojiEnabled) { KeyboardPreferences.setEmojiEnabled($0) }
+        .onChange(of: smartPhonetic) { KeyboardPreferences.setSmartPhoneticConfiguration($0) }
         .onChange(of: emojiSkinTone) { KeyboardPreferences.setEmojiSkinTone($0) }
         .onChange(of: suggestionsEnabled) { KeyboardPreferences.setSuggestionsEnabled($0) }
         .onChange(of: spaceAcceptsSuggestionEnabled) { KeyboardPreferences.setSpaceAcceptsSuggestionEnabled($0) }
@@ -529,208 +726,240 @@ private struct KeyboardSettingsView: View {
         .onChange(of: predictiveTouchAreas) { KeyboardPreferences.setPredictiveTouchAreas($0) }
     }
 
-    private var layoutModeSection: some View {
-        Section {
+    private var visibleSettings: [KeyboardSetting] {
+        let tokens = KeyboardSetting.tokens(in: searchText)
+        let available = KeyboardSetting.allCases.filter { $0 != .developer || showsDeveloperSettings }
+        if tokens.isEmpty {
+            return available.filter { setting in
+                switch setting {
+                case .smartPhonetic: return mode == .smartPhonetic
+                case .emojiSkinTone: return emojiEnabled
+                case .emojiSuggestions: return suggestionsEnabled
+                case .englishOneWord: return mode == .smartPhonetic
+                default: return true
+                }
+            }
+        }
+        var matches = Set(available.filter { $0.matches(tokens) })
+        // Keep hidden options discoverable, with the prerequisite alongside.
+        if matches.contains(.emojiSkinTone), !emojiEnabled { matches.insert(.emojiKey) }
+        if matches.contains(.emojiSuggestions), !suggestionsEnabled { matches.insert(.suggestions) }
+        if matches.contains(.englishOneWord), mode != .smartPhonetic { matches.insert(.layout) }
+        if matches.contains(.smartPhonetic), mode != .smartPhonetic { matches.insert(.layout) }
+        return available.filter { matches.contains($0) }
+    }
+
+    @ViewBuilder
+    private func settingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting.group {
+        case .mode: modeSettingRow(setting)
+        case .features: featuresSettingRow(setting)
+        case .typing: typingSettingRow(setting)
+        case .layout: layoutSettingRow(setting)
+        case .appearance: appearanceSettingRow(setting)
+        case .developer: developerSettingRow(setting)
+        }
+    }
+
+    @ViewBuilder
+    private func modeSettingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting {
+        case .smartPhonetic:
+            NavigationLink {
+                SmartPhoneticSettingsView(configuration: $smartPhonetic)
+            } label: {
+                setting.label(detail: smartPhonetic.enabled ? "Grammar-correct" : "Classic")
+            }
+        case .layout:
             Picker(selection: $mode) {
                 ForEach(SinhalaEngine.Mode.allCases) { value in
                     Text(value.rawValue).tag(value)
                 }
             } label: {
-                SettingLabel(title: "Layout", detail: mode.detail, icon: "keyboard.fill", color: .systemBlue)
+                setting.label(detail: mode.detail)
             }
             .pickerStyle(.navigationLink)
+        default: EmptyView()
         }
     }
 
-    private var featuresSection: some View {
-        Section("Keyboard Features") {
+    @ViewBuilder
+    private func featuresSettingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting {
+        case .englishKeyboard:
             Toggle(isOn: $englishKeyboardEnabled) {
-                SettingLabel(title: "English Keyboard", detail: "Switch between Sinhala and English beside the emoji key", icon: "character.bubble.fill", color: .systemCyan)
+                setting.label()
             }
+        case .emojiKey:
             Toggle(isOn: $emojiEnabled) {
-                SettingLabel(title: "Emoji Key", detail: "Shows the emoji picker", icon: "face.smiling.fill", color: .systemOrange)
+                setting.label()
             }
-            if emojiEnabled {
-                Picker(selection: $emojiSkinTone) {
-                    ForEach(KeyboardPreferences.EmojiSkinTone.allCases) { tone in
-                        Text("\(tone.preview)  \(tone.title)").tag(tone)
-                    }
-                } label: {
-                    SettingLabel(title: "Emoji Skin Tone", detail: "Default tone for compatible emoji", icon: "hand.thumbsup.fill", color: .systemBrown)
+        case .emojiSkinTone:
+            Picker(selection: $emojiSkinTone) {
+                ForEach(KeyboardPreferences.EmojiSkinTone.allCases) { tone in
+                    Text("\(tone.preview)  \(tone.title)").tag(tone)
                 }
-                .pickerStyle(.navigationLink)
+            } label: {
+                setting.label(detail: emojiEnabled ? nil : "Enable Emoji Key to choose a skin tone")
             }
+            .pickerStyle(.navigationLink)
+            .disabled(!emojiEnabled)
+        case .suggestions:
             Toggle(isOn: $suggestionsEnabled) {
-                SettingLabel(title: "Suggestions", detail: "Shows word completions", icon: "text.badge.plus", color: .systemIndigo)
+                setting.label()
             }
+        case .autocorrect:
             Toggle(isOn: $autocorrectEnabled) {
-                SettingLabel(
-                    title: "Autocorrect",
-                    detail: "Corrects likely misspellings when you finish a word",
-                    icon: "text.badge.checkmark",
-                    color: .systemTeal
-                )
+                setting.label()
             }
+        case .savedWords:
             NavigationLink {
                 SavedAutocorrectWordsView()
             } label: {
-                SettingLabel(
-                    title: "Saved Autocorrect Words",
-                    detail: "Never correct these words; add your own",
-                    icon: "bookmark.fill",
-                    color: .systemTeal
-                )
+                setting.label()
             }
-            if suggestionsEnabled {
-                Toggle(isOn: $emojiSuggestionsEnabled) {
-                    SettingLabel(
-                        title: "Emoji Suggestions",
-                        detail: "Shows matching emoji in the third suggestion",
-                        icon: "face.smiling",
-                        color: .systemOrange
-                    )
-                }
+        case .emojiSuggestions:
+            Toggle(isOn: $emojiSuggestionsEnabled) {
+                setting.label(detail: suggestionsEnabled ? nil : "Enable Suggestions to show matching emoji")
             }
+            .disabled(!suggestionsEnabled)
+        case .clipboard:
             NavigationLink {
                 ClipboardHistorySettingsView()
             } label: {
-                SettingLabel(
-                    title: "Clipboard History",
-                    detail: "Shows a clipboard icon on the suggestion bar",
-                    icon: "doc.on.clipboard",
-                    color: .systemCyan
-                )
+                setting.label()
             }
+        case .haptics:
             NavigationLink {
                 HapticsSettingsView()
             } label: {
-                SettingLabel(title: "Haptics", detail: "Sound and haptic feedback", icon: "waveform", color: .systemRed)
+                setting.label()
             }
+        default: EmptyView()
         }
     }
 
-    private var typingSection: some View {
-        Section {
+    @ViewBuilder
+    private func typingSettingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting {
+        case .clearLearnedWords:
             Button(clearingLearnedWords ? "Clearing Learned Words…" : "Clear Learned Words", role: .destructive) { confirmClearLearnedWords = true }
                 .disabled(clearingLearnedWords)
-
+        case .spaceAcceptsSuggestion:
             Toggle(isOn: $spaceAcceptsSuggestionEnabled) {
-                SettingLabel(title: "Space Accepts Suggestion", detail: "Press Space to use the centre suggestion while typing.", icon: "text.badge.plus", color: .systemIndigo)
+                setting.label()
             }
+        case .characterPreview:
             Toggle(isOn: $characterPreviewEnabled) {
-                SettingLabel(title: "Character Preview", detail: "Enlarges the pressed key", icon: "textformat.size", color: .systemBlue)
+                setting.label()
             }
+        case .topRow:
             Picker(selection: $topRow) {
                 ForEach(KeyboardPreferences.TopRow.allCases) { row in
                     Text(row.title).tag(row)
                 }
             } label: {
-                SettingLabel(title: "Keyboard Top Row", detail: "Above the letter keys", icon: "rectangle.topthird.inset.filled", color: .systemGreen)
+                setting.label()
             }
             .pickerStyle(.navigationLink)
             .accessibilityHint("Choose whether the row above the letters shows emoji, numbers, or nothing.")
+        case .doubleSpacePeriod:
             Toggle(isOn: $doubleSpacePeriodEnabled) {
-                SettingLabel(title: "Double-Space Period", detail: "Inserts a period with two spaces", icon: "textformat", color: .systemGray)
+                setting.label()
             }
+        case .longPressPunctuation:
             Toggle(isOn: $longPressPunctuationEnabled) {
-                SettingLabel(title: "Long-Press Punctuation", detail: "Hold keys for related marks", icon: "ellipsis.circle.fill", color: .systemPurple)
+                setting.label()
             }
+        case .smartQuotes:
             Toggle(isOn: $smartQuotesEnabled) {
-                SettingLabel(title: "Smart Quotes", detail: "Curly quotes while typing", icon: "quote.closing", color: .systemMint)
+                setting.label()
             }
+        case .smartPunctuation:
             Toggle(isOn: $smartPunctuationSpacingEnabled) {
-                SettingLabel(
-                    title: "Smart Punctuation",
-                    detail: "Trims spaces around marks; adds a space after . ? !",
-                    icon: "textformat.abc",
-                    color: .systemPink
-                )
+                setting.label()
             }
-            if mode == .smartPhonetic {
-                Toggle(isOn: $englishForOneWordEnabled) {
-                    SettingLabel(
-                        title: "English for One Word",
-                        detail: "Swipe up on Space for one Latin word",
-                        icon: "character.bubble.fill",
-                        color: .systemCyan
-                    )
-                }
+        case .englishOneWord:
+            Toggle(isOn: $englishForOneWordEnabled) {
+                setting.label(detail: mode == .smartPhonetic ? nil : "Choose Smart Phonetic in Layout to use this gesture")
             }
+            .disabled(mode != .smartPhonetic)
+        case .deleteRepeat:
             Picker(selection: $deleteRepeatSpeed) {
                 ForEach(KeyboardPreferences.DeleteRepeatSpeed.allCases) { value in
                     Text(value.title).tag(value)
                 }
             } label: {
-                SettingLabel(title: "Delete Repeat", detail: "Speed while holding Delete", icon: "delete.left.fill", color: .systemRed)
+                setting.label()
             }
             .pickerStyle(.navigationLink)
-        } header: {
-            Text("Typing")
+        default: EmptyView()
         }
     }
 
-    private var layoutMetricsSection: some View {
-        Section {
+    @ViewBuilder
+    private func layoutSettingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting {
+        case .keySpacing:
             Picker(selection: $keySpacing) {
                 ForEach(KeyboardPreferences.KeySpacing.allCases) { value in
                     Text(value.title).tag(value)
                 }
             } label: {
-                SettingLabel(title: "Key Spacing", detail: keySpacing.detail, icon: "arrow.left.and.right", color: .systemTeal)
+                setting.label(detail: keySpacing.detail)
             }
             .pickerStyle(.navigationLink)
+        case .oneHanded:
             Picker(selection: $oneHandedPosition) {
                 ForEach(KeyboardPreferences.OneHandedPosition.allCases) { value in
                     Text(value.title).tag(value)
                 }
             } label: {
-                SettingLabel(title: "One-Handed", detail: oneHandedPosition.detail, icon: "hand.tap.fill", color: .systemPurple)
+                setting.label(detail: oneHandedPosition.detail)
             }
             .pickerStyle(.navigationLink)
+        case .predictiveTouchAreas:
             Toggle(isOn: $predictiveTouchAreas) {
-                SettingLabel(
-                    title: "Predictive Touch Areas",
-                    detail: "Grow likely next letters; off keeps A, L, Z, M expansion",
-                    icon: "sparkles",
-                    color: .systemOrange
-                )
+                setting.label()
             }
-        } header: {
-            Text("Layout")
+        default: EmptyView()
         }
     }
 
-    private var appearanceSection: some View {
-        Section("Appearance") {
+    @ViewBuilder
+    private func appearanceSettingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting {
+        case .theme:
             Picker(selection: $appearance) {
                 ForEach(KeyboardPreferences.Appearance.allCases) { value in
                     Text(value.title).tag(value)
                 }
             } label: {
-                SettingLabel(title: "Theme", detail: "System, light, or dark", icon: "circle.lefthalf.filled", color: .systemGray)
+                setting.label()
             }
             .pickerStyle(.navigationLink)
+        case .highContrast:
             Toggle(isOn: $highContrastEnabled) {
-                SettingLabel(title: "Higher Key Contrast", detail: "Stronger key borders and fills", icon: "circle.lefthalf.striped.horizontal.inverse", color: .systemBrown)
+                setting.label()
             }
+        case .hideDottedCircles:
             Toggle(isOn: $hideDottedCirclesEnabled) {
-                SettingLabel(title: "Hide Dotted Circles", detail: "Use clean Sinhala mark icons on keys and previews", icon: "circle.dotted", color: .systemBlue)
+                setting.label()
             }
+        default: EmptyView()
         }
     }
 
-    private var developerSection: some View {
-        Section {
+    @ViewBuilder
+    private func developerSettingRow(_ setting: KeyboardSetting) -> some View {
+        switch setting {
+        case .developer:
             NavigationLink {
                 DeveloperDebugView()
             } label: {
-                SettingLabel(
-                    title: "Developer",
-                    detail: "Touch areas, chrome, and try fields",
-                    icon: "ladybug.fill",
-                    color: .systemMint
-                )
+                setting.label()
             }
+        default: EmptyView()
         }
     }
 }
@@ -752,6 +981,13 @@ private struct LayoutReferenceView: View {
                     ("ee / ai / oo", "ේ / ෛ / ෝ"), ("M / H", "ං / ඃ"),
                     ("y / r after a consonant", "්‍ය / ්‍ර")]
         case .smartPhonetic:
+            if KeyboardPreferences.hotPath.smartPhonetic.enabled {
+                return [("d / D / dh / Dh", "ද / ඩ / ධ / ඪ"),
+                        ("ai / au", "අයි / අවු"), ("E / Au", "ඓ / ඖ"),
+                        ("lankaava", "ලංකාව"), ("mrudu / kruura", "මෘදු / කෲර"),
+                        ("kramaya / vidyaava", "ක්‍රමය / විද්‍යාව"),
+                        ("honda + Space", "හොඳ"), ("kazda + Space", "කඳ")]
+            }
             return [("k / g / q", "ක / ග / ද"), ("t / T / th / thh", "ට / ඨ / ත / ථ"),
                     ("z + g/j/d/q", "ඟ / ඦ / ඬ / ඳ"), ("aa / Aa", "ා / ෑ"),
                     ("ru / ruu", "ෘ / ෲ"), ("M, x, or zn", "ං"),
@@ -1003,6 +1239,10 @@ private struct DiagnosticsView: View {
 }
 
 private struct OpenSourceNoticesView: View {
+    private static let orthographyLicense: String = {
+        guard let url = Bundle.main.url(forResource: "SinhalaOrthography-LICENSE", withExtension: "txt") else { return "" }
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }()
     var body: some View {
         List {
             Section("Akshara") {
@@ -1022,6 +1262,12 @@ private struct OpenSourceNoticesView: View {
             }
 
             Section("Language resources") {
+                NoticeView(
+                    title: "Sinhala Phonetic Orthography",
+                    detail: "Smart Phonetic v2 and its sound lexicon are Swift ports of this research and Akshara Android's implementation.\n\n" + Self.orthographyLicense,
+                    links: [("Source", URL(string: "https://github.com/SrilalS/Sinhala-Phonetic-Orthography")!),
+                            ("Research", URL(string: "https://srilals.github.io/Sinhala-Phonetic-Orthography/")!)]
+                )
                 NoticeView(
                     title: "A Word Frequency List for Sinhala",
                     detail: "SinhalaFrequencyModel.tsv is a compact derivative of the University of Moratuwa National Languages Processing Centre word-frequency list. It retains the first 40,000 high-frequency entries, filters malformed or overlong tokens, and is sorted for on-device prefix lookup.\n\nCitation: Aloka Fernando and Gihan Dias (2021), “Building a Linguistic Resource: A Word Frequency List for Sinhala,” ICON 2021, pages 606–610.",

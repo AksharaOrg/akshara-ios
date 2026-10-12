@@ -74,7 +74,11 @@ def verified_words(path: Path) -> list[str]:
             continue
         if float(confidence) < 0.8:
             continue
-        if not word or not all("\u0d80" <= scalar <= "\u0dff" for scalar in word):
+        # Joiners are part of Sinhala spelling (yansaya, rakaransaya,
+        # repaya and conjuncts), not delimiters or foreign characters.
+        if not any("\u0d80" <= scalar <= "\u0dff" for scalar in word) or not all(
+            "\u0d80" <= scalar <= "\u0dff" or scalar in "\u200c\u200d" for scalar in word
+        ):
             continue
         words.add(word)
     if not words:

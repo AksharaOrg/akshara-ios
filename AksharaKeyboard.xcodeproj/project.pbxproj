@@ -7,10 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-        B10000000000000000000003 /* SinhalaNextWordModel.offsets in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003; };
-        B10000000000000000000004 /* SinhalaAutocorrect.postings in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004; };
-		B10000000000000000000001 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
-		B10000000000000000000002 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
 		A10000000000000000000001 /* AksharaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AksharaApp.swift */; };
 		A10000000000000000000002 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* HomeView.swift */; };
 		A10000000000000000000003 /* SinhalaEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SinhalaEngine.swift */; };
@@ -41,6 +37,10 @@
 		A10000000000000000000023 /* SinhalaAutocorrection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000028 /* SinhalaAutocorrection.swift */; };
 		A10000000000000000000024 /* Resources/SinhalaAutocorrect.lexicon in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000029 /* Resources/SinhalaAutocorrect.lexicon */; };
 		A10000000000000000000025 /* Resources/SinhalaAutocorrectMetadata.json in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000002A /* Resources/SinhalaAutocorrectMetadata.json */; };
+		B10000000000000000000001 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* KeyboardRuntime.swift */; };
+		B10000000000000000000002 /* KeyboardRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* KeyboardRuntime.swift */; };
+		B10000000000000000000003 /* Resources/SinhalaNextWordModel.offsets in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* Resources/SinhalaNextWordModel.offsets */; };
+		B10000000000000000000004 /* Resources/SinhalaAutocorrect.postings in Resources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* Resources/SinhalaAutocorrect.postings */; };
 		E10000000000000000000001 /* EnglishPrediction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* EnglishPrediction.swift */; };
 		E10000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md */; };
 		E10000000000000000000005 /* Resources/english_next_word_model_attribution.md in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* Resources/english_next_word_model_attribution.md */; };
@@ -50,6 +50,11 @@
 		E10000000000000000000011 /* Resources/EnglishPrediction.sqlite3 in Resources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */; };
 		F10000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy */; };
 		F10000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy */; };
+		C10000000000000000000001 /* SmartPhoneticV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000001 /* SmartPhoneticV2.swift */; };
+		C10000000000000000000003 /* SmartPhoneticV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000001 /* SmartPhoneticV2.swift */; };
+		C10000000000000000000002 /* SinhalaSoundLexicon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000002 /* SinhalaSoundLexicon.swift */; };
+		C10000000000000000000004 /* SinhalaSoundLexicon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000002 /* SinhalaSoundLexicon.swift */; };
+		C10000000000000000000005 /* SinhalaOrthography-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000003 /* SinhalaOrthography-LICENSE.txt */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,9 +82,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-        B20000000000000000000003 /* SinhalaNextWordModel.offsets */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaNextWordModel.offsets; sourceTree = "<group>"; };
-        B20000000000000000000004 /* SinhalaAutocorrect.postings */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaAutocorrect.postings; sourceTree = "<group>"; };
-		B20000000000000000000001 /* KeyboardRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRuntime.swift; sourceTree = "<group>"; };
 		A20000000000000000000001 /* AksharaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AksharaApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* SinhalaEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaEngine.swift; sourceTree = "<group>"; };
@@ -107,6 +109,9 @@
 		A20000000000000000000028 /* SinhalaAutocorrection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaAutocorrection.swift; sourceTree = "<group>"; };
 		A20000000000000000000029 /* Resources/SinhalaAutocorrect.lexicon */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaAutocorrect.lexicon; sourceTree = "<group>"; };
 		A2000000000000000000002A /* Resources/SinhalaAutocorrectMetadata.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Resources/SinhalaAutocorrectMetadata.json; sourceTree = "<group>"; };
+		B20000000000000000000001 /* KeyboardRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardRuntime.swift; sourceTree = "<group>"; };
+		B20000000000000000000003 /* Resources/SinhalaNextWordModel.offsets */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaNextWordModel.offsets; sourceTree = "<group>"; };
+		B20000000000000000000004 /* Resources/SinhalaAutocorrect.postings */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/SinhalaAutocorrect.postings; sourceTree = "<group>"; };
 		E20000000000000000000001 /* EnglishPrediction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnglishPrediction.swift; sourceTree = "<group>"; };
 		E20000000000000000000002 /* Resources/english_wordfreq_25000.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Resources/english_wordfreq_25000.json; sourceTree = "<group>"; };
 		E20000000000000000000003 /* Resources/english_next_word_model.tsv */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/english_next_word_model.tsv; sourceTree = "<group>"; };
@@ -116,6 +121,9 @@
 		E20000000000000000000007 /* Resources/EnglishPrediction.sqlite3 */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/EnglishPrediction.sqlite3; sourceTree = "<group>"; };
 		F20000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Akshara/PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
 		F20000000000000000000002 /* AksharaKeyboard/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = AksharaKeyboard/PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
+		C20000000000000000000001 /* SmartPhoneticV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartPhoneticV2.swift; sourceTree = "<group>"; };
+		C20000000000000000000002 /* SinhalaSoundLexicon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SinhalaSoundLexicon.swift; sourceTree = "<group>"; };
+		C20000000000000000000003 /* SinhalaOrthography-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "SinhalaOrthography-LICENSE.txt"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -160,6 +168,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* AksharaApp.swift */,
+				C20000000000000000000003 /* SinhalaOrthography-LICENSE.txt */,
 				A20000000000000000000002 /* HomeView.swift */,
 				A20000000000000000000027 /* CrashReportManager.swift */,
 				A20000000000000000000010 /* Akshara.entitlements */,
@@ -172,8 +181,8 @@
 		A40000000000000000000003 /* AksharaKeyboard */ = {
 			isa = PBXGroup;
 			children = (
-                B20000000000000000000003 /* SinhalaNextWordModel.offsets */,
-                B20000000000000000000004 /* SinhalaAutocorrect.postings */,
+				B20000000000000000000003 /* Resources/SinhalaNextWordModel.offsets */,
+				B20000000000000000000004 /* Resources/SinhalaAutocorrect.postings */,
 				A20000000000000000000004 /* KeyboardViewController.swift */,
 				A20000000000000000000013 /* EmojiSearchIndex.json */,
 				A20000000000000000000015 /* Resources/SinhalaFrequencyModel.tsv */,
@@ -198,6 +207,8 @@
 			isa = PBXGroup;
 			children = (
 				B20000000000000000000001 /* KeyboardRuntime.swift */,
+				C20000000000000000000001 /* SmartPhoneticV2.swift */,
+				C20000000000000000000002 /* SinhalaSoundLexicon.swift */,
 				A20000000000000000000003 /* SinhalaEngine.swift */,
 				A20000000000000000000009 /* KeyboardPreferences.swift */,
 				A20000000000000000000025 /* ClipboardHistoryStore.swift */,
@@ -302,6 +313,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C10000000000000000000005 /* SinhalaOrthography-LICENSE.txt in Resources */,
 				A10000000000000000000009 /* Assets.xcassets in Resources */,
 				F10000000000000000000001 /* Akshara/PrivacyInfo.xcprivacy in Resources */,
 			);
@@ -318,8 +330,8 @@
 				E10000000000000000000004 /* Resources/english_wordfreq_25000_attribution.md in Resources */,
 				E10000000000000000000011 /* Resources/EnglishPrediction.sqlite3 in Resources */,
 				A10000000000000000000014 /* Resources/SinhalaNextWordModel.tsv in Resources */,
-                B10000000000000000000003 /* SinhalaNextWordModel.offsets in Resources */,
-                B10000000000000000000004 /* SinhalaAutocorrect.postings in Resources */,
+				B10000000000000000000003 /* Resources/SinhalaNextWordModel.offsets in Resources */,
+				B10000000000000000000004 /* Resources/SinhalaAutocorrect.postings in Resources */,
 				A10000000000000000000015 /* Resources/SinhalaTrigramModel.tsv in Resources */,
 				A10000000000000000000016 /* Resources/SinhalaSentenceStartModel.tsv in Resources */,
 				A1000000000000000000001B /* Resources/SinhalaEmojiIndex.json in Resources */,
@@ -338,6 +350,8 @@
 				A10000000000000000000001 /* AksharaApp.swift in Sources */,
 				A10000000000000000000002 /* HomeView.swift in Sources */,
 				A10000000000000000000021 /* CrashReportManager.swift in Sources */,
+				C10000000000000000000001 /* SmartPhoneticV2.swift in Sources */,
+				C10000000000000000000002 /* SinhalaSoundLexicon.swift in Sources */,
 				A10000000000000000000003 /* SinhalaEngine.swift in Sources */,
 				B10000000000000000000001 /* KeyboardRuntime.swift in Sources */,
 				A10000000000000000000007 /* KeyboardPreferences.swift in Sources */,
@@ -357,6 +371,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000004 /* KeyboardViewController.swift in Sources */,
+				C10000000000000000000003 /* SmartPhoneticV2.swift in Sources */,
+				C10000000000000000000004 /* SinhalaSoundLexicon.swift in Sources */,
 				A10000000000000000000005 /* SinhalaEngine.swift in Sources */,
 				B10000000000000000000002 /* KeyboardRuntime.swift in Sources */,
 				A10000000000000000000008 /* KeyboardPreferences.swift in Sources */,

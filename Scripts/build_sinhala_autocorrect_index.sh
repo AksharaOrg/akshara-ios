@@ -18,4 +18,6 @@ python3 "$root/Scripts/build_sinhala_autocorrect_index.py" \
   --metadata "$root/AksharaKeyboard/Resources/SinhalaAutocorrectMetadata.json"
 
 # Uses the same Unicode segmentation as the runtime correction index.
-swift "$root/Scripts/build_prediction_sidecars.swift" "$root/AksharaKeyboard/Resources"
+temporary_directory="$(mktemp -d)"
+trap 'rm -rf "$temporary_directory"' EXIT
+swift -module-cache-path "$temporary_directory/module-cache" "$root/Scripts/build_prediction_sidecars.swift" "$root/AksharaKeyboard/Resources"

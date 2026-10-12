@@ -22,7 +22,7 @@ temporary_file="${output_file}.tmp"
 # Exclude malformed/merged corpus tokens and exact blocked slurs before taking
 # the compact top slice, so the 40,000-row cap still fills with usable words.
 unzip -p "$source_archive" | perl -CSDA -ne '
-  if (/^([\x{0D80}-\x{0DFF}]+)\s+\S+\s+(\d+)/) {
+  if (/^([\x{0D80}-\x{0DFF}\x{200D}\x{200C}]+)\s+\S+\s+(\d+)/) {
     next if length($1) > 24;
     print "$1\t$2\n";
   }
@@ -38,3 +38,5 @@ unzip -p "$source_archive" | perl -CSDA -ne '
 ' | \
   head -n 40000 | LC_ALL=C sort -u > "$temporary_file"
 mv "$temporary_file" "$output_file"
+
+python3 "$root/Scripts/normalize_sinhala_prediction_models.py" "$root/AksharaKeyboard/Resources"
